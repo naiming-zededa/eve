@@ -151,6 +151,8 @@ type inputLogMetrics struct {
 	deviceLogInput      map[string]uint64 // map from source
 }
 
+var mydebugfile *os.File // XXX
+
 // Run is an entry point into running logmanager
 func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) int {
 	logger = loggerArg
@@ -180,6 +182,17 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		log.Fatal(err)
 	}
 
+	// XXX
+	var err error
+	if _, err = os.Stat("/persist/tmplog"); err != nil {
+		if err := os.MkdirAll("/persist/tmplog", 0755); err != nil {
+			log.Fatal(err)
+		}
+	}
+	mydebugfile, err = os.Create("/persist/tmplog/logmanager_debug.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
 	// Run a periodic timer so we always update StillRunning
 	stillRunning := time.NewTicker(25 * time.Second)
 	ps.StillRunning(agentName, warningTime, errorTime)
@@ -494,7 +507,9 @@ func parseAndSendSyslogEntries(ctx *loggerContext) {
 	server.SetHandler(handler)
 	server.ListenTCP("localhost:5140")
 	server.Boot()
+	idx := 0
 	for logParts := range logChannel {
+		idx++
 		logInfo, ok := agentlog.ParseLoginfo(logParts["content"].(string))
 		if !ok {
 			continue
@@ -543,6 +558,14 @@ func parseAndSendSyslogEntries(ctx *loggerContext) {
 			filename:  logInfo.Filename,
 			appUUID:   appUUID,
 			isAppLog:  appLog,
+		}
+		if idx%200 == 0 {
+			data := []byte(logParts["content"].(string))
+			mydebugfile.Write([]byte("===\n"))
+			mydebugfile.Write(data)
+			mydebugfile.Write([]byte("==1=\n"))
+			mydebugfile.Write([]byte(logContent))
+			mydebugfile.Sync()
 		}
 		ctx.logChan <- logMsg
 

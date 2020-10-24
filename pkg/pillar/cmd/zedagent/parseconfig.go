@@ -451,6 +451,10 @@ func parseAppInstanceConfig(config *zconfig.EdgeDevConfig,
 
 		// fill in the collect stats IP address of the App
 		appInstance.CollectStatsIPAddr = net.ParseIP(cfgApp.GetCollectStatsIPAddr())
+		if strings.Contains(appInstance.DisplayName, "test-instance1") && len(appInstance.CollectStatsIPAddr) == 0 { // XXX hack
+			appInstance.CollectStatsIPAddr = net.ParseIP("10.1.0.2")
+			log.Infof("parseAppInstanceConfig: containerStats, ip-addr %s", appInstance.CollectStatsIPAddr.String())
+		}
 
 		// fill the overlay/underlay config
 		parseAppNetworkConfig(&appInstance, cfgApp, config.Networks,

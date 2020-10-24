@@ -68,4 +68,15 @@ const (
 	DefaultVaultName = "Application Data Store"
 	//WatchdogFileDir is the dir to add .touch files for watchdog to monitor
 	WatchdogFileDir = "/run/watchdog/file"
+
+	// NewlogDir - newlog directories
+	NewlogDir = "/persist/newlog"
+	// NewlogCollectDir - newlog collect directory for temp log files
+	NewlogCollectDir = NewlogDir + "/collect"
+	// NewlogUploadDevDir - newlog device gzip file directory ready for upload
+	NewlogUploadDevDir = NewlogDir + "/devUpload"
+	// NewlogUploadAppDir - newlog app gzip file directory ready for upload
+	NewlogUploadAppDir = NewlogDir + "/appUpload"
+	// ForceNewlogFilename - transition flag to force using newlog
+	ForceNewlogFilename = IdentityDirname + "/Force-Use-Newlog"
 )
