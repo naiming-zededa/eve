@@ -1,0 +1,13 @@
+image: eve-newlog
+org: lfedge
+network: yes
+config:
+  binds:
+    - /dev:/dev
+    - /run:/run
+    - /persist:/persist
+    - /config:/config
+  capabilities:
+    - all
+  net: host
+  pid: host

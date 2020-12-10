@@ -353,6 +353,9 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 	if downloaderMetrics != nil {
 		cms = zedcloud.Append(cms, downloaderMetrics)
 	}
+	if loguploaderMetrics != nil {
+		cms = zedcloud.Append(cms, loguploaderMetrics)
+	}
 	for ifname, cm := range cms {
 		metric := metrics.ZedcloudMetric{IfName: ifname,
 			Failures:          cm.FailureCount,
@@ -384,6 +387,9 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 		ReportDeviceMetric.Zedcloud = append(ReportDeviceMetric.Zedcloud,
 			&metric)
 	}
+
+	// XXX temp debug until newlog metric API is defined
+	log.Tracef("publishMetrics: newlog-metrics %+v", newlogMetrics)
 
 	// collect CipherMetric from agents and report
 	// Collect zedcloud metrics from ourselves and other agents
@@ -907,6 +913,28 @@ func PublishAppInfoToZedCloud(ctx *zedagentContext, uuid string,
 				aiStatus.Key(), aiStatus.DisplayName,
 				ifname, name)
 			networkInfo.DevName = *proto.String(name)
+			niStatus := appIfnameToNetworkInstance(ctx, aiStatus, ifname)
+			if niStatus != nil {
+				networkInfo.NtpServers = []string{}
+				if niStatus.NtpServer != nil {
+					networkInfo.NtpServers = append(networkInfo.NtpServers, niStatus.NtpServer.String())
+				} else {
+					ntpServers := types.GetNTPServers(*deviceNetworkStatus,
+						niStatus.CurrentUplinkIntf)
+					for _, server := range ntpServers {
+						networkInfo.NtpServers = append(networkInfo.NtpServers, server.String())
+					}
+				}
+
+				networkInfo.DefaultRouters = []string{niStatus.Gateway.String()}
+				networkInfo.Dns = &info.ZInfoDNS{
+					DNSservers: []string{},
+				}
+				networkInfo.Dns.DNSservers = []string{}
+				for _, dnsServer := range niStatus.DnsServers {
+					networkInfo.Dns.DNSservers = append(networkInfo.Dns.DNSservers, dnsServer.String())
+				}
+			}
 			ReportAppInfo.Network = append(ReportAppInfo.Network,
 				networkInfo)
 		}
@@ -1160,6 +1188,18 @@ func PublishBlobInfoToZedCloud(ctx *zedagentContext, blobSha string, blobStatus 
 		zedcloud.SetDeferred(zedcloudCtx, blobSha, buf, size, statusURL,
 			true)
 	}
+}
+
+func appIfnameToNetworkInstance(ctx *zedagentContext,
+	aiStatus *types.AppInstanceStatus, vifname string) *types.NetworkInstanceStatus {
+	for _, ulStatus := range aiStatus.UnderlayNetworks {
+		if ulStatus.VifUsed == vifname {
+			status, _ := ctx.subNetworkInstanceStatus.Get(ulStatus.Network.String())
+			niStatus := status.(types.NetworkInstanceStatus)
+			return &niStatus
+		}
+	}
+	return nil
 }
 
 func appIfnameToName(aiStatus *types.AppInstanceStatus, vifname string) string {

@@ -122,6 +122,9 @@ message ZInfoNetwork {
 
   // IP address leased by dnsmasq to app does not match the IP address allocated by zedrouter
   bool ip_addr_mis_match = 14;
+
+  // IP addresses of NTP servers being used
+  repeated string ntp_servers = 15;
 }
 
 // From an IP address-based geolocation service
@@ -243,6 +246,15 @@ message ZInfoAppInstance {
   string domainName = 3;
 }
 
+// ZInfoDeviceTasks - send a summary of tasks so that controller knows
+// how many app instance tasks are still present on the device. Controller
+// can then use it to wait for an app to be fully deleted etc.
+message ZInfoDeviceTasks {
+  string name = 1;
+  string namespace = 2;
+  ZSwState status = 3;
+}
+
 enum ZSimcardState {
   Z_SIMCARD_STATE_INVALID     = 0;
   Z_SIMCARD_STATE_ASSIGNED    = 1;
@@ -315,6 +327,7 @@ message ZInfoDevice {
   // Cellular / LTE related information
   repeated ZCellularModuleInfo cell_radios = 35;
   repeated ZSimcardInfo sims = 36;
+  repeated ZInfoDeviceTasks tasks = 37;
 }
 
 // Different reasons for a boot/reboot
@@ -438,6 +451,7 @@ enum BaseOsSubStatus {
   UPDATE_REBOOTING    = 4;      // subStatusProgress is time left
   UPDATE_TESTING      = 5;      // subStatusProgress is time left
   UPDATE_NEED_TEST_CONFIRM = 6; // waiting for controller to commit to new
+  UPDATE_DEFERRED = 7; // waiting for current update to finish
 }
 
 // Per filesystem/partition information
