@@ -368,7 +368,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	zedrouterCtx.subAppNetworkConfig = subAppNetworkConfig
 	subAppNetworkConfig.Activate()
 
-	// Subscribe to AppNetworkConfig from zedmanager
+	// Subscribe to AppNetworkConfig from zedagent
 	subAppNetworkConfigAg, err := ps.NewSubscription(pubsub.SubscriptionOptions{
 		AgentName:     "zedagent",
 		MyAgentName:   agentName,
@@ -450,6 +450,13 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		}
 	}
 	log.Functionf("Zedrouter has restarted. Entering main Select loop")
+
+	if err := createServerIntf(&zedrouterCtx); err != nil {
+		log.Fatal(err)
+	}
+	if err := createServer(&zedrouterCtx); err != nil {
+		log.Fatal(err)
+	}
 
 	for {
 		select {
@@ -677,6 +684,22 @@ func lookupAppNetworkStatus(ctx *zedrouterContext, key string) *types.AppNetwork
 	return &status
 }
 
+func lookupAppNetworkStatusByAppIP(ctx *zedrouterContext, ip net.IP) *types.AppNetworkStatus {
+
+	ipStr := ip.String()
+	pub := ctx.pubAppNetworkStatus
+	items := pub.GetAll()
+	for _, st := range items {
+		status := st.(types.AppNetworkStatus)
+		for _, ulStatus := range status.UnderlayNetworkList {
+			if ipStr == ulStatus.AllocatedIPAddr {
+				return &status
+			}
+		}
+	}
+	return nil
+}
+
 func lookupAppNetworkConfig(ctx *zedrouterContext, key string) *types.AppNetworkConfig {
 
 	sub := ctx.subAppNetworkConfig
@@ -693,15 +716,6 @@ func lookupAppNetworkConfig(ctx *zedrouterContext, key string) *types.AppNetwork
 	return &config
 }
 
-// Track the device information so we can annotate the application EIDs
-// Note that when we start with zedrouter config files in place the
-// device one might be processed after application ones, in which case these
-// empty. This results in less additional info recorded in the map servers.
-// XXX note that this only works well when the IsZedmanager AppNetworkConfig
-// arrives first so that these fields are filled in before other
-// AppNetworkConfig entries are processed.
-var deviceEID net.IP
-var deviceIID uint32
 var additionalInfoDevice *types.AdditionalInfoDevice
 
 func handleAppNetworkCreate(ctxArg interface{}, key string, configArg interface{}) {
