@@ -20,8 +20,11 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
+	"strings"
 )
 
 const eveScript = "/bin/eve"
@@ -47,12 +50,12 @@ type OCISpec interface {
 	Save(*os.File) error
 	Load(*os.File) error
 	CreateContainer(bool) error
+	AddLoader(string) error
 	AdjustMemLimit(types.DomainConfig, int64)
-	UpdateVifList(types.DomainConfig)
-	UpdateFromDomain(types.DomainConfig)
+	UpdateVifList([]types.VifInfo)
+	UpdateFromDomain(*types.DomainConfig)
 	UpdateFromVolume(string) error
-	UpdateMounts([]types.DiskStatus)
-	UpdateMountsNested([]types.DiskStatus)
+	UpdateMounts([]types.DiskStatus) error
 	UpdateEnvVar(map[string]string)
 }
 
@@ -70,8 +73,108 @@ func (client *Client) NewOciSpec(name string) (OCISpec, error) {
 	if s.Process == nil {
 		s.Process = &specs.Process{}
 	}
+	if s.Annotations == nil {
+		s.Annotations = map[string]string{}
+	}
+	// default OCI specs have all devices being denied by default,
+	// we flip it back to all allow for now, but later on we may
+	// need to get more fine-grained
+	if s.Linux != nil && s.Linux.Resources != nil && s.Linux.Resources.Devices != nil {
+		s.Linux.Resources.Devices = nil
+	}
 	s.Root.Path = "/"
 	return s, nil
+}
+
+// AddLoader massages the spec so that entry point becomes the loader
+func (s *ociSpec) AddLoader(volume string) error {
+	spec := &ociSpec{name: s.name}
+	f, err := os.Open(filepath.Join(volume, ociRuntimeSpecFilename))
+	if err != nil {
+		return err
+	} else {
+		defer f.Close()
+	}
+	if err := spec.Load(f); err != nil {
+		return err
+	}
+
+	spec.Root = &specs.Root{Readonly: true, Path: filepath.Join(volume, "rootfs")}
+	spec.Linux.Resources = s.Linux.Resources
+	spec.Linux.CgroupsPath = s.Linux.CgroupsPath
+
+	// for now, all tasks loaded with a loader get their OOM score reset
+	if spec.Process.OOMScoreAdj == nil {
+		spec.Process.OOMScoreAdj = new(int)
+	}
+	*spec.Process.OOMScoreAdj = 0
+
+	// massages .Mounts
+	if s.Root.Path != "/" { // FIXME-TASKS: it should be enough to give original OCI spec to a loader
+		volumeRoot := path.Join(s.Root.Path, "..")
+		// create full copy of our runtime spec
+		f, err := os.Create(filepath.Join(volumeRoot, ociRuntimeSpecFilename))
+		if err != nil {
+			return err
+		} else {
+			defer f.Close()
+		}
+		if err = s.Save(f); err != nil {
+			return err
+		}
+
+		// create mountpoints manifest
+		if err := ioutil.WriteFile(filepath.Join(volumeRoot, "mountPoints"),
+			[]byte(s.Annotations[eveOCIMountPointsLabel]), 0644); err != nil {
+			return err
+		}
+
+		// create cmdline manifest
+		// each item needs to be independently quoted for initrd
+		execpathQuoted := make([]string, 0)
+		for _, s := range s.Process.Args {
+			execpathQuoted = append(execpathQuoted, fmt.Sprintf("\"%s\"", s))
+		}
+		if err := ioutil.WriteFile(filepath.Join(volumeRoot, "cmdline"),
+			[]byte(strings.Join(execpathQuoted, " ")), 0644); err != nil {
+			return err
+		}
+
+		// create env manifest
+		envContent := ""
+		if s.Process.Cwd != "" {
+			envContent = fmt.Sprintf("export WORKDIR=\"%s\"\n", s.Process.Cwd)
+		}
+		for _, e := range s.Process.Env {
+			keyAndValueSlice := strings.SplitN(e, "=", 2)
+			if len(keyAndValueSlice) == 2 {
+				//handles Key=Value case
+				envContent = envContent + fmt.Sprintf("export %s=\"%s\"\n", keyAndValueSlice[0], keyAndValueSlice[1])
+			} else {
+				//handles Key= case
+				envContent = envContent + fmt.Sprintf("export %s\n", e)
+			}
+
+		}
+		if err := ioutil.WriteFile(filepath.Join(volumeRoot, "environment"), []byte(envContent), 0644); err != nil {
+			return err
+		}
+
+		spec.Mounts = append(spec.Mounts, specs.Mount{
+			Type:        "bind",
+			Source:      volumeRoot,
+			Destination: "/mnt",
+			Options:     []string{"rbind", "rw"}})
+	}
+	for _, mount := range s.Mounts {
+		mount.Destination = "/mnt/rootfs" + mount.Destination
+		spec.Mounts = append(spec.Mounts, mount)
+	}
+
+	// finally do a switcheroo
+	s.Spec = spec.Spec
+
+	return nil
 }
 
 // Get simply returns an underlying OCI runtime spec
@@ -99,6 +202,12 @@ func (s *ociSpec) Load(file *os.File) error {
 		return err
 	}
 	s.Spec = *ns
+	if s.Process == nil {
+		s.Process = &specs.Process{}
+	}
+	if s.Annotations == nil {
+		s.Annotations = map[string]string{}
+	}
 	return nil
 }
 
@@ -125,13 +234,13 @@ func (s *ociSpec) AdjustMemLimit(dom types.DomainConfig, addMemory int64) {
 }
 
 // UpdateVifList creates VIF management hooks in OCI spec
-func (s *ociSpec) UpdateVifList(dom types.DomainConfig) {
+func (s *ociSpec) UpdateVifList(vifs []types.VifInfo) {
 	// use pre-start and post-stop hooks for networking
 	if s.Hooks == nil {
 		s.Hooks = &specs.Hooks{}
 	}
 	timeout := 60
-	for _, v := range dom.VifList {
+	for _, v := range vifs {
 		vifSpec := []string{"VIF_NAME=" + v.Vif, "VIF_BRIDGE=" + v.Bridge, "VIF_MAC=" + v.Mac}
 		s.Hooks.Prestart = append(s.Hooks.Prestart, specs.Hook{
 			Env:     vifSpec,
@@ -149,7 +258,7 @@ func (s *ociSpec) UpdateVifList(dom types.DomainConfig) {
 }
 
 // UpdateFromDomain updates values in the OCI spec based on EVE DomainConfig settings
-func (s *ociSpec) UpdateFromDomain(dom types.DomainConfig) {
+func (s *ociSpec) UpdateFromDomain(dom *types.DomainConfig) {
 	// update cgroup resource constraints for CPU and memory
 	if s.Linux != nil {
 		if s.Linux.Resources == nil {
@@ -168,24 +277,33 @@ func (s *ociSpec) UpdateFromDomain(dom types.DomainConfig) {
 		s.Linux.Resources.Memory.Limit = &m
 		s.Linux.Resources.CPU.Period = &p
 		s.Linux.Resources.CPU.Quota = &q
+
+		s.Linux.CgroupsPath = fmt.Sprintf("/%s/%s", ctrdServicesNamespace, dom.DisplayName)
 	}
 }
 
 // UpdateFromVolume updates values in the OCI spec based on the location
 // of an EVE volume. EVE volume's are expected to be structured as directories
-// in the filesystem with a json file containing the corresponding Image
-// manifest and a rootfs subfolder with a full rootfs filesystem
+// in the filesystem with either config.json containing the full OCI runtime
+// spec or at least image-config.json containing OCI Image manifest (full
+// OCI runtime spec takes precedence). In addition to that each volume is
+// expected to have rootfs subfolder with a full rootfs filesystem
 func (s *ociSpec) UpdateFromVolume(volume string) error {
-	imgInfo, err := getSavedImageInfo(volume)
-	if err != nil {
-		return fmt.Errorf("couldn't load saved image config from %s", volume)
+	if f, err := os.Open(filepath.Join(volume, ociRuntimeSpecFilename)); err == nil {
+		defer f.Close()
+		if err = s.Load(f); err != nil {
+			return err
+		}
+	} else if imgInfo, err := getSavedImageInfo(volume); err == nil {
+		if err = s.updateFromImageConfig(imgInfo.Config); err != nil {
+			return err
+		}
+	} else {
+		return nil
 	}
 
-	if err = s.updateFromImageConfig(imgInfo.Config); err == nil {
-		s.Root.Path = volume + "/rootfs"
-	}
-
-	return err
+	s.Root.Path = volume + "/rootfs"
+	return nil
 }
 
 // UpdateFromImageConfig updates values in the OCI spec based
@@ -229,21 +347,40 @@ func (s *ociSpec) updateFromImageConfig(config v1.ImageConfig) error {
 	return oci.WithAdditionalGIDs("root")(ctrdCtx, s.client.ctrdClient, &dummy, &s.Spec)
 }
 
-func (s *ociSpec) updateMounts(disks []types.DiskStatus, nested bool) {
+// UpdateMounts adds volume specification mount points to the OCI runtime spec
+func (s *ociSpec) UpdateMounts(disks []types.DiskStatus) error {
 	ociVolumeData := "rootfs"
-	root := ""
-	mounts := []specs.Mount{}
-	rootMount := specs.Mount{Type: "bind"}
+	mountDirs := []string{}
+	blkMountPoints := ""
 
-	if nested {
-		rootMount.Destination = "/mnt"
-		root = path.Join(rootMount.Destination, ociVolumeData)
-		mounts = append(mounts, specs.Mount{
-			Type:        "tmpfs",
-			Source:      "tmpfs",
-			Destination: path.Join(root, "dev"),
-			Options:     []string{"nosuid", "strictatime", "mode=755", "size=65536"},
-		})
+	// We are prepared to deal with the first volume being declared as root,
+	// however any other volume claiming that right would be treated as it
+	// doesn't have MountDir specifies at all
+	id := 0
+	if len(disks) > 0 && disks[0].MountDir == "/" {
+		mountDirs = []string{"/"}
+		id = 1
+	}
+
+	// Validating if there are enough disks provided for the mount-points
+	if len(disks)-id < len(s.volumes) {
+		// If no. of mount-points is (strictly) greater than no. of disks provided, we need to throw an error as there
+		// won't be enough disks to satisfy required mount-points.
+		return fmt.Errorf("updateMounts: Number of volumes provided: %v is less than number of mount-points: %v",
+			len(disks), len(s.volumes))
+	} else {
+		for p := range s.volumes {
+			// if the next non-root volume has a MountDir specifies it takes precedence over OCI Image spec
+			if disks[id].MountDir != "" && disks[id].MountDir != "/" {
+				mountDirs = append(mountDirs, disks[id].MountDir)
+			} else {
+				mountDirs = append(mountDirs, p)
+			}
+			id++
+		}
+		for ; id < len(disks); id++ {
+			mountDirs = append(mountDirs, disks[id].MountDir)
+		}
 	}
 
 	for id, disk := range disks {
@@ -262,8 +399,7 @@ func (s *ociSpec) updateMounts(disks []types.DiskStatus, nested bool) {
 			continue
 		case zconfig.Format_CONTAINER:
 			if path.Clean(disk.MountDir) == "/" {
-				rootMount.Options = opts
-				rootMount.Source = src
+				// skipping root volumes for now
 				continue
 			} else {
 				src = path.Join(src, ociVolumeData)
@@ -274,41 +410,34 @@ func (s *ociSpec) updateMounts(disks []types.DiskStatus, nested bool) {
 		if disk.DisplayName != "" {
 			dests = append(dests, "/dev/eve/volumes/by-name/"+disk.DisplayName)
 		}
-		if disk.MountDir != "" {
-			dst := disk.MountDir
+		if mountDirs[id] != "" {
+			dst := mountDirs[id]
 			if disk.Format != zconfig.Format_CONTAINER {
 				// this is a bit of a hack: we assume that anything but
 				// the container image has to be a file and thus make it
 				// appear *under* destination directory as a file with ID
+				blkMountPoints = blkMountPoints + dst + "\n"
 				dst = fmt.Sprintf("%s/%d", dst, id)
+			}
+			if !strings.HasPrefix(dst, "/") {
+				return fmt.Errorf("updateMounts: targetPath %s should be absolute", dst)
 			}
 			dests = append(dests, dst)
 		}
 
 		for _, dest := range dests {
-			mounts = append(mounts, specs.Mount{
+			s.Mounts = append(s.Mounts, specs.Mount{
 				Type:        "bind",
 				Source:      src,
-				Destination: path.Join(root, dest),
+				Destination: dest,
 				Options:     opts,
 			})
 		}
 	}
 
-	if nested && rootMount.Source != "" {
-		s.Mounts = append(s.Mounts, rootMount)
-	}
-	s.Mounts = append(s.Mounts, mounts...)
-}
+	s.Annotations[eveOCIMountPointsLabel] = blkMountPoints
 
-// UpdateMounts adds volume specification mount points to the OCI runtime spec
-func (s *ociSpec) UpdateMounts(disks []types.DiskStatus) {
-	s.updateMounts(disks, false)
-}
-
-// UpdateMountsNested adds volume specification mount points to the OCI runtime spec under a static root
-func (s *ociSpec) UpdateMountsNested(disks []types.DiskStatus) {
-	s.updateMounts(disks, true)
+	return nil
 }
 
 // UpdateEnvVar adds user specified env variables to the OCI spec.

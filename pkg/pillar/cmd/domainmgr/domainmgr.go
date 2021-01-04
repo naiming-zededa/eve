@@ -998,7 +998,6 @@ func handleCreate(ctx *domainContext, key string, config *types.DomainConfig) {
 		VncDisplay:         config.VncDisplay,
 		VncPasswd:          config.VncPasswd,
 		State:              types.INSTALLED,
-		IsContainer:        config.IsContainer,
 	}
 	// Note that the -emu interface doesn't exist until after boot of the domU, but we
 	// initialize the VifList here with the VifUsed.
@@ -1168,29 +1167,6 @@ func doActivate(ctx *domainContext, config types.DomainConfig,
 		status.IoAdapterList = config.IoAdapterList
 	}
 
-	// Pre-flight checks for containers
-	if config.IsContainer {
-		if len(status.DiskStatusList) == 0 || status.DiskStatusList[0].Format != zconfig.Format_CONTAINER {
-			err := fmt.Errorf("doActivate failed: containers must have the first volume of type OCI")
-			log.Error(err.Error())
-			status.SetErrorNow(err.Error())
-			return
-		} else {
-			status.DiskStatusList[0].MountDir = "/"
-		}
-
-		if config.IsCipher || config.CloudInitUserData != nil {
-			envList, err := fetchEnvVariablesFromCloudInit(ctx, config)
-			if err != nil {
-				fetchError := fmt.Errorf("failed to fetch environment variable from userdata. %s", err.Error())
-				log.Error(fetchError)
-				status.SetErrorNow(fetchError.Error())
-				return
-			}
-			status.EnvVariables = envList
-		}
-	}
-
 	// Assign any I/O devices
 	doAssignIoAdaptersToDomain(ctx, config, status)
 
@@ -1205,17 +1181,6 @@ func doActivate(ctx *domainContext, config types.DomainConfig,
 				err := fmt.Errorf("doActivate: Failed mount snapshot: %s for %s. Error %s",
 					snapshotID, config.UUIDandVersion.UUID, err)
 				log.Error(err.Error())
-				status.SetErrorNow(err.Error())
-				return
-			}
-
-			// XXX apparently this is under the appInstID and not under
-			// the ImageID aka VolumeID
-			if err := containerd.PrepareMount(config.UUIDandVersion.UUID,
-				ds.FileLocation, status.EnvVariables,
-				len(status.DiskStatusList)); err != nil {
-
-				log.Errorf("Failed to create ctr bundle. Error %s", err)
 				status.SetErrorNow(err.Error())
 				return
 			}
@@ -1341,13 +1306,6 @@ func doInactivate(ctx *domainContext, status *types.DomainStatus, impatient bool
 			status.DomainId, status.BootTime.Format(time.RFC3339Nano),
 			status.Key())
 	}
-	// If this is a delete of the App Instance we wait for a shorter time
-	// since all of the read-write disk images will be deleted.
-	// A container only has a read-only image hence it can also be
-	// torn down with less waiting.
-	if status.IsContainer {
-		impatient = true
-	}
 	maxDelay := time.Second * 600 // 10 minutes
 	if impatient {
 		maxDelay /= 10
@@ -1421,22 +1379,18 @@ func doInactivate(ctx *domainContext, status *types.DomainStatus, impatient bool
 		}
 	}
 
-	// Incase of ctr based container, DomainShutdown moves the
-	// container to exit state and the domain is destroyed
-	// Issue Domain Destroy irrespective in container case
-	if status.IsContainer || status.DomainId != 0 {
-		if err := hyper.Task(status).Delete(status.DomainName, status.DomainId); err != nil {
-			log.Errorf("Failed to delete domain %s (%v)", status.DomainName, err)
-		}
-		// Even if destroy failed we wait again
-		log.Functionf("doInactivate(%v) for %s: waiting for domain to be destroyed",
-			status.UUIDandVersion, status.DisplayName)
-
-		gone := waitForDomainGone(*status, maxDelay)
-		if gone {
-			status.DomainId = 0
-		}
+	if err := hyper.Task(status).Delete(status.DomainName, status.DomainId); err != nil {
+		log.Errorf("Failed to delete domain %s (%v)", status.DomainName, err)
 	}
+	// Even if destroy failed we wait again
+	log.Functionf("doInactivate(%v) for %s: waiting for domain to be destroyed",
+		status.UUIDandVersion, status.DisplayName)
+
+	gone := waitForDomainGone(*status, maxDelay)
+	if gone {
+		status.DomainId = 0
+	}
+
 	// If everything failed we leave it marked as Activated
 	if status.DomainId != 0 {
 		errStr := fmt.Sprintf("doInactivate(%s) failed to halt/destroy %d",
@@ -1530,25 +1484,39 @@ func configToStatus(ctx *domainContext, config types.DomainConfig,
 		// Generate Devtype for hypervisor package
 		// XXX can hypervisor look at something different?
 		if dc.Format == zconfig.Format_CONTAINER {
+			if i == 0 {
+				ds.MountDir = "/"
+				status.OCIConfigDir = ds.FileLocation
+			}
 			ds.Devtype = ""
 			need9P = true
 		} else {
-			ds.Devtype = "hdd"
+			if config.VirtualizationMode == types.LEGACY {
+				ds.Devtype = "legacy"
+			} else {
+				ds.Devtype = "hdd"
+			}
 		}
 		// map from i=1 to xvdb, 2 to xvdc etc
 		ds.Vdev = fmt.Sprintf("xvd%c", int('a')+i)
 	}
 
-	if (config.IsCipher || config.CloudInitUserData != nil) &&
-		!status.IsContainer {
-
-		ds, err := createCloudInitISO(ctx, config)
-		if err != nil {
-			return err
+	if config.IsCipher || config.CloudInitUserData != nil {
+		if status.OCIConfigDir != "" {
+			envList, err := fetchEnvVariablesFromCloudInit(ctx, config)
+			if err != nil {
+				return fmt.Errorf("failed to fetch environment variable from userdata. %s", err.Error())
+			}
+			status.EnvVariables = envList
+		} else {
+			ds, err := createCloudInitISO(ctx, config)
+			if err != nil {
+				return err
+			}
+			status.DiskStatusList = append(status.DiskStatusList, *ds)
 		}
-		status.DiskStatusList = append(status.DiskStatusList,
-			*ds)
 	}
+
 	if need9P {
 		status.DiskStatusList = append(status.DiskStatusList, types.DiskStatus{
 			FileLocation: "/mnt",

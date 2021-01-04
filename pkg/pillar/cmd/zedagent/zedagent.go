@@ -137,9 +137,12 @@ type zedagentContext struct {
 	// API. Those are merged into maintenanceMode
 	// TBD will be also decide locally to go into maintenanceMode based
 	// on out of disk space etc?
-	maintenanceMode    bool
-	gcpMaintenanceMode types.TriState
-	apiMaintenanceMode bool
+	maintenanceMode      bool                        //derived state, after consolidating all inputs
+	maintModeReason      types.MaintenanceModeReason //reason for setting derived maintenance mode
+	gcpMaintenanceMode   types.TriState
+	apiMaintenanceMode   bool
+	localMaintenanceMode bool                        //maintenance mode triggered by local failure
+	localMaintModeReason types.MaintenanceModeReason //local failure reason for maintenance mode
 
 	// Track the counter from force.fallback.counter to detect changes
 	forceFallbackCounter int
@@ -1073,6 +1076,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		log.Fatal(err)
 	}
 
+	//Parse SMART data
+	go parseSMARTData()
+
 	// Use a go routine to make sure we have wait/timeout without
 	// blocking the main select loop
 	log.Functionf("Creating %s at %s", "deviceInfoTask", agentlog.GetMyStack())
@@ -1707,6 +1713,14 @@ func handleNodeAgentStatusImpl(ctxArg interface{}, key string,
 		handleDeviceReboot(ctx)
 	}
 	triggerPublishDevInfo(ctx)
+	if !ctx.localMaintenanceMode && status.LocalMaintenanceMode {
+		// localMaintenanceMode can only be set, and can be reset only through reboot
+		// after reboot, localMaintenanceMode will be set or reset depending on the
+		// latest failures.
+		ctx.localMaintenanceMode = status.LocalMaintenanceMode
+		ctx.localMaintModeReason = status.LocalMaintenanceModeReason
+		mergeMaintenanceMode(ctx)
+	}
 	log.Functionf("handleNodeAgentStatusImpl: done.")
 }
 

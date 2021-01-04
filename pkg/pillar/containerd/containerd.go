@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/connectivity"
 
 	"github.com/containerd/containerd"
@@ -54,10 +53,16 @@ const (
 	containerdRunTime = "io.containerd.runtime.v1.linux"
 	// container config file name
 	imageConfigFilename = "image-config.json"
+	// full OCI runtime spec
+	ociRuntimeSpecFilename = "config.json"
 	// default socket to connect tasks to memlogd
 	logWriteSocket = "/run/linuxkit-external-logging.sock"
 	// default socket to read from memlogd
 	logReadSocket = "/run/memlogdq.sock"
+	// file under container's root path which stores the respective snapshotID
+	snapshotIDFile = "snapshotid.txt"
+	// OCI runtime spec label that tracks all mount points mentioned in OCI Image config
+	eveOCIMountPointsLabel = "org.lfedge.eve.blk_mounts"
 
 	//TBD: Have a better way to calculate this number.
 	//For now it is based on some trial-and-error experiments
@@ -605,59 +610,6 @@ func (client *Client) Resolver(ctx context.Context) (resolver.ResolverCloser, er
 	return res, err
 }
 
-// LKTaskPrepare creates a new containter based on linuxkit /container/services runtime
-// OCI spec file and optional bundle of DomainConfig settings and command line options.
-// Because we're expecting a linuxkit produced filesystem layout we expect R/O portion of the
-// filesystem to be available under `dirname specFile`/lower and we will be mounting
-// it R/O into the container. On top of that we expect the usual suspects of /run,
-// /persist and /config to be taken care of by the OCI config that lk produced.
-func (client *Client) LKTaskPrepare(name, linuxkit string, domSettings *types.DomainConfig, domStatus *types.DomainStatus, memOverhead int64, args []string) error {
-	config := "/containers/services/" + linuxkit + "/config.json"
-	rootfs := "/containers/services/" + linuxkit + "/rootfs"
-
-	logrus.Infof("Starting LKTaskLaunch for %s", linuxkit)
-	f, err := os.Open("/hostfs" + config)
-	if err != nil {
-		return fmt.Errorf("LKTaskLaunch: can't open spec file %s %v", config, err)
-	}
-	defer f.Close()
-
-	spec, err := client.NewOciSpec(name)
-	if err != nil {
-		return fmt.Errorf("LKTaskLaunch: NewOciSpec failed with error %v", err)
-	}
-	if err = spec.Load(f); err != nil {
-		return fmt.Errorf("LKTaskLaunch: can't load spec file from %s %v", config, err)
-	}
-
-	spec.Get().Root.Path = rootfs
-	spec.Get().Root.Readonly = true
-	if spec.Get().Linux != nil {
-		spec.Get().Linux.CgroupsPath = fmt.Sprintf("/%s/%s", ctrdServicesNamespace, name)
-	}
-	if domSettings != nil {
-		spec.UpdateFromDomain(*domSettings)
-		if memOverhead > 0 {
-			spec.AdjustMemLimit(*domSettings, memOverhead)
-		}
-	}
-
-	if spec.Get().Annotations == nil {
-		spec.Get().Annotations = make(map[string]string)
-	}
-	if domStatus.EnableVnc && domStatus.VncPasswd != "" {
-		spec.Get().Annotations["VncPasswd"] = domStatus.VncPasswd
-	}
-
-	spec.UpdateMountsNested(domStatus.DiskStatusList)
-
-	if args != nil {
-		spec.Get().Process.Args = args
-	}
-
-	return spec.CreateContainer(true)
-}
-
 // CtrNewUserServicesCtx returns a new user service containerd context
 // and a done func to cancel the context after use.
 func (client *Client) CtrNewUserServicesCtx() (context.Context, context.CancelFunc) {
@@ -750,119 +702,6 @@ func (client *Client) ctrExec(ctx context.Context, domainName string, args []str
 	return stdOut.String(), stdErr.String(), err
 }
 
-// FIXME: once we move to runX this function is going to go away
-func createMountPointExecEnvFiles(containerPath string, mountpoints map[string]struct{}, execpath []string, workdir string, env []string, noOfDisks int) error {
-	mpFileName := containerPath + "/mountPoints"
-	cmdFileName := containerPath + "/cmdline"
-	envFileName := containerPath + "/environment"
-
-	mpFile, err := os.Create(mpFileName)
-	if err != nil {
-		logrus.Errorf("createMountPointExecEnvFiles: os.Create for %v, failed: %v", mpFileName, err.Error())
-	}
-	defer mpFile.Close()
-
-	cmdFile, err := os.Create(cmdFileName)
-	if err != nil {
-		logrus.Errorf("createMountPointExecEnvFiles: os.Create for %v, failed: %v", cmdFileName, err.Error())
-	}
-	defer cmdFile.Close()
-
-	envFile, err := os.Create(envFileName)
-	if err != nil {
-		logrus.Errorf("createMountPointExecEnvFiles: os.Create for %v, failed: %v", envFileName, err.Error())
-	}
-	defer envFile.Close()
-
-	//Ignoring container image in status.DiskStatusList
-	noOfDisks = noOfDisks - 1
-
-	//Validating if there are enough disks provided for the mount-points
-	switch {
-	case noOfDisks > len(mountpoints):
-		//If no. of disks is (strictly) greater than no. of mount-points provided, we will ignore excessive disks.
-		logrus.Warnf("createMountPointExecEnvFiles: Number of volumes provided: %v is more than number of mount-points: %v. "+
-			"Excessive volumes will be ignored", noOfDisks, len(mountpoints))
-	case noOfDisks < len(mountpoints):
-		//If no. of mount-points is (strictly) greater than no. of disks provided, we need to throw an error as there
-		// won't be enough disks to satisfy required mount-points.
-		return fmt.Errorf("createMountPointExecEnvFiles: Number of volumes provided: %v is less than number of mount-points: %v. ",
-			noOfDisks, len(mountpoints))
-	}
-
-	for path := range mountpoints {
-		if !strings.HasPrefix(path, "/") {
-			//Target path is expected to be absolute.
-			err := fmt.Errorf("createMountPointExecEnvFiles: targetPath should be absolute")
-			logrus.Errorf(err.Error())
-			return err
-		}
-		logrus.Infof("createMountPointExecEnvFiles: Processing mount point %s\n", path)
-		if _, err := mpFile.WriteString(fmt.Sprintf("%s\n", path)); err != nil {
-			err := fmt.Errorf("createMountPointExecEnvFiles: writing to %s failed %v", mpFileName, err)
-			logrus.Errorf(err.Error())
-			return err
-		}
-	}
-
-	// each item needs to be independently quoted for initrd
-	execpathQuoted := make([]string, 0)
-	for _, s := range execpath {
-		execpathQuoted = append(execpathQuoted, fmt.Sprintf("\"%s\"", s))
-	}
-	if _, err := cmdFile.WriteString(strings.Join(execpathQuoted, " ")); err != nil {
-		err := fmt.Errorf("createMountPointExecEnvFiles: writing to %s failed %v", cmdFileName, err)
-		logrus.Errorf(err.Error())
-		return err
-	}
-
-	envContent := ""
-	if workdir != "" {
-		envContent = fmt.Sprintf("export WORKDIR=\"%s\"\n", workdir)
-	}
-	for _, e := range env {
-		envContent = envContent + fmt.Sprintf("export %s\n", e)
-	}
-	if _, err := envFile.WriteString(envContent); err != nil {
-		err := fmt.Errorf("createMountPointExecEnvFiles: writing to %s failed %v", envFileName, err)
-		logrus.Errorf(err.Error())
-		return err
-	}
-
-	return nil
-}
-
-// getContainerConfigs get the container configs needed, specifically
-// - mount target paths
-// - exec path
-// - working directory
-// - env var key/value pairs
-// this can change based on the config format
-func getContainerConfigs(imageInfo ocispec.Image, userEnvVars map[string]string) (map[string]struct{}, []string, string, []string, error) {
-
-	mountpoints := imageInfo.Config.Volumes
-	execpath := imageInfo.Config.Entrypoint
-	execpath = append(execpath, imageInfo.Config.Cmd...)
-	workdir := imageInfo.Config.WorkingDir
-	unProcessedEnv := imageInfo.Config.Env
-	var env []string
-	for _, e := range unProcessedEnv {
-		keyAndValueSlice := strings.SplitN(e, "=", 2)
-		if len(keyAndValueSlice) == 2 {
-			//handles Key=Value case
-			env = append(env, fmt.Sprintf("%s=\"%s\"", keyAndValueSlice[0], keyAndValueSlice[1]))
-		} else {
-			//handles Key= case
-			env = append(env, e)
-		}
-	}
-
-	for k, v := range userEnvVars {
-		env = append(env, fmt.Sprintf("%s=\"%s\"", k, v))
-	}
-	return mountpoints, execpath, workdir, env, nil
-}
-
 // prepareProcess sets up anything that needs to be done after the container process is created,
 // but before it runs (for example networking)
 func prepareProcess(pid int, VifList []types.VifInfo) error {
@@ -942,29 +781,6 @@ func (client *Client) verifyCtr(ctx context.Context, verifyCtx bool) error {
 	return nil
 }
 
-// bind mount a namespace file
-func bindNS(ns string, path string, pid int) error {
-	if path == "" {
-		return nil
-	}
-	// the path and file need to exist for the bind to succeed, so try to create
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("bindNS: Cannot create leading directories %s for bind mount destination: %v", dir, err)
-	}
-	fi, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("bindNS: Cannot create a mount point for namespace bind at %s: %v", path, err)
-	}
-	if err := fi.Close(); err != nil {
-		return err
-	}
-	if err := unix.Mount(fmt.Sprintf("/proc/%d/ns/%s", pid, ns), path, "", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("bindNS: Failed to bind %s namespace at %s: %v", ns, path, err)
-	}
-	return nil
-}
-
 func newServiceCtx(namespace string) (context.Context, context.CancelFunc) {
 	return context.WithCancel(namespaces.WithNamespace(context.Background(), namespace))
 }
@@ -992,4 +808,55 @@ func newServiceCtxWithLease(ctrdClient *containerd.Client, namespace string) (co
 		}
 		cancel()
 	}, nil
+}
+
+// SaveSnapshotID stores snapshotID under newRootpath to handle upgrade scenario
+func SaveSnapshotID(oldRootpath, newRootpath string) error {
+	snapshotID := filepath.Base(oldRootpath)
+	filename := filepath.Join(newRootpath, snapshotIDFile)
+	if err := ioutil.WriteFile(filename, []byte(snapshotID), 0644); err != nil {
+		err = fmt.Errorf("SaveSnapshotID: Save snapshotID %s failed: %s", snapshotID, err)
+		logrus.Error(err.Error())
+		return err
+	}
+	logrus.Infof("SaveSnapshotID: Saved snapshotID %s in %s",
+		snapshotID, filename)
+	return nil
+}
+
+// GetSnapshotID handles the upgrade scenario when the snapshotID needs to be
+// extracted from a file created by upgradeconverter
+// Assumes that rootpath is a complete pathname
+func GetSnapshotID(rootpath string) string {
+	filename := filepath.Join(rootpath, snapshotIDFile)
+	if _, err := os.Stat(filename); err == nil {
+		cont, err := ioutil.ReadFile(filename)
+		if err == nil {
+			snapshotID := string(cont)
+			logrus.Infof("GetSnapshotID read %s from %s",
+				snapshotID, filename)
+			return snapshotID
+		}
+		logrus.Errorf("GetSnapshotID read %s failed: %s", filename, err)
+	}
+	snapshotID := filepath.Base(rootpath)
+	logrus.Infof("GetSnapshotID basename %s from %s", snapshotID, rootpath)
+	return snapshotID
+}
+
+//UnpackClientImage unpacks given client image into containerd.
+func (client *Client) UnpackClientImage(clientImage containerd.Image) error {
+	logrus.Infof("UnpackClientImage: for image :%s", clientImage.Name())
+	ctrdCtx, done := client.CtrNewUserServicesCtx()
+	defer done()
+	unpacked, err := clientImage.IsUnpacked(ctrdCtx, defaultSnapshotter)
+	if err != nil {
+		return fmt.Errorf("UnpackClientImage: unable to get image metadata: %v config: %v", clientImage.Name(), err)
+	}
+	if !unpacked {
+		if err := clientImage.Unpack(ctrdCtx, defaultSnapshotter); err != nil {
+			return fmt.Errorf("UnpackClientImage: unable to unpack image: %v: %v", clientImage.Name(), err)
+		}
+	}
+	return nil
 }

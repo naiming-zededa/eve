@@ -21,7 +21,11 @@ dump() {
             INAME="$INAME.qcow2"
             ONAME="$ONAME.qcow2"
             ;;
-     parallels) qemu-img convert -c -f raw -O parallels "$INAME" "$INAME.parallels"
+     vdi) qemu-img convert -f raw -O vdi "$INAME" "$INAME.vdi"
+            INAME="$INAME.vdi"
+            ONAME="$ONAME.vdi"
+            ;;
+     parallels) qemu-img convert -f raw -O parallels "$INAME" "$INAME.parallels"
             INAME="$INAME.parallels"
             ONAME="$ONAME.parallels"
             ;;
@@ -53,7 +57,7 @@ Optionally you can pass the following right before run in docker run:
  -v <local folder>:/out or -v <local empty file>:/out/f to redirect output from stdout
 Passing -v <local folder>:/out makes sure the file created is given most appropriate name.
 
--f fmt selects a packaging format: raw (default), qcow2, parallels and gcp are all valid options.
+-f fmt selects a packaging format: raw (default), qcow2, parallels, vdi and gcp are all valid options.
 
 live and installer_raw support an optional last argument specifying the size of the image in Mb.
 __EOT__
@@ -114,7 +118,7 @@ while true; do
              shift
           fi
           shift
-          [ "$FMT" != "raw" ] && [ "$FMT" != "gcp" ] && [ "$FMT" != "qcow2" ] && bail "Unknown format: $FMT"
+          [ "$FMT" != "raw" ] && [ "$FMT" != "gcp" ] && [ "$FMT" != "qcow2" ] && [ "$FMT" != "parallels" ] && [ "$FMT" != "vdi" ] && bail "Unknown format: $FMT"
           ;;
        *) break
           ;;
