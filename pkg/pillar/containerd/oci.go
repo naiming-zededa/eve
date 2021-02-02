@@ -167,9 +167,22 @@ func (s *ociSpec) AddLoader(volume string) error {
 			Options:     []string{"rbind", "rw"}})
 	}
 	for _, mount := range s.Mounts {
+		// for now we're filtering anything that is not a bind-mount
+		// since those mountpoints will be dealt with inside of the
+		// launcher -- at some point we may need to be launcher specific
+		// (at least when it comes to tmpfs)
+		if mount.Type != "bind" {
+			continue
+		}
 		mount.Destination = "/mnt/rootfs" + mount.Destination
 		spec.Mounts = append(spec.Mounts, mount)
 	}
+
+	// delete unneeded annotation
+	delete(s.Spec.Annotations, eveOCIMountPointsLabel)
+
+	// pass annotations into spec
+	spec.Spec.Annotations = s.Spec.Annotations
 
 	// finally do a switcheroo
 	s.Spec = spec.Spec
@@ -278,8 +291,9 @@ func (s *ociSpec) UpdateFromDomain(dom *types.DomainConfig) {
 		s.Linux.Resources.CPU.Period = &p
 		s.Linux.Resources.CPU.Quota = &q
 
-		s.Linux.CgroupsPath = fmt.Sprintf("/%s/%s", ctrdServicesNamespace, dom.DisplayName)
+		s.Linux.CgroupsPath = fmt.Sprintf("/%s/%s", ctrdServicesNamespace, dom.GetTaskName())
 	}
+	s.Annotations[EVEOCIVNCPasswordLabel] = dom.VncPasswd
 }
 
 // UpdateFromVolume updates values in the OCI spec based on the location

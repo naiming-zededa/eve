@@ -48,7 +48,7 @@ dump() {
 
 do_help() {
 cat <<__EOT__
-Usage: docker run lfedge/eve [-f fmt] version|rootfs|live|installer_raw|installer_iso
+Usage: docker run lfedge/eve [-f fmt] version|rootfs|live|installer_raw|installer_iso|installer_net
 
 The artifact will be produced on stdout, so don't forget to redirect it to a file.
 
@@ -81,7 +81,6 @@ do_version() {
 
 do_live() {
   PART_SPEC="efi conf imga"
-  [ -d /bits/boot ] && PART_SPEC="boot conf imga"
   # each live image is expected to have a soft serial number that
   # typically gets provisioned by an installer -- since we're
   # shortcutting the installer step here we need to generate it
@@ -92,13 +91,13 @@ do_live() {
      IMAGE_UUID=$(uuidgen | tee /tmp/soft_serial)
      mcopy -o -i /bits/config.img /tmp/soft_serial ::/soft_serial
   fi
-  create_efi_raw "${1:-350}" "$PART_SPEC"
+  create_efi_raw "${1:-360}" "$PART_SPEC"
   dump "$OUTPUT_IMG" live.raw
   echo "$IMAGE_UUID" >&2
 }
 
 do_installer_raw() {
-  create_efi_raw "${1:-350}" "conf_win installer inventory_win"
+  create_efi_raw "${1:-360}" "conf_win installer inventory_win"
   dump "$OUTPUT_IMG" installer.raw
 }
 
@@ -106,6 +105,44 @@ do_installer_iso() {
   rm -rf /parts
   /make-efi
   dump /output.iso installer.iso
+}
+
+do_installer_net() {
+  ln -s /sys/class/mem/null /media/boot
+  find /bits /media/boot -xdev | grep -v initrd.img | sort | cpio --quiet -o -H newc | gzip > /initrd.bits
+  ln -s /bits/initrd.img /initrd.img
+  unsquashfs -d /tmp/kernel rootfs.img boot/kernel
+  mv /tmp/kernel/boot/kernel /
+  cat > /ipxe.efi.cfg <<__EOT__
+#!ipxe
+# dhcp
+#
+# Uncomment ntp lines for devices without RTC (RPI for example)
+# echo Getting the current time from ntp...
+# :retry_ntp
+# ntp pool.ntp.org || goto retry_ntp
+#
+# you should set eve_install_disk argument to mmcblk0 if you need
+#
+# chain --autofree https://github.com/lf-edge/eve/releases/download/1.2.3/ipxe.efi.cfg
+kernel kernel eve_installer=\${mac:hexhyp} fastboot console=ttyS0 console=ttyS1 console=ttyS2 console=ttyAMA0 console=ttyAMA1 console=tty0 initrd=initrd.img initrd=initrd.bits
+initrd initrd.img
+initrd initrd.bits
+boot
+__EOT__
+  tar -C / -chvf /output.net ipxe.efi.cfg kernel initrd.img initrd.bits ipxe.efi
+  if [ "$(uname -m)" = aarch64 ]
+  then
+  cat > /tmp/boot.scr <<__EOT__
+dhcp
+tftpboot \${kernel_addr_r} ipxe.efi
+bootefi \${kernel_addr_r}
+__EOT__
+    mkimage -A arm64 -O linux -T script -C none -a 0 -e 0 -n "U-Boot Script" -d /tmp/boot.scr /boot.scr.uimg
+    ln -fs /bits/boot/* /
+    tar -C / -rhvf /output.net boot.scr.uimg overlays u-boot.bin bcm2711-rpi-4-b.dtb config.txt fixup4.dat start4.elf
+  fi
+  dump /output.net installer.net
 }
 
 # Lets' parse global options first
