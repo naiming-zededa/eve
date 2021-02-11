@@ -701,6 +701,12 @@ func aceToRules(ctx *zedrouterContext, aclArgs types.AppNetworkACLArgs,
 				ip = match.Value
 				break
 			}
+			if aclArgs.NIType == types.NetworkInstanceTypeSwitch {
+				errStr := fmt.Sprintf("ACE with host not supported on switch network instance: %+v",
+					ace)
+				log.Errorln(errStr)
+				return nil, nil, errors.New(errStr)
+			}
 			if ipsetName != "" {
 				errStr := fmt.Sprintf("ACE with eidset and host not supported: %+v",
 					ace)
@@ -721,6 +727,12 @@ func aceToRules(ctx *zedrouterContext, aclArgs types.AppNetworkACLArgs,
 				ipsetName = "ipv6." + match.Value
 			}
 		case "eidset":
+			if aclArgs.NIType == types.NetworkInstanceTypeSwitch {
+				errStr := fmt.Sprintf("ACE with host not supported on switch network instance: %+v",
+					ace)
+				log.Errorln(errStr)
+				return nil, nil, errors.New(errStr)
+			}
 			if ipsetName != "" {
 				errStr := fmt.Sprintf("ACE with eidset and host not supported: %+v",
 					ace)
@@ -994,6 +1006,9 @@ func aceToRules(ctx *zedrouterContext, aclArgs types.AppNetworkACLArgs,
 	aclRule3.IsUserConfigured = true
 	aclRule3.RuleID = ace.RuleID
 	if aclArgs.NIType == types.NetworkInstanceTypeSwitch {
+
+		// XXX what about local-only switch network instance?
+		// XXX should skip trying to add this rule
 		if len(aclArgs.UpLinks) != 1 {
 			errStr := fmt.Sprintf("aceToRules: Switch network instance is only supported with exactly one " +
 				"uplink attached for now.")
@@ -1001,7 +1016,7 @@ func aceToRules(ctx *zedrouterContext, aclArgs types.AppNetworkACLArgs,
 			return nil, nil, errors.New(errStr)
 		} else {
 			aclRule3.Rule = append(aclRule3.Rule, "-m", "physdev",
-				"--physdev-in", aclArgs.UpLinks[0])
+				"--physdev-in", uplinkToPhysdev(aclArgs.UpLinks[0]))
 		}
 	}
 
@@ -1546,39 +1561,12 @@ func handleNetworkInstanceACLConfiglet(op string, aclArgs types.AppNetworkACLArg
 
 func networkInstanceBridgeRules(aclArgs types.AppNetworkACLArgs) types.IPTablesRuleList {
 	var rulesList types.IPTablesRuleList
-	var aclRule1, aclRule2 types.IPTablesRule
 
 	// not for dom0
 	if aclArgs.IsMgmt {
 		return rulesList
 	}
 	aclArgs.IPVer = determineIPVer(aclArgs.IsMgmt, aclArgs.BridgeIP)
-	// two rules for ipv4
-	aclRule1.IPVer = 4
-	aclRule1.Table = "mangle"
-	aclRule1.Chain = "PREROUTING"
-	aclRule1.Rule = []string{"-i", aclArgs.BridgeName, "-p", "tcp",
-		"-j", "CHECKSUM", "--checksum-fill"}
-	aclRule2.IPVer = 4
-	aclRule2.Table = "mangle"
-	aclRule2.Chain = "PREROUTING"
-	aclRule2.Rule = []string{"-i", aclArgs.BridgeName, "-p", "udp",
-		"-j", "CHECKSUM", "--checksum-fill"}
-	rulesList = append(rulesList, aclRule1, aclRule2)
-
-	// two rules for ipv6
-	aclRule1.IPVer = 6
-	aclRule1.Table = "mangle"
-	aclRule1.Chain = "PREROUTING"
-	aclRule1.Rule = []string{"-i", aclArgs.BridgeName, "-p", "tcp",
-		"-j", "CHECKSUM", "--checksum-fill"}
-	aclRule2.IPVer = 6
-	aclRule2.Table = "mangle"
-	aclRule2.Chain = "PREROUTING"
-	aclRule2.Rule = []string{"-i", aclArgs.BridgeName, "-p", "udp",
-		"-j", "CHECKSUM", "--checksum-fill"}
-	rulesList = append(rulesList, aclRule1, aclRule2)
-
 	// XXX To monitor flows (Local/Switch instances) we should
 	// add connection tracking rules to mangle table at PREROUTING hook.
 	switch aclArgs.NIType {
