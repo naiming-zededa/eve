@@ -2,14 +2,16 @@
 # shellcheck shell=dash
 #
 # This script is an entry point for a standalone installer.
-# It is expected to probe for the destination installtion
+# It is expected to probe for the destination installation
 # media and arrange for source files to be in /parts. Some
 # of these files will be supplied from outside of the container
 # in /bits, some will be constructed on the fly depending
 # on settings that were passed via kernel command line:
 #   eve_install_disk
+#   eve_install_server
 #   eve_pause_before_install
 #   eve_pause_after_install
+#   eve_reboot_after_install
 #   eve_install_skip_config
 #   eve_install_skip_persist
 #   eve_install_skip_rootfs
@@ -155,8 +157,11 @@ INSTALL_PERSIST=${INSTALL_PERSIST:-$INSTALL_DEV}
 # now lets figure out whether we have installation material
 mkdir /parts || :
 CONFIG_PART=$(find_part CONFIG "$(root_dev)")
-if [ -n "$CONFIG_PART" ] ; then
-   ln -s /dev/$CONFIG_PART /parts/config.img
+CONFIG_PART="${CONFIG_PART:+"/dev/"}${CONFIG_PART:-"/bits/config.img"}"
+if [ -e "$CONFIG_PART" ]; then
+   dd if="$CONFIG_PART" of=/parts/config.img bs=1M
+   tr ' ' '\012' < /proc/cmdline | sed -ne '/^eve_install_server=/s#^.*=##p' > /tmp/eve_install_server
+   [ ! -s /tmp/eve_install_server ] || mcopy -i /parts/config.img -o /tmp/eve_install_server ::/server
 fi
 
 FILE_PARTS="persist.img config.img rootfs.img"
@@ -167,7 +172,7 @@ done
 for i in $FILE_PARTS; do
    SOURCE="/bits/$i"
    [ -e "$SOURCE" ] || SOURCE=/dev/null
-   [ -L "/parts/$i" ] || ln -s "$SOURCE" "/parts/$i"
+   [ -e "/parts/$i" ] || ln -s "$SOURCE" "/parts/$i"
 done
 
 # finally lets see if we were given any overrides
@@ -231,8 +236,16 @@ for p in CONFIG INVENTORY P3; do
 done
 
 # we need a copy of these in tmpfs so that a block device with rootfs can be yanked
-cp /sbin/poweroff /bin/sleep /
-echo "NOTICE: Device will now power off. Remove the USB stick and power it back on to complete the installation." >/dev/console
-/sleep 5
+cp /sbin/poweroff /sbin/reboot /bin/sleep /
+# we also maybe asked to reboot after install
+if grep -q eve_reboot_after_install /proc/cmdline; then
+  echo "NOTICE: Device will now reboot." >/dev/console
+  /sleep 5
 
-/poweroff -f
+  /reboot -f
+else
+  echo "NOTICE: Device will now power off. Remove the USB stick and power it back on to complete the installation." >/dev/console
+  /sleep 5
+
+  /poweroff -f
+fi
