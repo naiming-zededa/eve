@@ -10,6 +10,18 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"net"
+	"os"
+	"path"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
 	"github.com/euank/go-kmsg-parser/kmsgparser"
 	"github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/google/go-cmp/cmp"
@@ -22,17 +34,6 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/pubsub/socketdriver"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/sirupsen/logrus"
-	"io"
-	"io/ioutil"
-	"net"
-	"os"
-	"path"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
-	"syscall"
-	"time"
 )
 
 const (
@@ -47,6 +48,8 @@ const (
 	collectDir   = types.NewlogCollectDir
 	uploadDevDir = types.NewlogUploadDevDir
 	uploadAppDir = types.NewlogUploadAppDir
+	keepSentDir  = types.NewlogKeepSentQueueDir
+	failSendDIr  = types.NewlogDir + "/failedUpload"
 	panicFileDir = types.NewlogDir + "/panicStacks"
 	symlinkFile  = collectDir + "/current.device.log"
 	tmpSymlink   = collectDir + "/tmp-sym.dev.log"
@@ -58,10 +61,7 @@ const (
 	maxGzipFileSize  int64 = 50000  // maximum gzipped file size for upload in bytes
 	defaultSyncCount       = 30     // default log events flush/sync to disk file
 
-	startCleanupTime int = 14400 // 10 hours disconnect
-	startRemoveTime  int = startCleanupTime / 2
-
-	minSpaceCleanupMB uint64 = 100 // start to cleanup if space in /persist is less than 100M
+	maxToSendMbytes uint32 = 2048 // default 2 Gbytes for log files remains on disk
 
 	ansi = "[\u0009\u001B\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PRZcf-ntqry=><~]))"
 )
@@ -70,14 +70,16 @@ var (
 	logger *logrus.Logger
 	log    *base.LogObject
 
-	msgIDCounter  uint64 = 1           // every log message increments the msg-id by 1
-	logmetrics    types.NewlogMetrics  // the log metric, publishes to zedagent
+	msgIDDevCnt   uint64              = 1 // every log message increments the msg-id by 1
+	logmetrics    types.NewlogMetrics     // the log metric, publishes to zedagent
 	devMetaData   devMeta
 	logmetaData   string
 	syncToFileCnt int    // every 'N' log event count flush to log file
-	spaceAvailMB  uint64 // '/persist' disk space available
+	persistMbytes uint64 // '/persist' disk space total in Mbytes
 	gzipFilesCnt  int64  // total gzip files written
 	panicBuf      []byte // buffer to save panic crash stack
+
+	limitGzipFilesMbyts uint32 // maximum Mbytes for gzip files remain to be sent up
 
 	enableFastUpload bool // enable fast upload to controller similar to previous log operation
 
@@ -100,8 +102,10 @@ var (
 
 // for app Domain-ID mapping into UUID and DisplayName
 type appDomain struct {
-	appUUID string
-	appName string
+	appUUID     string
+	appName     string
+	domainName  string
+	msgIDAppCnt uint64
 }
 
 type inputEntry struct {
@@ -119,10 +123,11 @@ type inputEntry struct {
 
 // collection time device/app temp file stats for file size and time limit
 type statsLogFile struct {
-	index     int
-	file      *os.File
-	size      int32
-	starttime time.Time
+	index      int
+	file       *os.File
+	size       int32
+	starttime  time.Time
+	domainName string
 }
 
 // file info passing from collection to compression threads
@@ -158,7 +163,8 @@ func main() {
 		syncToFileCnt = 1
 	}
 
-	spaceAvailMB = getAvailableSpace()
+	persistMbytes = getPersistSpace()
+	limitGzipFilesMbyts = maxToSendMbytes
 
 	log.Functionf("newlogd: starting... restarted %v", restarted)
 
@@ -288,6 +294,8 @@ func main() {
 				log.Error(err)
 			}
 			log.Tracef("newlodg main: Published newlog metrics at %s", time.Now().String())
+			// check and handle if logfile quota exceeded
+			checkKeepQuota()
 
 		case change := <-subDomainStatus.MsgChan():
 			subDomainStatus.ProcessChange(change)
@@ -304,8 +312,6 @@ func main() {
 		case tmpLogfileInfo := <-movefileChan:
 			// handle logfile to gzip conversion work
 			doMoveCompressFile(tmpLogfileInfo)
-			// do space management/clean
-			mayDoSpaceCleanup(tmpLogfileInfo.isApp)
 
 		case panicBuf := <- panicFileChan:
 			// save panic stack into files
@@ -415,8 +421,10 @@ func handleDomainStatusImp(ctxArg interface{}, key string, statusArg interface{}
 	log.Tracef("handleDomainStatusModify: add %s to %s",
 		status.DomainName, status.UUIDandVersion.UUID.String())
 	appD := appDomain{
-		appUUID: status.UUIDandVersion.UUID.String(),
-		appName: status.DisplayName,
+		appUUID:     status.UUIDandVersion.UUID.String(),
+		appName:     status.DisplayName,
+		domainName:  status.DomainName,
+		msgIDAppCnt: 1,
 	}
 	domainUUID[status.DomainName] = appD
 	log.Tracef("handleDomainStatusModify: done for %s", key)
@@ -462,6 +470,12 @@ func handleGlobalConfigImp(ctxArg interface{}, key string, statusArg interface{}
 			}
 		}
 		enableFastUpload = enabled
+
+		// get user specified disk quota for logs and cap at 10% of /persist space
+		limitGzipFilesMbyts = gcp.GlobalValueInt(types.LogRemainToSendMBytes)
+		if limitGzipFilesMbyts > uint32(persistMbytes / 10) {
+			limitGzipFilesMbyts = uint32(persistMbytes / 10)
+		}
 	}
 	log.Tracef("handleGlobalConfigModify done for %s, debug set %v, fastupload enabled %v", key, debug, enableFastUpload)
 }
@@ -718,12 +732,13 @@ func writelogFile(logChan <-chan inputEntry, moveChan chan fileChanInfo) {
 			timeIdx++
 			checkLogTimeExpire(fileinfo, &devStats, moveChan)
 			checklogTimer = time.NewTimer(5 * time.Second)  // check the file time limit every 5 seconds
-			if timeIdx%360 == 0 {                           // every half an hour check space left
-				spaceAvailMB = getAvailableSpace()
-			}
 
 		case entry := <-logChan:
 			appuuid := checkAppEntry(&entry)
+			var appM statsLogFile
+			if appuuid != "" {
+				appM = getAppStatsMap(appuuid)
+			}
 			timeS := getPtypeTimestamp(entry.timestamp)
 			mapLog := logs.LogEntry{
 				Severity:  entry.severity,
@@ -731,15 +746,13 @@ func writelogFile(logChan <-chan inputEntry, moveChan chan fileChanInfo) {
 				Content:   entry.content,
 				Iid:       entry.pid,
 				Filename:  entry.filename,
-				Msgid:     msgIDCounter,
+				Msgid:     updateLogMsgID(appM.domainName),
 				Function:  entry.function,
 				Timestamp: timeS,
 			}
 			mapJentry, _ := json.Marshal(&mapLog)
 			logline := string(mapJentry) + "\n"
-			msgIDCounter++
 			if appuuid != "" {
-				appM := getAppStatsMap(appuuid)
 				len := writelogEntry(&appM, logline)
 
 				logmetrics.AppMetrics.NumBytesWrite += uint64(len)
@@ -784,14 +797,42 @@ func checkAppEntry(entry *inputEntry) string {
 	return appuuid
 }
 
+// updateLogMsgID - handles the msgID for log for both dev and apps
+// dev log does not have app-uuid, thus domainName passed in is ""
+func updateLogMsgID(domainName string) uint64 {
+	var msgid uint64
+	if domainName == "" {
+		msgid = msgIDDevCnt
+		msgIDDevCnt++
+	} else {
+		if _, ok := domainUUID[domainName]; ok {
+			appD := domainUUID[domainName]
+			msgid = appD.msgIDAppCnt
+			appD.msgIDAppCnt++
+			domainUUID[domainName] = appD
+		}
+	}
+
+	return msgid
+}
+
 func getAppStatsMap(appuuid string) statsLogFile {
 	if _, ok := appStatsMap[appuuid]; !ok {
 		applogname := appPrefix + appuuid + ".log"
 		applogfile := startTmpfile(collectDir, applogname, true)
 
+		var domainName string
+		for _, appD := range domainUUID {
+			if appD.appUUID == appuuid {
+				domainName = appD.domainName
+				break
+			}
+		}
+
 		appM := statsLogFile{
-			file:      applogfile,
-			starttime: time.Now(),
+			file:       applogfile,
+			starttime:  time.Now(),
+			domainName: domainName,
 		}
 		appStatsMap[appuuid] = appM
 
@@ -834,79 +875,105 @@ func writelogEntry(stats *statsLogFile, logline string) int {
 	return len
 }
 
-func mayDoSpaceCleanup(isApp bool) {
-	// check the space first
+type gfileStats struct {
+	isSent   bool
+	filename string
+	filesize int64
+}
 
-	var initialCleanTime int64
-	outOfSpace := spaceAvailMB < minSpaceCleanupMB
-	// check the cleanup if we fail to send to cloud or disk space is low
-	if !logmetrics.FailedToSend && !outOfSpace {
-		return
+func checkDirGzfiles(sfiles map[string]gfileStats, logdir string) ([]string, int64, error) {
+	var sizes int64
+
+	if _, err := os.Stat(logdir); err != nil {
+		return nil, sizes, err
 	}
-	nowSec := int(time.Since(logmetrics.FailSentStartTime).Seconds())
-	if nowSec > startCleanupTime || outOfSpace {
-		fileTime := 0
-		var gzipDir, gotFileName string
-		if isApp {
-			gzipDir = uploadAppDir
-		} else {
-			gzipDir = uploadDevDir
-		}
-		files, err := ioutil.ReadDir(gzipDir)
-		if err != nil {
-			log.Fatal("mayDoSpaceCleanup: read dir error", err)
-		}
 
-		// recycle the gzip files
-		// (1) If it's fail to connect to cloud, find the file to remove is: FailSentStartTime + startRemoveTime
-		//     in other words 5 hours after the disconnect to server, middle of keep 10 hours of gzip data
-		// (2) If it's /persist out of space case, find the middle of the earliest file to now
-		if outOfSpace {
-			oldestFileSec := nowSec
-			for _, f := range files {
-				if f.IsDir() {
-					continue
-				}
-				isgzip, fTime := getTimeNumber(isApp, f.Name())
-				if !isgzip {
-					continue
-				}
-				if fTime < oldestFileSec {
-					oldestFileSec = fTime
-				}
-			}
-			if oldestFileSec == nowSec { // not found
-				return
-			}
-			initialCleanTime = int64((nowSec - oldestFileSec) / 2)
-		} else {
-			initialCleanTime = logmetrics.FailSentStartTime.Add(time.Duration(startRemoveTime) * time.Second).Unix()
-		}
+	files, err := ioutil.ReadDir(logdir)
+	if err != nil {
+		return nil, sizes, err
+	}
 
-		// find the gzip first gzip file which is after 5 hours of failure and remove it
-		for _, f := range files {
-			if f.IsDir() {
+	var alreadySent bool
+	if logdir == keepSentDir {
+		alreadySent = true
+	}
+
+	keys := make([]string, 0, len(files))
+	for _, f := range files {
+		fname := f.Name()
+		fsize := f.Size()
+		fs := gfileStats{
+			filename: logdir + "/" + fname,
+			filesize: fsize,
+			isSent: alreadySent,
+		}
+		sizes += fsize
+
+		fname2 := strings.TrimSuffix(fname, ".gz")
+		fname3 := strings.Split(fname2, ".log.")
+		if len(fname3) != 2 {
+			continue
+		}
+		keys = append(keys, fname3[1])
+		sfiles[fname3[1]] = fs
+	}
+
+	return keys, sizes, nil
+}
+
+// checkKeepQuota - keep gzip file sizes below the default or user defined quota limit
+func checkKeepQuota() {
+	maxSize := int64(limitGzipFilesMbyts * 1000000)
+	sfiles := make(map[string]gfileStats)
+
+	key0, size0, err := checkDirGzfiles(sfiles, keepSentDir)
+	if err != nil {
+		log.Errorf("checkKeepQuota: keepSentDir %v", err)
+	}
+	key1, size1, err := checkDirGzfiles(sfiles, uploadAppDir)
+	if err != nil {
+		log.Errorf("checkKeepQuota: AppDir %v", err)
+	}
+	key2, size2, err := checkDirGzfiles(sfiles, uploadDevDir)
+	if err != nil {
+		log.Errorf("checkKeepQuota: DevDir %v", err)
+	}
+	key3, size3, err := checkDirGzfiles(sfiles, failSendDIr)
+	if err != nil && !os.IsNotExist(err) {
+		log.Errorf("checkKeepQuota: FailToSendDir %v", err)
+	}
+
+	totalsize := size0 + size1 + size2 + size3
+	removed := 0
+	if totalsize > maxSize {
+		keys := key0
+		keys = append(keys, key1...)
+		keys = append(keys, key2...)
+		keys = append(keys, key3...)
+		sort.Strings(keys)
+
+		for _, key := range keys {
+			if _, ok := sfiles[key]; !ok {
 				continue
 			}
-			isgzip, fTime := getTimeNumber(isApp, f.Name())
-			if !isgzip {
+			fs := sfiles[key]
+			if _, err := os.Stat(fs.filename); err != nil {
 				continue
 			}
-			if fTime > int(initialCleanTime) {
-				if fileTime == 0 || fileTime > fTime {
-					fileTime = fTime
-					gotFileName = f.Name()
-				}
+			if err := os.Remove(fs.filename); err != nil {
+				log.Errorf("checkKeepQuota: remove failed %s, %v", fs.filename, err)
+				continue
+			}
+			if !fs.isSent {
+				logmetrics.NumGZipFileRemoved++
+			}
+			removed++
+			totalsize -= fs.filesize
+			if totalsize < maxSize {
+				break
 			}
 		}
-
-		if fileTime > 0 && gotFileName != "" {
-			theFile := gzipDir + "/" + gotFileName
-			err := os.Remove(theFile)
-			if err != nil {
-				log.Fatal("mayDoSpaceCleanup: remove file error", err)
-			}
-		}
+		log.Tracef("checkKeepQuota: %d gzip files removed", removed)
 	}
 }
 
@@ -1078,36 +1145,6 @@ func gzipFileNameGet(isApp bool, timeNum int, dirName, appUUID string) string {
 		outfileName = devPrefix + strconv.Itoa(timeNum) + ".gz"
 	}
 	return dirName + "/" + outfileName
-}
-
-func getTimeNumber(isApp bool, fName string) (bool, int) {
-	if isApp {
-		if strings.HasPrefix(fName, appPrefix) && strings.HasSuffix(fName, ".gz") {
-			fStr1 := strings.TrimPrefix(fName, appPrefix)
-			fStr := strings.Split(fStr1, types.AppSuffix)
-			if len(fStr) != 2 {
-				err := fmt.Errorf("app split is not 2")
-				log.Fatal(err)
-			}
-			fStr2 := strings.TrimSuffix(fStr[1], ".gz")
-			fTime, err := strconv.Atoi(fStr2)
-			if err != nil {
-				log.Fatal(err)
-			}
-			return true, fTime
-		}
-	} else {
-		if strings.HasPrefix(fName, devPrefix) && strings.HasSuffix(fName, ".gz") {
-			fStr1 := strings.TrimPrefix(fName, devPrefix)
-			fStr2 := strings.TrimSuffix(fStr1, ".gz")
-			fTime, err := strconv.Atoi(fStr2)
-			if err != nil {
-				log.Fatal(err)
-			}
-			return true, fTime
-		}
-	}
-	return false, 0
 }
 
 func getAppuuidFromLogfile(tmplogfileInfo fileChanInfo) string {
@@ -1444,15 +1481,14 @@ func getPtypeTimestamp(timeStr string) *timestamp.Timestamp {
 	return tt
 }
 
-// get available MBytes in '/persis' partition on device
-func getAvailableSpace() uint64 {
+// get total MBytes in '/persist' partition on device
+func getPersistSpace() uint64 {
 	var stat syscall.Statfs_t
 	err := syscall.Statfs(types.PersistDir, &stat)
 	if err != nil {
-		log.Error(err)
-		return spaceAvailMB
+		log.Fatal(err)
 	}
-	return stat.Bavail * uint64(stat.Bsize) / uint64(1000000)
+	return stat.Blocks * uint64(stat.Bsize) / uint64(1000000)
 }
 
 // getSyslogMsg - go routine to handle syslog input
@@ -1484,7 +1520,7 @@ func getSyslogMsg(loggerChan chan inputEntry) {
 		log.Tracef("getSyslogMsg (%d) entry msg %s", logmetrics.NumSyslogMessages, entry.content)
 
 		loggerChan <- entry
-    }
+	}
 }
 
 //func listenUnix() (net.PacketConn, error) {
