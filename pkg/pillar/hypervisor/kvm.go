@@ -424,6 +424,7 @@ func (ctx kvmContext) Setup(status types.DomainStatus, config types.DomainConfig
 
 	spec.AdjustMemLimit(config, qemuOverHead)
 	spec.Get().Process.Args = args
+	logrus.Infof("Hypervisor args: %v", args)
 	if err := spec.CreateContainer(true); err != nil {
 		return logError("Failed to create container for task %s from %v: %v", status.DomainName, config, err)
 	}
@@ -630,7 +631,7 @@ func waitForQmp(domainName string) error {
 			if waited > maxDelay {
 				// Give up
 				logrus.Warnf("waitForQmp for %s: giving up", domainName)
-				return logError("Qmp not found")
+				return logError("Qmp not found: error %v", err)
 			}
 			delay = 2 * delay
 			if delay > time.Minute {

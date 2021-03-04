@@ -58,9 +58,9 @@ func (config AppNetworkConfig) LogModify(logBase *base.LogObject, old interface{
 			AddField("old-activate", oldConfig.Activate).
 			Noticef("App network config modify")
 	} else {
-		// XXX remove?
+		// Log at Function level
 		logObject.CloneAndAddField("diff", cmp.Diff(oldConfig, config)).
-			Noticef("App network config modify other change")
+			Functionf("App network config modify other change")
 	}
 }
 
@@ -156,9 +156,9 @@ func (status AppNetworkStatus) LogModify(logBase *base.LogObject, old interface{
 			AddField("old-activated", oldStatus.Activated).
 			Noticef("App network status modify")
 	} else {
-		// XXX remove?
+		// Log at Function level
 		logObject.CloneAndAddField("diff", cmp.Diff(oldStatus, status)).
-			Noticef("App network status modify other change")
+			Functionf("App network status modify other change")
 	}
 
 	if status.HasError() {
@@ -166,7 +166,7 @@ func (status AppNetworkStatus) LogModify(logBase *base.LogObject, old interface{
 		logObject.CloneAndAddField("activated", status.Activated).
 			AddField("error", errAndTime.Error).
 			AddField("error-time", errAndTime.ErrorTime).
-			Errorf("App network status modify")
+			Noticef("App network status modify")
 	}
 }
 
@@ -368,9 +368,9 @@ func (config DevicePortConfigList) LogModify(logBase *base.LogObject, old interf
 			AddField("old-num-portconfig-int64", len(oldConfig.PortConfigList)).
 			Noticef("DevicePortConfigList modify")
 	} else {
-		// XXX remove?
+		// Log at Trace level - most likely just a timestamp change
 		logObject.CloneAndAddField("diff", cmp.Diff(oldConfig, config)).
-			Noticef("DevicePortConfigList modify other change")
+			Tracef("DevicePortConfigList modify other change")
 	}
 
 }
@@ -499,10 +499,6 @@ func (config DevicePortConfig) LogModify(logBase *base.LogObject, old interface{
 			AddField("old-last-error", oldConfig.LastError).
 			AddField("old-state", oldConfig.State.String()).
 			Noticef("DevicePortConfig modify")
-	} else {
-		// XXX remove?
-		logObject.CloneAndAddField("diff", cmp.Diff(oldConfig, config)).
-			Noticef("DevicePortConfig modify other change")
 	}
 	// XXX which fields to compare/log?
 	for i, p := range config.Ports {
@@ -1035,10 +1031,6 @@ func (status DeviceNetworkStatus) LogModify(logBase *base.LogObject, old interfa
 				AddField("old-last-succeeded", op.LastSucceeded).
 				AddField("old-last-failed", op.LastFailed).
 				Noticef("DeviceNetworkStatus port modify")
-		} else {
-			logObject.CloneAndAddField("ifname", p.IfName).
-				AddField("diff", cmp.Diff(op, p)).
-				Noticef("DeviceNetworkStatus port modify other change")
 		}
 	}
 }
@@ -1893,10 +1885,6 @@ type NetworkInstanceInfo struct {
 	// Set of vifs on this bridge
 	Vifs []VifNameMac
 
-	// Any errrors from provisioning the network
-	// ErrorAndTime provides SetErrorNow() and ClearError()
-	ErrorAndTime
-
 	// Vif metric map. This should have a union of currently existing
 	// vifs and previously deleted vifs.
 	// XXX When a vif is removed from bridge (app instance delete case),
@@ -2165,6 +2153,10 @@ type NetworkInstanceConfig struct {
 
 	// For other network services - Proxy / StrongSwan etc..
 	OpaqueConfig string
+
+	// Any errrors from the parser
+	// ErrorAndTime provides SetErrorNow() and ClearError()
+	ErrorAndTime
 }
 
 func (config *NetworkInstanceConfig) Key() string {
