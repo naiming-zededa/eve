@@ -1582,7 +1582,8 @@ func configToStatus(ctx *domainContext, config types.DomainConfig,
 			}
 			status.EnvVariables = envList
 		} else {
-			if config.MetaDataType == types.MetaDataDrive {
+			switch config.MetaDataType {
+			case types.MetaDataDrive, types.MetaDataDriveMultipart:
 				ds, err := createCloudInitISO(ctx, config, ciStr)
 				if err != nil {
 					return err
@@ -2153,8 +2154,10 @@ func createCloudInitISO(ctx *domainContext,
 	didMultipart := false
 	// If we need to help the guest VM we look for MIME multi-part
 	// and use it to lay out the file/directory structure for the ISO
-	// image. If the content is not multi-part we treat it as normal.
-	if ctx.processCloudInitMultiPart {
+	// image. Even if set, If the content is not multi-part we treat it
+	// as normal and fill in a user-data file below.
+	if config.MetaDataType == types.MetaDataDriveMultipart ||
+		ctx.processCloudInitMultiPart {
 		didMultipart, err = handleMimeMultipart(dir, ciStr)
 		if err != nil {
 			return nil, err
@@ -2270,7 +2273,7 @@ func handlePhysicalIOAdapterListImpl(ctxArg interface{}, key string,
 			len(aa.IoBundleList))
 
 		// check for mismatched PCI-ids and assignment groups and mark as errors
-		aa.CheckBadAssignmentGroups(log)
+		aa.CheckBadAssignmentGroups(log, hyper.PCISameController)
 		for i := range aa.IoBundleList {
 			ib := &aa.IoBundleList[i]
 			log.Functionf("handlePhysicalIOAdapterListImpl: new Adapter: %+v",
@@ -2315,7 +2318,7 @@ func handlePhysicalIOAdapterListImpl(ctxArg interface{}, key string,
 			aa.AddOrUpdateIoBundle(log, *ib)
 
 			// check for mismatched PCI-ids and assignment groups and mark as errors
-			aa.CheckBadAssignmentGroups(log)
+			aa.CheckBadAssignmentGroups(log, hyper.PCISameController)
 			// Lookup since it could have changed
 			ib = aa.LookupIoBundlePhylabel(ib.Phylabel)
 			updatePortAndPciBackIoBundle(ctx, ib, false)
@@ -2380,7 +2383,7 @@ func updatePortAndPciBackIoBundle(ctx *domainContext, ib *types.IoBundle,
 	// expand list to include other PCI functions on the same PCI controller
 	// since they need to be treated as part of the same bundle even if the
 	// EVE controller doesn't know it
-	list = aa.ExpandControllers(log, list)
+	list = aa.ExpandControllers(log, list, hyper.PCISameController)
 	for _, ib := range list {
 		if types.IsPort(ctx.deviceNetworkStatus, ib.Ifname) {
 			isPort = true
