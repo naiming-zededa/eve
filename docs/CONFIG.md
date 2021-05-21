@@ -46,6 +46,8 @@ The above build/USB file can specify multiple management interfaces, as well as
 non-management interface, and can specify static IP and DNS configuration
 (for environments where DHCP is not used), plus WiFi and cellular modem specifics. In addition it can specify proxies using several different mechanism.
 
+The build/USB file should include a TimePriority field, since this is used to determine whether the information from the file or from the controller should be applied; the more recent information is what will be used by EVE.
+
 ### Example DevicePortConfig
 
 An example file to specify using WPAD to retrieve proxy configuration on eth0 is:
@@ -53,6 +55,7 @@ An example file to specify using WPAD to retrieve proxy configuration on eth0 is
 ```json
 {
     "Version": 1,
+    "TimePriority": "2021-05-20T22:13:31.07683525Z",
     "Ports": [
         {
             "AddrSubnet": "",
@@ -100,7 +103,8 @@ using the proxy server's certificate in PEM format, here is an example:
             "NetworkProxyEnable": false,
             "NetworkProxyURL": "",
             "ProxyCertPEM": [
-                "MIIDSjCCAjKgAwIBAgIQRK+wgNajJ7qJMDmGLvhAazANBgkqhkiG9w0BAQUFADA/
+                "-----BEGIN CERTIFICATE-----
+                MIIDSjCCAjKgAwIBAgIQRK+wgNajJ7qJMDmGLvhAazANBgkqhkiG9w0BAQUFADA/
                 MSQwIgYDVQQKExtEaWdpdGFsIFNpZ25hdHVyZSBUcnVzdCBDby4xFzAVBgNVBAMT
                 DkRTVCBSb290IENBIFgzMB4XDTAwMDkzMDIxMTIxOVoXDTIxMDkzMDE0MDExNVow
                 PzEkMCIGA1UEChMbRGlnaXRhbCBTaWduYXR1cmUgVHJ1c3QgQ28uMRcwFQYDVQQD
@@ -117,7 +121,8 @@ using the proxy server's certificate in PEM format, here is an example:
                 AvHRAosZy5Q6XkjEGB5YGV8eAlrwDPGxrancWYaLbumR9YbK+rlmM6pZW87ipxZz
                 R8srzJmwN0jP41ZL9c8PDHIyh8bwRLtTcm1D9SZImlJnt1ir/md2cXjbDaJWFBM5
                 JDGFoqgCWjBH4d1QB7wCCZAA62RjYJsWvIjJEubSfZGL+T0yjWW06XyxV3bqxbYo
-                Ob8VZRzI9neWagqNdwvYkQsEjgfbKbYK7p2CNTUQ"
+                Ob8VZRzI9neWagqNdwvYkQsEjgfbKbYK7p2CNTUQ
+                -----END CERTIFICATE-----
             ],
 ```
 
@@ -133,6 +138,7 @@ An example file with eth0 being static and eth1 using dhcp is:
 ```json
 {
     "Version": 1,
+    "TimePriority": "2021-05-20T22:13:31.07683525Z",
     "Ports": [
         {
             "AddrSubnet": "38.108.181.238/24",
@@ -169,6 +175,7 @@ To specify that wwan0 should be secondary (only used if eth0 can not be used to 
 ```json
 {
     "Version": 1,
+    "TimePriority": "2021-05-20T22:13:31.07683525Z",
     "Ports": [
         {
             "Dhcp": 4,
@@ -201,6 +208,7 @@ use DHCP 0. For example,
 ```json
 {
     "Version": 1,
+    "TimePriority": "2021-05-20T22:13:31.07683525Z",
     "Ports": [
         {
             "Dhcp": 4,
@@ -282,7 +290,7 @@ Use [tools/makeusbconf.bat](../tools/makeusbconf.bat) for Windows OS. It will as
 The blinking pattern can be extracted from the shell using
 
 ```bash
-cat /var/tmp/ledmanager/config/ledconfig.json
+cat /run/global/LedBlinkCounter/ledconfig.json
 ```
 
 If the device does not have any usable IP addresses it will be 1,
@@ -296,13 +304,9 @@ One can test the connectivity to the controller using
     /opt/zededa/bin/diag
 ```
 
-The logs for the onboarding attempts are in ```/persist/`zboot curpart`/log/client.log```
+The logs for the onboarding attempts are in the [directories](./LOGGING.md) under ```/persist/newlog/``` with a source field set to `client`.
 
-If there are no IP addresses, the logs for network interface manager can help:
-
-```bash
-    /persist/`zboot curpart`/log/nim.log
-```
+If there are no IP addresses, the logs for network interface manager can help, which have a source field set to `nim`.
 
 The ```/persist/status/nim/DevicePortConfigList/global.json``` contains the set
 of DevicePortConfig which have been tried, any errors, last time they succeeded
