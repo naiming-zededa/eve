@@ -504,6 +504,21 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	zedagentCtx.subNetworkInstanceStatus = subNetworkInstanceStatus
 	subNetworkInstanceStatus.Activate()
 
+	subAppNetworkStatus, err := ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:   "zedrouter",
+		MyAgentName: agentName,
+		TopicImpl:   types.AppNetworkStatus{},
+		Activate:    false,
+		Ctx:         &zedagentCtx,
+		WarningTime: warningTime,
+		ErrorTime:   errorTime,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	getconfigCtx.subAppNetworkStatus = subAppNetworkStatus
+	subAppNetworkStatus.Activate()
+
 	subNetworkInstanceMetrics, err := ps.NewSubscription(pubsub.SubscriptionOptions{
 		AgentName:   "zedrouter",
 		MyAgentName: agentName,
@@ -701,6 +716,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		MyAgentName:   agentName,
 		TopicImpl:     types.EdgeNodeCert{},
 		Activate:      false,
+		Persistent:    true,
 		Ctx:           &zedagentCtx,
 		CreateHandler: handleEdgeNodeCertCreate,
 		ModifyHandler: handleEdgeNodeCertModify,
@@ -979,6 +995,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		case change := <-subEncryptedKeyFromDevice.MsgChan():
 			subEncryptedKeyFromDevice.ProcessChange(change)
 
+		case change := <-getconfigCtx.subAppNetworkStatus.MsgChan():
+			subAppNetworkStatus.ProcessChange(change)
+
 		case change := <-deferredChan:
 			start := time.Now()
 			zedcloud.HandleDeferred(zedcloudCtx, change, 100*time.Millisecond)
@@ -1102,12 +1121,23 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	metricsTickerHandle := <-handleChannel
 	getconfigCtx.metricsTickerHandle = metricsTickerHandle
 
+	//trigger channel for localProfile state machine
+	getconfigCtx.localProfileTrigger = make(chan Notify, 1)
+	//process saved local profile
+	processSavedProfile(&getconfigCtx)
+
 	// start the config fetch tasks, when zboot status is ready
 	log.Functionf("Creating %s at %s", "configTimerTask", agentlog.GetMyStack())
 	go configTimerTask(handleChannel, &getconfigCtx)
 	configTickerHandle := <-handleChannel
 	// XXX close handleChannels?
 	getconfigCtx.configTickerHandle = configTickerHandle
+
+	// start the local profile fetch tasks
+	log.Functionf("Creating %s at %s", "localProfileTimerTask", agentlog.GetMyStack())
+	go localProfileTimerTask(handleChannel, &getconfigCtx)
+	localProfileTickerHandle := <-handleChannel
+	getconfigCtx.localProfileTickerHandle = localProfileTickerHandle
 
 	// start cipher module tasks
 	cipherModuleStart(&zedagentCtx)
@@ -1149,6 +1179,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 
 		case change := <-getconfigCtx.subNodeAgentStatus.MsgChan():
 			subNodeAgentStatus.ProcessChange(change)
+
+		case change := <-getconfigCtx.subAppNetworkStatus.MsgChan():
+			subAppNetworkStatus.ProcessChange(change)
 
 		case change := <-subDeviceNetworkStatus.MsgChan():
 			subDeviceNetworkStatus.ProcessChange(change)

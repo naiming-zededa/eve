@@ -91,6 +91,9 @@ func parseConfig(config *zconfig.EdgeDevConfig, getconfigCtx *getconfigContext,
 		parseNetworkInstanceConfig(config, getconfigCtx)
 		parseContentInfoConfig(getconfigCtx, config)
 		parseVolumeConfig(getconfigCtx, config)
+
+		// parseProfile must be called before processing of app instances from config
+		parseProfile(getconfigCtx, config)
 		parseAppInstanceConfig(config, getconfigCtx)
 		getconfigCtx.lastProcessedConfig = time.Now()
 	}
@@ -480,7 +483,7 @@ func parseAppInstanceConfig(config *zconfig.EdgeDevConfig,
 		// fill in the collect stats IP address of the App
 		appInstance.CollectStatsIPAddr = net.ParseIP(cfgApp.GetCollectStatsIPAddr())
 
-		// fill the overlay/underlay config
+		// fill the app adapter config
 		parseAppNetworkConfig(&appInstance, cfgApp, config.Networks,
 			config.NetworkInstances)
 
@@ -512,6 +515,7 @@ func parseAppInstanceConfig(config *zconfig.EdgeDevConfig,
 		appInstance.RemoteConsole = cfgApp.GetRemoteConsole()
 		appInstance.CipherBlockStatus = parseCipherBlock(getconfigCtx, appInstance.Key(),
 			cfgApp.GetCipherData())
+		appInstance.ProfileList = cfgApp.ProfileList
 
 		// Verify that it fits and if not publish with error
 		checkAndPublishAppInstanceConfig(getconfigCtx, appInstance)
@@ -1545,6 +1549,7 @@ func parseUnderlayNetworkConfigEntry(
 	}
 	// XXX set ulCfg.IntfOrder from API once available
 	ulCfg.IntfOrder = intfOrder
+	ulCfg.AccessVlanID = intfEnt.AccessVlanId
 	return ulCfg
 }
 
@@ -1624,6 +1629,7 @@ func parseConfigItems(config *zconfig.EdgeDevConfig, ctx *getconfigContext) {
 			log.Functionf("parseConfigItems: %s change from %d to %d",
 				"ConfigInterval", oldConfigInterval, newConfigInterval)
 			updateConfigTimer(newConfigInterval, ctx.configTickerHandle)
+			updateConfigTimer(newConfigInterval, ctx.localProfileTickerHandle)
 		}
 		if newMetricInterval != oldMetricInterval {
 			log.Functionf("parseConfigItems: %s change from %d to %d",

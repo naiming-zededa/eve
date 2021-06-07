@@ -45,9 +45,12 @@ type zedmanagerContext struct {
 	subDomainStatus      pubsub.Subscription
 	subGlobalConfig      pubsub.Subscription
 	subHostMemory        pubsub.Subscription
+	subZedAgentStatus    pubsub.Subscription
 	globalConfig         *types.ConfigItemValueMap
 	pubUuidToNum         pubsub.Publication
 	GCInitialized        bool
+	checkFreedResources  bool // Set when app instance has !Activated
+	currentProfile       string
 }
 
 var debug = false
@@ -250,6 +253,24 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	}
 	ctx.subHostMemory = subHostMemory
 
+	// subscribe to zedagent status events
+	subZedAgentStatus, err := ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:     "zedagent",
+		MyAgentName:   agentName,
+		TopicImpl:     types.ZedAgentStatus{},
+		Activate:      false,
+		Ctx:           &ctx,
+		CreateHandler: handleZedAgentStatusCreate,
+		ModifyHandler: handleZedAgentStatusModify,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx.subZedAgentStatus = subZedAgentStatus
+	subZedAgentStatus.Activate()
+
 	// Pick up debug aka log level before we start real work
 	for !ctx.GCInitialized {
 		log.Functionf("waiting for GCInitialized")
@@ -281,9 +302,46 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		case change := <-subAppInstanceConfig.MsgChan():
 			subAppInstanceConfig.ProcessChange(change)
 
+		case change := <-subZedAgentStatus.MsgChan():
+			subZedAgentStatus.ProcessChange(change)
+
 		case <-stillRunning.C:
 		}
 		ps.StillRunning(agentName, warningTime, errorTime)
+		if ctx.checkFreedResources {
+			start := time.Now()
+			checkRetry(&ctx)
+			ps.CheckMaxTimeTopic(agentName, "checkRetry", start,
+				warningTime, errorTime)
+			ctx.checkFreedResources = false
+		}
+	}
+}
+
+func checkRetry(ctxPtr *zedmanagerContext) {
+	log.Noticef("checkRetry")
+	items := ctxPtr.pubAppInstanceStatus.GetAll()
+	for _, st := range items {
+		status := st.(types.AppInstanceStatus)
+		if !status.MissingMemory {
+			continue
+		}
+		config := lookupAppInstanceConfig(ctxPtr, status.Key())
+		if config == nil {
+			log.Noticef("checkRetry: %s waiting for memory but no config",
+				status.Key())
+			continue
+		}
+		if !status.IsErrorSource(types.AppInstanceConfig{}) {
+			log.Noticef("checkRetry: %s waiting for memory but no error",
+				status.Key())
+			continue
+		}
+		status.ClearErrorWithSource()
+		status.MissingMemory = false
+
+		log.Noticef("checkRetry: %s waiting for memory", status.Key())
+		handleModify(ctxPtr, status.Key(), *config, *config)
 	}
 }
 
@@ -391,11 +449,14 @@ func handleCreate(ctxArg interface{}, key string,
 	log.Functionf("handleCreate(%v) for %s",
 		config.UUIDandVersion, config.DisplayName)
 
+	effectiveActivate := effectiveActivateCurrentProfile(config, ctx.currentProfile)
+
 	status := types.AppInstanceStatus{
-		UUIDandVersion: config.UUIDandVersion,
-		DisplayName:    config.DisplayName,
-		FixedResources: config.FixedResources,
-		State:          types.INITIAL,
+		EffectiveActivate: effectiveActivate,
+		UUIDandVersion:    config.UUIDandVersion,
+		DisplayName:       config.DisplayName,
+		FixedResources:    config.FixedResources,
+		State:             types.INITIAL,
 	}
 
 	// Do we have a PurgeCmd counter from before the reboot?
@@ -458,19 +519,6 @@ func handleCreate(ctxArg interface{}, key string,
 		allErrors += errStr
 	}
 
-	if !ctx.globalConfig.GlobalValueBool(types.IgnoreMemoryCheckForApps) {
-		remaining, err := getRemainingMemory(ctx)
-		if err != nil {
-			errStr := fmt.Sprintf("getRemainingMemory failed: %s\n",
-				err)
-			allErrors += errStr
-		} else if remaining < uint64(config.FixedResources.Memory)<<10 {
-			errStr := fmt.Sprintf("Remaining memory bytes %d app instance needs %d\n",
-				remaining, config.FixedResources.Memory<<10)
-			allErrors += errStr
-		}
-	}
-
 	// if some error, return
 	if allErrors != "" {
 		log.Errorf("AppInstance(Name:%s, UUID:%s): Errors in App Instance "+
@@ -502,6 +550,10 @@ func handleModify(ctxArg interface{}, key string,
 	log.Functionf("handleModify(%v) for %s",
 		config.UUIDandVersion, config.DisplayName)
 
+	effectiveActivate := effectiveActivateCurrentProfile(config, ctx.currentProfile)
+	status.EffectiveActivate = effectiveActivate
+	publishAppInstanceStatus(ctx, status)
+
 	// We handle at least ACL and activate changes. XXX What else?
 	// Not checking the version here; assume the microservices can handle
 	// some updates.
@@ -522,7 +574,7 @@ func handleModify(ctxArg interface{}, key string,
 			config.UUIDandVersion, config.DisplayName,
 			oldConfig.RestartCmd.Counter, config.RestartCmd.Counter,
 			needRestart)
-		if config.Activate {
+		if effectiveActivate {
 			// Will restart even if we crash/power cycle since that
 			// would also restart the app. Hence we can update
 			// the status counter here.
@@ -719,4 +771,72 @@ func handleGlobalConfigDelete(ctxArg interface{}, key string,
 		debugOverride, logger)
 	*ctx.globalConfig = *types.DefaultConfigItemValueMap()
 	log.Functionf("handleGlobalConfigDelete done for %s", key)
+}
+
+func handleZedAgentStatusCreate(ctxArg interface{}, key string,
+	statusArg interface{}) {
+	handleZedAgentStatusImpl(ctxArg, key, statusArg)
+}
+
+func handleZedAgentStatusModify(ctxArg interface{}, key string,
+	statusArg interface{}, oldStatusArg interface{}) {
+	handleZedAgentStatusImpl(ctxArg, key, statusArg)
+}
+
+func handleZedAgentStatusImpl(ctxArg interface{}, key string,
+	statusArg interface{}) {
+	ctxPtr := ctxArg.(*zedmanagerContext)
+	status := statusArg.(types.ZedAgentStatus)
+	if ctxPtr.currentProfile != status.CurrentProfile {
+		log.Noticef("handleZedAgentStatusImpl: CurrentProfile changed from %s to %s",
+			ctxPtr.currentProfile, status.CurrentProfile)
+		ctxPtr.currentProfile = status.CurrentProfile
+		updateBasedOnProfile(ctxPtr)
+	}
+	log.Functionf("handleZedAgentStatusImpl(%s) done", key)
+}
+
+// updateBasedOnProfile check all app instances with currentProfile, set EffectiveActivate and update app instances
+func updateBasedOnProfile(ctx *zedmanagerContext) {
+	pub := ctx.subAppInstanceConfig
+	items := pub.GetAll()
+	for _, c := range items {
+		config := c.(types.AppInstanceConfig)
+		effectiveActivate := effectiveActivateCurrentProfile(config, ctx.currentProfile)
+		status := lookupAppInstanceStatus(ctx, config.Key())
+		if status != nil {
+			if status.EffectiveActivate != effectiveActivate {
+				log.Functionf("updateBasedOnProfile: change activate state for %s from %t to %t",
+					config.Key(), status.EffectiveActivate, effectiveActivate)
+				status.EffectiveActivate = effectiveActivate
+				doUpdate(ctx, config, status)
+				publishAppInstanceStatus(ctx, status)
+			}
+		}
+	}
+}
+
+// returns effective Activate status based on Activate from app instance config and current profile
+func effectiveActivateCurrentProfile(config types.AppInstanceConfig, currentProfile string) bool {
+	if currentProfile == "" {
+		log.Functionf("effectiveActivateCurrentProfile(%s): empty current", config.Key())
+		// if currentProfile is empty set activate state from controller
+		return config.Activate
+	}
+	if len(config.ProfileList) == 0 {
+		log.Functionf("effectiveActivateCurrentProfile(%s): empty ProfileList", config.Key())
+		//we have no profile in list so we should use activate state from the controller
+		return config.Activate
+	}
+	for _, p := range config.ProfileList {
+		if p == currentProfile {
+			log.Functionf("effectiveActivateCurrentProfile(%s): profile form list (%s) match current (%s)",
+				config.Key(), p, currentProfile)
+			// pass config.Activate from controller if currentProfile is inside ProfileList
+			return config.Activate
+		}
+	}
+	log.Functionf("effectiveActivateCurrentProfile(%s): no match with current (%s)",
+		config.Key(), currentProfile)
+	return false
 }
