@@ -10,9 +10,12 @@
 package nim
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path"
 	"reflect"
 	"sort"
 	"time"
@@ -27,6 +30,7 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
 	"github.com/lf-edge/eve/pkg/pillar/ssh"
 	"github.com/lf-edge/eve/pkg/pillar/types"
+	fileutils "github.com/lf-edge/eve/pkg/pillar/utils/file"
 	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 )
@@ -270,6 +274,14 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	nimCtx.deviceNetworkContext.PubDeviceNetworkStatus = pubDeviceNetworkStatus
 	dnc := &nimCtx.deviceNetworkContext
 	devicenetwork.IngestPortConfigList(dnc)
+
+	// Check if we have a /config/DevicePortConfig/*.json which we need to
+	// take into account by copying it to /run/global/DevicePortConfig/
+	// We tag it with a OriginFile so that the file in /config/DevicePortConfig/
+	// will be deleted once we have published its content in
+	// the DevicePortConfigList.
+	// This avoids repeated application of this startup file.
+	ingestDevicePortConfig(&nimCtx)
 
 	// We get DevicePortConfig from three sources in this priority:
 	// 1. zedagent publishing DevicePortConfig
@@ -1187,4 +1199,67 @@ func isAssigned(ctx *nimContext, ifname string) bool {
 		return true
 	}
 	return false
+}
+
+const (
+	configDevicePortConfigDir = types.IdentityDirname + "/DevicePortConfig"
+	runDevicePortConfigDir    = "/run/global/DevicePortConfig"
+	maxReadSize               = 16384 // Punt on too large files
+)
+
+// ingestPortConfig reads all json files in configDevicePortConfigDir, ensures
+// they have a TimePriority, and adds a OriginFile to them and then writes to
+// runDevicePortConfigDir.
+// Later the OriginFile field will result in removing the original file from
+// /config/DevicePortConfig/ to avoid re-application.
+func ingestDevicePortConfig(ctx *nimContext) {
+	locations, err := ioutil.ReadDir(configDevicePortConfigDir)
+	if err != nil {
+		// Directory might not exist
+		return
+	}
+	for _, location := range locations {
+		if !location.IsDir() {
+			ingestDevicePortConfigFile(ctx, configDevicePortConfigDir,
+				runDevicePortConfigDir, location.Name())
+		}
+	}
+}
+
+func ingestDevicePortConfigFile(ctx *nimContext, oldDirname string, newDirname string, name string) {
+	filename := path.Join(oldDirname, name)
+	log.Noticef("ingestDevicePortConfigFile(%s)", filename)
+	str, _, err := fileutils.StatAndRead(log, filename, maxReadSize)
+	if err != nil {
+		log.Errorf("Failed to read file %s: %v", filename, err)
+		return
+	}
+	if str == "" {
+		log.Errorf("Ignore empty file %s", filename)
+		return
+	}
+
+	var dpc types.DevicePortConfig
+	err = json.Unmarshal([]byte(str), &dpc)
+	if err != nil {
+		log.Errorf("Could not parse json data in file %s: %s",
+			filename, err)
+		return
+	}
+	dpc.DoSanitize(log, true, false, "", true)
+	dpc.OriginFile = filename
+
+	// Save New config to file.
+	var data []byte
+	data, err = json.Marshal(dpc)
+	if err != nil {
+		log.Fatalf("Failed to json marshall new DevicePortConfig err %s",
+			err)
+	}
+	filename = path.Join(newDirname, name)
+	err = fileutils.WriteRename(filename, data)
+	if err != nil {
+		log.Errorf("Failed to write new DevicePortConfig to %s: %s",
+			filename, err)
+	}
 }
