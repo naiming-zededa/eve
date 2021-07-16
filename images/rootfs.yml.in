@@ -26,6 +26,10 @@ onboot:
    - name: storage-init
      image: STORAGE_INIT_TAG
 services:
+   - name: edgeview
+     image: EDGEVIEW_TAG
+     cgroupsPath: /eve/services/edgeview
+     oomScoreAdj: -999
    - name: newlogd
      image: NEWLOGD_TAG
      cgroupsPath: /eve/services/eve-newlog

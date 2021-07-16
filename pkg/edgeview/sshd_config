@@ -1,0 +1,8 @@
+Port 2222
+Protocol 2
+PermitRootLogin yes
+StrictModes yes
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+MaxStartups 2
+HOSTKey /id_rsa
