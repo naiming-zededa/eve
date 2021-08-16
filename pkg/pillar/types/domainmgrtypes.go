@@ -95,18 +95,28 @@ func (config DomainConfig) GetTaskName() string {
 }
 
 // DomainnameToUUID does the reverse of GetTaskName
-func DomainnameToUUID(name string) (uuid.UUID, error) {
+func DomainnameToUUID(name string) (uuid.UUID, string, int, error) {
 	// FIXME: we can likely drop this altogether
 	if name == "Domain-0" {
-		return uuid.UUID{}, nil
+		return uuid.UUID{}, "", 0, nil
 	}
 
 	res := strings.Split(name, ".")
-	if len(res) == 3 {
-		return uuid.FromString(res[0])
-	} else {
-		return uuid.UUID{}, fmt.Errorf("Unknown domainname %s", name)
+	if len(res) != 3 {
+		return uuid.UUID{}, "", 0, fmt.Errorf("Unknown domainname format %s",
+			name)
 	}
+	id, err := uuid.FromString(res[0])
+	if err != nil {
+		return uuid.UUID{}, "", 0, fmt.Errorf("Bad UUID %s: %w",
+			res[0], err)
+	}
+	appNum, err := strconv.Atoi(res[2])
+	if err != nil {
+		return uuid.UUID{}, "", 0, fmt.Errorf("Bad appNum %s: %w",
+			res[2], err)
+	}
+	return id, res[1], appNum, nil
 }
 
 func (config DomainConfig) Key() string {
@@ -362,6 +372,7 @@ type DiskConfig struct {
 	Format       zconfig.Format
 	MountDir     string
 	DisplayName  string
+	WWN          string
 }
 
 type DiskStatus struct {
@@ -373,6 +384,7 @@ type DiskStatus struct {
 	DisplayName  string
 	Devtype      string // XXX used internally by hypervisor; deprecate?
 	Vdev         string // Allocated
+	WWN          string
 }
 
 // DomainMetric carries CPU and memory usage. UUID=devUUID for the dom0/host metrics overhead

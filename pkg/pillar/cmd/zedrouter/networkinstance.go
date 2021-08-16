@@ -380,12 +380,30 @@ func handleNetworkInstanceDelete(ctxArg interface{}, key string,
 	if status.Activated {
 		doNetworkInstanceInactivate(ctx, status)
 	}
+	done := maybeNetworkInstanceDelete(ctx, status)
+	log.Functionf("handleNetworkInstanceDelete(%s) done %t", key, done)
+}
+
+// maybeNetworkInstanceDelete checks if the Vifs are gone and if so delete
+func maybeNetworkInstanceDelete(ctx *zedrouterContext, status *types.NetworkInstanceStatus) bool {
+	if lookupNetworkInstanceConfig(ctx, status.Key()) != nil {
+		log.Noticef("maybeNetworkInstanceDelete(%s) still config",
+			status.Key())
+		return false
+	}
+
+	if len(status.Vifs) != 0 {
+		log.Noticef("maybeNetworkInstanceDelete(%s) still %d Vifs",
+			status.Key(), len(status.Vifs))
+		return false
+	}
 	doNetworkInstanceDelete(ctx, status)
 	ctx.networkInstanceStatusMap.Delete(status.UUID)
-	pub.Unpublish(status.Key())
+	ctx.pubNetworkInstanceStatus.Unpublish(status.Key())
 
 	deleteNetworkInstanceMetrics(ctx, status.Key())
-	log.Functionf("handleNetworkInstanceDelete(%s) done\n", key)
+	log.Noticef("maybeNetworkInstanceDelete(%s) done", status.Key())
+	return true
 }
 
 func doNetworkInstanceCreate(ctx *zedrouterContext,
@@ -476,7 +494,7 @@ func doNetworkInstanceCreate(ctx *zedrouterContext,
 		ntpServers := types.GetNTPServers(*ctx.deviceNetworkStatus,
 			status.CurrentUplinkIntf)
 		createDnsmasqConfiglet(ctx, bridgeName,
-			status.BridgeIPAddr, &status.NetworkInstanceConfig,
+			status.BridgeIPAddr, status,
 			hostsDirpath, status.BridgeIPSets,
 			status.CurrentUplinkIntf, dnsServers, ntpServers)
 		startDnsmasq(bridgeName)
@@ -779,7 +797,7 @@ func restartDnsmasq(ctx *zedrouterContext, status *types.NetworkInstanceStatus) 
 	ntpServers := types.GetNTPServers(*ctx.deviceNetworkStatus,
 		status.CurrentUplinkIntf)
 	createDnsmasqConfiglet(ctx, bridgeName, status.BridgeIPAddr,
-		&status.NetworkInstanceConfig, hostsDirpath, status.BridgeIPSets,
+		status, hostsDirpath, status.BridgeIPSets,
 		status.CurrentUplinkIntf, dnsServers, ntpServers)
 	createHostDnsmasqFile(ctx, bridgeName)
 	startDnsmasq(bridgeName)
@@ -1186,23 +1204,27 @@ func doNetworkInstanceActivate(ctx *zedrouterContext,
 		}
 	case types.NetworkInstanceTypeLocal:
 		err = natActivate(ctx, status)
-		if err == nil {
-			err = createServer4(ctx, status.BridgeIPAddr,
-				status.BridgeName)
-		}
 
 	case types.NetworkInstanceTypeCloud:
 		err = vpnActivate(ctx, status)
-		if err == nil {
-			err = createServer4(ctx, status.BridgeIPAddr,
-				status.BridgeName)
-		}
 
 	default:
 		errStr := fmt.Sprintf("doNetworkInstanceActivate: NetworkInstance %d not yet supported",
 			status.Type)
 		err = errors.New(errStr)
 	}
+	if err == nil && status.Type != types.NetworkInstanceTypeSwitch &&
+		!status.Server4Running {
+		switch status.IpType {
+		case types.AddressTypeIPV4:
+			err = createServer4(ctx, status.BridgeIPAddr,
+				status.BridgeName)
+			if err == nil {
+				status.Server4Running = true
+			}
+		}
+	}
+
 	status.ProgUplinkIntf = status.CurrentUplinkIntf
 	// setup the ACLs for the bridge
 	// Here we explicitly adding the iptables rules, to the bottom of the
@@ -1271,10 +1293,8 @@ func doNetworkInstanceInactivate(
 	switch status.Type {
 	case types.NetworkInstanceTypeLocal:
 		natInactivate(ctx, status, false)
-		deleteServer4(ctx, status.BridgeIPAddr, status.BridgeName)
 	case types.NetworkInstanceTypeCloud:
 		vpnInactivate(ctx, status)
-		deleteServer4(ctx, status.BridgeIPAddr, status.BridgeName)
 	}
 
 	return
@@ -1299,7 +1319,10 @@ func doNetworkInstanceDelete(
 		log.Errorf("NetworkInstance(%s-%s): Type %d not yet supported",
 			status.DisplayName, status.UUID, status.Type)
 	}
-
+	if status.Server4Running {
+		deleteServer4(ctx, status.BridgeIPAddr, status.BridgeName)
+		status.Server4Running = false
+	}
 	doBridgeAclsDelete(ctx, status)
 	if status.BridgeName != "" {
 		stopDnsmasq(status.BridgeName, false, false)
@@ -1865,7 +1888,7 @@ func doNetworkInstanceFallback(
 			ntpServers := types.GetNTPServers(*ctx.deviceNetworkStatus,
 				status.CurrentUplinkIntf)
 			createDnsmasqConfiglet(ctx, bridgeName,
-				status.BridgeIPAddr, &status.NetworkInstanceConfig,
+				status.BridgeIPAddr, status,
 				hostsDirpath, status.BridgeIPSets,
 				status.CurrentUplinkIntf, dnsServers, ntpServers)
 			startDnsmasq(bridgeName)
@@ -1920,7 +1943,7 @@ func doNetworkInstanceFallback(
 			ntpServers := types.GetNTPServers(*ctx.deviceNetworkStatus,
 				status.CurrentUplinkIntf)
 			createDnsmasqConfiglet(ctx, bridgeName,
-				status.BridgeIPAddr, &status.NetworkInstanceConfig,
+				status.BridgeIPAddr, status,
 				hostsDirpath, status.BridgeIPSets,
 				status.CurrentUplinkIntf, dnsServers, ntpServers)
 			startDnsmasq(bridgeName)

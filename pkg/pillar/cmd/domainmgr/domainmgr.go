@@ -1630,6 +1630,7 @@ func configToStatus(ctx *domainContext, config types.DomainConfig,
 		ds.Format = dc.Format
 		ds.MountDir = dc.MountDir
 		ds.DisplayName = dc.DisplayName
+		ds.WWN = dc.WWN
 		// Generate Devtype for hypervisor package
 		// XXX can hypervisor look at something different?
 		if dc.Format == zconfig.Format_CONTAINER {
@@ -1967,6 +1968,7 @@ func handleDelete(ctx *domainContext, key string, status *types.DomainStatus) {
 	if err := os.Remove(filename); err != nil {
 		log.Errorln(err)
 	}
+	deleteCloudInitISO(ctx, *status)
 
 	status.PendingDelete = false
 	publishDomainStatus(ctx, status)
@@ -2219,9 +2221,9 @@ func parseEnvVariablesFromCloudInit(ciStr string) (map[string]string, error) {
 	return envList, nil
 }
 
-func cloudInitISOFileLocation(ctx *domainContext, config types.DomainConfig) string {
+func cloudInitISOFileLocation(ctx *domainContext, uuid uuid.UUID) string {
 	return fmt.Sprintf("%s/%s.cidata",
-		ciDirname, config.UUIDandVersion.UUID.String())
+		ciDirname, uuid.String())
 }
 
 // Create a isofs with user-data and meta-data and add it to DiskStatus
@@ -2233,7 +2235,7 @@ func cloudInitISOFileLocation(ctx *domainContext, config types.DomainConfig) str
 func createCloudInitISO(ctx *domainContext,
 	config types.DomainConfig, ciStr string) (*types.DiskStatus, error) {
 
-	fileName := cloudInitISOFileLocation(ctx, config)
+	fileName := cloudInitISOFileLocation(ctx, config.UUIDandVersion.UUID)
 
 	dir, err := ioutil.TempDir("", "cloud-init")
 	if err != nil {
@@ -2297,6 +2299,17 @@ func createCloudInitISO(ctx *domainContext,
 	// XXX can hypervisor look at something different?
 	ds.Devtype = "cdrom"
 	return ds, nil
+}
+
+// deleteCloudInitISO will check if a file exists and if so delete it
+func deleteCloudInitISO(ctx *domainContext, status types.DomainStatus) {
+	fileName := cloudInitISOFileLocation(ctx, status.UUIDandVersion.UUID)
+	if _, err := os.Stat(fileName); err != nil {
+		return
+	}
+	if err := os.RemoveAll(fileName); err != nil {
+		log.Error(err)
+	}
 }
 
 // mkisofs -output %s -volid cidata -joliet -rock %s, fileName, dir

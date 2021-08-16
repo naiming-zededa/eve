@@ -39,8 +39,6 @@ import (
 const (
 	agentName  = "zedrouter"
 	runDirname = "/run/zedrouter"
-	// DropMarkValue :
-	DropMarkValue = 0xFFFFFF
 	// Time limits for event loop handlers
 	errorTime   = 3 * time.Minute
 	warningTime = 40 * time.Second
@@ -153,7 +151,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	pubUuidToNum.ClearRestarted()
 
 	// Create the dummy interface used to re-direct DROP/REJECT packets.
-	createFlowMonDummyInterface(DropMarkValue)
+	createFlowMonDummyInterface()
 
 	// Pick up (mostly static) AssignableAdapters before we process
 	// any Routes; Pbr needs to know which network adapters are assignable
@@ -720,6 +718,7 @@ func handleInit(runDirname string) {
 
 	// Setup initial iptables rules
 	iptables.IptablesInit(log)
+	dropEscapedFlows()
 
 	// ipsets which are independent of config
 	createDefaultIpset()
@@ -1069,7 +1068,7 @@ func appNetworkDoActivateUnderlayNetwork(
 		ntpServers := types.GetNTPServers(*ctx.deviceNetworkStatus,
 			netInstStatus.CurrentUplinkIntf)
 		createDnsmasqConfiglet(ctx, bridgeName,
-			ulStatus.BridgeIPAddr, netInstConfig, hostsDirpath,
+			ulStatus.BridgeIPAddr, netInstStatus, hostsDirpath,
 			newIpsets, netInstStatus.CurrentUplinkIntf,
 			dnsServers, ntpServers)
 		startDnsmasq(bridgeName)
@@ -1204,7 +1203,7 @@ func checkAndRecreateAppNetwork(ctx *zedrouterContext, niStatus types.NetworkIns
 		}
 		// Any error to clear?
 		// XXX better to use ErrorWithSource and check for NetworkInstanceStatus?
-		if !status.AwaitNetworkInstance || !status.HasError() {
+		if !status.AwaitNetworkInstance && !status.HasError() {
 			continue
 		}
 
@@ -1478,7 +1477,6 @@ func doAppNetworkModifyUnderlayNetwork(
 	bridgeName := ulStatus.Bridge
 	appIPAddr := ulStatus.AllocatedIPAddr
 
-	netconfig := lookupNetworkInstanceConfig(ctx, ulConfig.Network.String())
 	netstatus := lookupNetworkInstanceStatus(ctx, ulConfig.Network.String())
 
 	aclArgs := types.AppNetworkACLArgs{IsMgmt: false, BridgeName: bridgeName,
@@ -1513,7 +1511,7 @@ func doAppNetworkModifyUnderlayNetwork(
 		ntpServers := types.GetNTPServers(*ctx.deviceNetworkStatus,
 			netstatus.CurrentUplinkIntf)
 		createDnsmasqConfiglet(ctx, bridgeName,
-			ulStatus.BridgeIPAddr, netconfig, hostsDirpath,
+			ulStatus.BridgeIPAddr, netstatus, hostsDirpath,
 			newIpsets, netstatus.CurrentUplinkIntf,
 			dnsServers, ntpServers)
 		startDnsmasq(bridgeName)
@@ -1611,19 +1609,9 @@ func appNetworkDoInactivateUnderlayNetwork(
 
 	bridgeName := ulStatus.Bridge
 
-	netconfig := lookupNetworkInstanceConfig(ctx,
-		ulStatus.Network.String())
-	if netconfig == nil {
-		errStr := fmt.Sprintf("no network config for %s",
-			ulStatus.Network.String())
-		err := errors.New(errStr)
-		addError(ctx, status, "lookupNetworkInstanceConfig", err)
-		return
-	}
 	netstatus := lookupNetworkInstanceStatus(ctx,
 		ulStatus.Network.String())
 	if netstatus == nil {
-		// We had a netconfig but no status!
 		errStr := fmt.Sprintf("no network status for %s",
 			ulStatus.Network.String())
 		err := errors.New(errStr)
@@ -1686,12 +1674,11 @@ func appNetworkDoInactivateUnderlayNetwork(
 		ntpServers := types.GetNTPServers(*ctx.deviceNetworkStatus,
 			netstatus.CurrentUplinkIntf)
 		createDnsmasqConfiglet(ctx, bridgeName,
-			ulStatus.BridgeIPAddr, netconfig, hostsDirpath,
+			ulStatus.BridgeIPAddr, netstatus, hostsDirpath,
 			newIpsets, netstatus.CurrentUplinkIntf,
 			dnsServers, ntpServers)
 		startDnsmasq(bridgeName)
 	}
-	netstatus.RemoveVif(log, ulStatus.Vif)
 	if netstatus.Type == types.NetworkInstanceTypeSwitch {
 		if ulStatus.AccessVlanID <= 1 {
 			netstatus.NumTrunkPorts--
@@ -1709,8 +1696,13 @@ func appNetworkDoInactivateUnderlayNetwork(
 	log.Functionf("set BridgeIPSets to %v for %s", newIpsets, netstatus.Key())
 	maybeRemoveStaleIpsets(staleIpsets)
 
-	// publish the changes to network instance status
-	publishNetworkInstanceStatus(ctx, netstatus)
+	netstatus.RemoveVif(log, ulStatus.Vif)
+	if maybeNetworkInstanceDelete(ctx, netstatus) {
+		log.Noticef("deleted network instance %s", netstatus.Key())
+	} else {
+		// publish the changes to network instance status
+		publishNetworkInstanceStatus(ctx, netstatus)
+	}
 }
 
 func pkillUserArgs(userName string, match string, printOnError bool) {

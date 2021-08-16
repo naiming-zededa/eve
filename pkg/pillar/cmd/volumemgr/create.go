@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/lf-edge/edge-containers/pkg/registry"
 	"github.com/lf-edge/eve/pkg/pillar/cas"
 	"github.com/lf-edge/eve/pkg/pillar/diskmetrics"
+	"github.com/lf-edge/eve/pkg/pillar/tgt"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/lf-edge/eve/pkg/pillar/zfs"
 )
@@ -50,13 +53,6 @@ func createVdiskVolume(ctx *volumemgrContext, status types.VolumeStatus,
 
 	switch persistFsType {
 	case types.PersistZFS:
-		pathToFile, err := getVolumeFilePath(ctx, status)
-		if err != nil {
-			errStr := fmt.Sprintf("Error obtaining file for zvol at volume %s, error=%v",
-				status.Key(), err)
-			log.Error(errStr)
-			return created, "", errors.New(errStr)
-		}
 		zVolName := status.ZVolName(types.VolumeZFSPool)
 		zVolDevice := zfs.GetZVolDeviceByDataset(zVolName)
 		if zVolDevice == "" {
@@ -64,51 +60,67 @@ func createVdiskVolume(ctx *volumemgrContext, status types.VolumeStatus,
 			log.Error(errStr)
 			return created, "", errors.New(errStr)
 		}
-		if err := diskmetrics.ConvertImg(log, pathToFile, zVolDevice, "raw"); err != nil {
-			errStr := fmt.Sprintf("Error converting %s to zfs zvol %s: %v",
-				pathToFile, zVolDevice, err)
-			log.Error(errStr)
-			return created, "", errors.New(errStr)
+		if ref != "" {
+			pathToFile, err := getVolumeFilePath(ctx, status)
+			if err != nil {
+				errStr := fmt.Sprintf("Error obtaining file for zvol at volume %s, error=%v",
+					status.Key(), err)
+				log.Error(errStr)
+				return created, "", errors.New(errStr)
+			}
+			if err := diskmetrics.ConvertImg(log, pathToFile, zVolDevice, "raw"); err != nil {
+				errStr := fmt.Sprintf("Error converting %s to zfs zvol %s: %v",
+					pathToFile, zVolDevice, err)
+				log.Error(errStr)
+				return created, "", errors.New(errStr)
+			}
 		}
 		filelocation = zVolDevice
 	default:
-		// use the edge-containers library to extract the data we need
-		puller := registry.Puller{
-			Image: ref,
-		}
+		if ref != "" {
+			// use the edge-containers library to extract the data we need
+			puller := registry.Puller{
+				Image: ref,
+			}
 
-		casClient, err := cas.NewCAS(casClientType)
-		if err != nil {
-			err = fmt.Errorf("Run: exception while initializing CAS client: %s", err.Error())
-			return created, "", err
-		}
-		defer casClient.CloseClient()
-		ctrdCtx, done := casClient.CtrNewUserServicesCtx()
-		defer done()
+			casClient, err := cas.NewCAS(casClientType)
+			if err != nil {
+				err = fmt.Errorf("Run: exception while initializing CAS client: %s", err.Error())
+				return created, "", err
+			}
+			defer casClient.CloseClient()
+			ctrdCtx, done := casClient.CtrNewUserServicesCtx()
+			defer done()
 
-		resolver, err := casClient.Resolver(ctrdCtx)
-		if err != nil {
-			errStr := fmt.Sprintf("error getting CAS resolver: %v", err)
-			log.Error(errStr)
-			return created, "", errors.New(errStr)
-		}
-		// create a writer for the file where we want
-		f, err := os.Create(filelocation)
-		if err != nil {
-			errStr := fmt.Sprintf("error creating target file at %s: %v", filelocation, err)
-			log.Error(errStr)
-			return created, "", errors.New(errStr)
-		}
-		defer f.Close()
-		if _, _, err := puller.Pull(&registry.FilesTarget{Root: f, AcceptHash: true}, 0, false, os.Stderr, resolver); err != nil {
-			errStr := fmt.Sprintf("error pulling %s from containerd: %v", ref, err)
-			log.Error(errStr)
-			return created, "", errors.New(errStr)
-		}
-		// Do we need to expand disk?
-		if err := maybeResizeDisk(filelocation, status.MaxVolSize); err != nil {
-			log.Error(err)
-			return created, "", err
+			resolver, err := casClient.Resolver(ctrdCtx)
+			if err != nil {
+				errStr := fmt.Sprintf("error getting CAS resolver: %v", err)
+				log.Error(errStr)
+				return created, "", errors.New(errStr)
+			}
+			// create a writer for the file where we want
+			f, err := os.Create(filelocation)
+			if err != nil {
+				errStr := fmt.Sprintf("error creating target file at %s: %v", filelocation, err)
+				log.Error(errStr)
+				return created, "", errors.New(errStr)
+			}
+			defer f.Close()
+			if _, _, err := puller.Pull(&registry.FilesTarget{Root: f, AcceptHash: true}, 0, false, os.Stderr, resolver); err != nil {
+				errStr := fmt.Sprintf("error pulling %s from containerd: %v", ref, err)
+				log.Error(errStr)
+				return created, "", errors.New(errStr)
+			}
+			// Do we need to expand disk?
+			if err := maybeResizeDisk(filelocation, status.MaxVolSize); err != nil {
+				log.Error(err)
+				return created, "", err
+			}
+		} else {
+			if err := diskmetrics.CreateImg(log, filelocation, strings.ToLower(status.ContentFormat.String()), status.MaxVolSize); err != nil {
+				log.Error(err)
+				return created, "", err
+			}
 		}
 	}
 
@@ -192,6 +204,16 @@ func destroyVdiskVolume(ctx *volumemgrContext, status types.VolumeStatus) (bool,
 		return created, "", errors.New(errStr)
 	}
 	if info.Mode()&os.ModeDevice != 0 {
+		if err := tgt.VHostDeleteIBlock(status.Key(), status.WWN); err != nil {
+			errStr := fmt.Sprintf("Error deleting vhost for %s, error=%v",
+				status.Key(), err)
+			log.Error(errStr)
+		}
+		if err := tgt.TargetDeleteIBlock(status.Key()); err != nil {
+			errStr := fmt.Sprintf("Error deleting target for %s, error=%v",
+				status.Key(), err)
+			log.Error(errStr)
+		}
 		//Assume this is zfs device
 		zVolName := status.ZVolName(types.VolumeZFSPool)
 		if stdoutStderr, err := zfs.DestroyDataset(log, zVolName); err != nil {
@@ -259,4 +281,33 @@ func maybeResizeDisk(diskfile string, maxsizebytes uint64) error {
 		return diskmetrics.ResizeImg(log, diskfile, size)
 	}
 	return nil
+}
+
+//createTargetVhost creates target and vhost for device using information from VolumeStatus
+//and returns wwn to use for mounting
+func createTargetVhost(device string, status *types.VolumeStatus) (string, error) {
+	defer func(start time.Time) {
+		log.Functionf("createTargetVhost ended after %s", time.Since(start))
+	}(time.Now())
+	serial := tgt.GenerateNaaSerial()
+	wwn := fmt.Sprintf("naa.%s", serial)
+	err := tgt.TargetCreateIBlock(device, status.Key(), serial)
+	if err != nil {
+		return "", fmt.Errorf("TargetCreateFileIODev(%s, %s, %s): %v",
+			device, status.Key(), serial, err)
+	}
+	if !tgt.CheckVHostIBlock(status.Key()) {
+		err = tgt.VHostCreateIBlock(status.Key(), wwn)
+		if err != nil {
+			errString := fmt.Sprintf("VHostCreateIBlock: %v", err)
+			err = tgt.VHostDeleteIBlock(status.Key(), wwn)
+			if err != nil {
+				errString = fmt.Sprintf("%s; VHostDeleteIBlock: %v",
+					errString, err)
+			}
+			return "", fmt.Errorf("VHostCreateIBlock(%s, %s): %s",
+				status.Key(), wwn, errString)
+		}
+	}
+	return wwn, nil
 }
