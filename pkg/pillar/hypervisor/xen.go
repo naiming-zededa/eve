@@ -465,8 +465,8 @@ func (ctx xenContext) CreateDomConfig(domainName string, config types.DomainConf
 	return nil
 }
 
-func (ctx xenContext) Stop(domainName string, domainID int, force bool) error {
-	logrus.Infof("xlShutdown %s %d\n", domainName, domainID)
+func (ctx xenContext) Stop(domainName string, force bool) error {
+	logrus.Infof("xlShutdown %s\n", domainName)
 	args := []string{
 		"xl",
 		"shutdown",
@@ -487,15 +487,15 @@ func (ctx xenContext) Stop(domainName string, domainID int, force bool) error {
 	return nil
 }
 
-func (ctx xenContext) Delete(domainName string, domainID int) (result error) {
+func (ctx xenContext) Delete(domainName string) (result error) {
 	// regardless of happens to everything else, we have to try and delete the task
 	defer func() {
-		if err := ctx.ctrdContext.Delete(domainName, domainID); err != nil {
+		if err := ctx.ctrdContext.Delete(domainName); err != nil {
 			result = fmt.Errorf("%w; couldn't delete task %s: %v", result, domainName, err)
 		}
 	}()
 
-	logrus.Infof("xlDestroy %s %d\n", domainName, domainID)
+	logrus.Infof("xlDestroy %s\n", domainName)
 	ctrdSystemCtx, done := ctx.ctrdClient.CtrNewSystemServicesCtx()
 	defer done()
 	stdOut, stdErr, err := ctx.ctrdClient.CtrSystemExec(ctrdSystemCtx, "xen-tools",
@@ -506,14 +506,22 @@ func (ctx xenContext) Delete(domainName string, domainID int) (result error) {
 		return fmt.Errorf("xl destroy failed: %s %s", stdOut, stdErr)
 	}
 
-	logrus.Infof("xl destroy done %s %d, stdout: %s, stderr: %s",
-		domainName, domainID, stdOut, stdErr)
+	logrus.Infof("xl destroy done %s, stdout: %s, stderr: %s",
+		domainName, stdOut, stdErr)
 	return nil
 }
 
-func (ctx xenContext) Info(domainName string, domainID int) (int, types.SwState, error) {
+//Cleanup removes containerd-shim
+func (ctx xenContext) Cleanup(domainName string) error {
+	if err := ctx.ctrdContext.Delete(domainName); err != nil {
+		return fmt.Errorf("couldn't cleanup task %s: %v", domainName, err)
+	}
+	return nil
+}
+
+func (ctx xenContext) Info(domainName string) (int, types.SwState, error) {
 	// first we ask for the task status
-	effectiveDomainID, effectiveDomainState, err := ctx.ctrdContext.Info(domainName, domainID)
+	effectiveDomainID, effectiveDomainState, err := ctx.ctrdContext.Info(domainName)
 	if err != nil || effectiveDomainState != types.RUNNING {
 		status, err := ioutil.ReadFile("/run/tasks/" + domainName)
 		if err != nil {
@@ -531,8 +539,8 @@ func (ctx xenContext) Info(domainName string, domainID int) (int, types.SwState,
 		logrus.Errorf("couldn't read task status file: %v", err)
 		status = []byte("running") // assigning default state as we weren't able to read status file
 	}
-	logrus.Debugf("xen.Info(%s %d) have %d state %s status %s",
-		domainName, domainID, effectiveDomainID,
+	logrus.Debugf("xen.Info(%s) have %d state %s status %s",
+		domainName, effectiveDomainID,
 		effectiveDomainState.String(), string(status))
 
 	stateMap := map[string]types.SwState{
@@ -598,20 +606,19 @@ func (ctx xenContext) PCISameController(id1 string, id2 string) bool {
 }
 
 func (ctx xenContext) GetHostCPUMem() (types.HostMemory, error) {
+	hm := types.HostMemory{}
 	ctrdSystemCtx, done := ctx.ctrdClient.CtrNewSystemServicesCtx()
 	defer done()
 	xlInfo, stderr, err := ctx.ctrdClient.CtrSystemExec(ctrdSystemCtx, "xen-tools",
 		[]string{"xl", "info"})
 	if err != nil {
-		logrus.Errorf("xl info failed stdout: %s stderr: %s, err: %v falling back on Dom0 stats",
+		return hm, fmt.Errorf("xl info failed stdout: %s stderr: %s, err: %v falling back on Dom0 stats",
 			xlInfo, stderr, err)
-		return selfDomCPUMem()
 	}
 	// Seems like we can get empty output, or partial output, from xl info
 	if xlInfo == "" {
-		logrus.Errorf("xl info empty stderr: %s falling back on Dom0 stats",
+		return hm, fmt.Errorf("xl info empty stderr: %s falling back on Dom0 stats",
 			stderr)
-		return selfDomCPUMem()
 	}
 	splitXlInfo := strings.Split(xlInfo, "\n")
 
@@ -623,14 +630,10 @@ func (ctx xenContext) GetHostCPUMem() (types.HostMemory, error) {
 		}
 	}
 
-	// Handle subsets of attributes being filled in by xl info by starting
-	// with something reasonable
-	hm, _ := selfDomCPUMem()
-
 	if str, ok := dict["total_memory"]; ok {
 		res, err := strconv.ParseUint(str, 10, 64)
 		if err != nil {
-			logrus.Errorf("Failed parsing total_memory: %s", err)
+			return hm, fmt.Errorf("failed parsing total_memory: %s", err)
 		} else {
 			hm.TotalMemoryMB = res
 		}
@@ -638,7 +641,7 @@ func (ctx xenContext) GetHostCPUMem() (types.HostMemory, error) {
 	if str, ok := dict["free_memory"]; ok {
 		res, err := strconv.ParseUint(str, 10, 64)
 		if err != nil {
-			logrus.Errorf("Failed parsing free_memory: %s", err)
+			return hm, fmt.Errorf("failed parsing free_memory: %s", err)
 		} else {
 			hm.FreeMemoryMB = res
 		}
@@ -648,7 +651,7 @@ func (ctx xenContext) GetHostCPUMem() (types.HostMemory, error) {
 		// than the set of CPUs assigned to dom0
 		res, err := strconv.ParseUint(str, 10, 64)
 		if err != nil {
-			logrus.Errorf("Failed parsing nr_cpus: %s", err)
+			return hm, fmt.Errorf("failed parsing nr_cpus: %s", err)
 		} else {
 			hm.Ncpus = uint32(res)
 		}

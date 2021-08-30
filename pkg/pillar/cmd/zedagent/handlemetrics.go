@@ -94,7 +94,7 @@ func lookupAppDiskMetric(ctx *zedagentContext, diskPath string) *types.AppDiskMe
 	return &metric
 }
 
-func encodeErrorInfo(et types.ErrorAndTime) *info.ErrorInfo {
+func encodeErrorInfo(et types.ErrorDescription) *info.ErrorInfo {
 	if et.ErrorTime.IsZero() {
 		// No Success / Error to report
 		return nil
@@ -107,6 +107,12 @@ func encodeErrorInfo(et types.ErrorAndTime) *info.ErrorInfo {
 	} else {
 		log.Errorf("Failed to convert timestamp (%+v) for ErrorStr (%s) "+
 			"into TimestampProto. err: %s", et.ErrorTime, et.Error, err)
+	}
+	errInfo.Severity = info.Severity(et.ErrorSeverity)
+	errInfo.RetryCondition = et.ErrorRetryCondition
+	errInfo.Entities = make([]*info.DeviceEntity, len(et.ErrorEntities))
+	for i, el := range et.ErrorEntities {
+		errInfo.Entities[i] = &info.DeviceEntity{EntityId: el.EntityID, Entity: info.Entity(el.EntityType)}
 	}
 	return errInfo
 }
@@ -422,9 +428,12 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 	ReportDeviceMetric.Newlog = nlm
 	log.Tracef("publishMetrics: newlog-metrics %+v", nlm)
 
-	// collect CipherMetric from agents and report
-	// Collect zedcloud metrics from ourselves and other agents
-	cipherMetrics := cipher.GetCipherMetrics()
+	// collect CipherMetric from ourselves and agents and report
+	cipherMetrics := types.CipherMetricsMap{}
+	cipherMetricsZA := cipher.GetCipherMetrics(log)
+	if cipherMetricsZA != nil {
+		cipherMetrics = cipher.Append(cipherMetrics, cipherMetricsZA)
+	}
 	if cipherMetricsDL != nil {
 		cipherMetrics = cipher.Append(cipherMetrics, cipherMetricsDL)
 	}
@@ -438,7 +447,7 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 		cipherMetrics = cipher.Append(cipherMetrics, cipherMetricsZR)
 	}
 	for agentName, cm := range cipherMetrics {
-		log.Tracef("Cipher metrics for %s: %+v", agentName, cm)
+		log.Functionf("Cipher metrics for %s: %+v", agentName, cm)
 		metric := metrics.CipherMetric{AgentName: agentName,
 			FailureCount: cm.FailureCount,
 			SuccessCount: cm.SuccessCount,
@@ -456,7 +465,9 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 				ErrorCode: metrics.CipherError(i),
 				Count:     cm.TypeCounters[i],
 			}
-			metric.Tc = append(metric.Tc, &tc)
+			if tc.Count != 0 {
+				metric.Tc = append(metric.Tc, &tc)
+			}
 		}
 		ReportDeviceMetric.Cipher = append(ReportDeviceMetric.Cipher,
 			&metric)
@@ -717,7 +728,9 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 
 	// publish the cloud MetricsMap for zedagent for device debugging purpose
 	if zedagentMetrics != nil {
-		ctx.pubMetricsMap.Publish("global", zedagentMetrics)
+		cms = types.MetricsMap{}
+		cms = zedcloud.Append(cms, zedagentMetrics)
+		ctx.pubMetricsMap.Publish("global", cms)
 	}
 }
 
@@ -918,7 +931,7 @@ func PublishAppInfoToZedCloud(ctx *zedagentContext, uuid string,
 		objErr = aiStatus.HasError()
 		if !aiStatus.ErrorTime.IsZero() {
 			errInfo := encodeErrorInfo(
-				aiStatus.ErrorAndTimeWithSource.ErrorAndTime())
+				aiStatus.ErrorAndTimeWithSource.ErrorDescription)
 			ReportAppInfo.AppErr = append(ReportAppInfo.AppErr,
 				errInfo)
 		}
@@ -963,12 +976,11 @@ func PublishAppInfoToZedCloud(ctx *zedagentContext, uuid string,
 		for _, ifname := range ifNames {
 			networkInfo := new(info.ZInfoNetwork)
 			networkInfo.LocalName = *proto.String(ifname)
-			ip, allocated, macAddr, ipAddrMismatch := getAppIP(ctx, aiStatus,
+			ipv4Addr, ipv6Addrs, allocated, macAddr, ipAddrMismatch := getAppIP(ctx, aiStatus,
 				ifname)
-			networkInfo.IPAddrs = make([]string, 1)
-			networkInfo.IPAddrs[0] = *proto.String(ip)
+			networkInfo.IPAddrs = append([]string{ipv4Addr}, ipv6Addrs...)
 			networkInfo.MacAddr = *proto.String(macAddr)
-			networkInfo.Up = allocated
+			networkInfo.Ipv4Up = allocated
 			networkInfo.IpAddrMisMatch = ipAddrMismatch
 			name := appIfnameToName(aiStatus, ifname)
 			log.Tracef("app %s/%s localName %s devName %s",
@@ -1074,7 +1086,7 @@ func PublishContentInfoToZedCloud(ctx *zedagentContext, uuid string,
 		objErr = ctStatus.HasError()
 		if !ctStatus.ErrorTime.IsZero() {
 			errInfo := encodeErrorInfo(
-				ctStatus.ErrorAndTimeWithSource.ErrorAndTime())
+				ctStatus.ErrorAndTimeWithSource.ErrorDescription)
 			ReportContentInfo.Err = errInfo
 		}
 
@@ -1159,7 +1171,7 @@ func PublishVolumeToZedCloud(ctx *zedagentContext, uuid string,
 		objErr = volStatus.HasError()
 		if !volStatus.ErrorTime.IsZero() {
 			errInfo := encodeErrorInfo(
-				volStatus.ErrorAndTimeWithSource.ErrorAndTime())
+				volStatus.ErrorAndTimeWithSource.ErrorDescription)
 			ReportVolumeInfo.VolumeErr = errInfo
 		}
 
@@ -1379,18 +1391,19 @@ func SendMetricsProtobuf(ReportMetrics *metrics.ZMetricMsg,
 // Use the ifname/vifname to find the underlay status
 // and from there the (ip, allocated, mac) addresses for the app
 func getAppIP(ctx *zedagentContext, aiStatus *types.AppInstanceStatus,
-	vifname string) (string, bool, string, bool) {
+	vifname string) (string, []string, bool, string, bool) {
 
 	log.Tracef("getAppIP(%s, %s)", aiStatus.Key(), vifname)
 	for _, ulStatus := range aiStatus.UnderlayNetworks {
 		if ulStatus.VifUsed != vifname {
 			continue
 		}
-		log.Tracef("getAppIP(%s, %s) found underlay %s assigned %v mac %s",
-			aiStatus.Key(), vifname, ulStatus.AllocatedIPAddr, ulStatus.Assigned, ulStatus.Mac)
-		return ulStatus.AllocatedIPAddr, ulStatus.Assigned, ulStatus.Mac, ulStatus.IPAddrMisMatch
+		log.Tracef("getAppIP(%s, %s) found underlay v4: %s, v6: %s, ipv4 assigned %v mac %s",
+			aiStatus.Key(), vifname, ulStatus.AllocatedIPv4Addr,
+			ulStatus.AllocatedIPv6List, ulStatus.IPv4Assigned, ulStatus.Mac)
+		return ulStatus.AllocatedIPv4Addr, ulStatus.AllocatedIPv6List, ulStatus.IPv4Assigned, ulStatus.Mac, ulStatus.IPAddrMisMatch
 	}
-	return "", false, "", false
+	return "", []string{}, false, "", false
 }
 
 func createVolumeInstanceMetrics(ctx *zedagentContext, reportMetrics *metrics.ZMetricMsg) {

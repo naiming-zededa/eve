@@ -5,6 +5,8 @@ package zedUpload
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/http"
@@ -60,6 +62,7 @@ type DronaEndPoint interface {
 	WithSrcIPSelection(localAddr net.IP) error
 	WithSrcIPAndHTTPSCerts(localAddr net.IP, certs [][]byte) error
 	WithSrcIPAndProxySelection(localAddr net.IP, proxy *url.URL) error
+	WithSrcIPAndProxyAndHTTPSCerts(localAddr net.IP, proxy *url.URL, certs [][]byte) error
 	WithBindIntf(intf string) error
 	WithLogging(onoff bool) error
 }
@@ -96,6 +99,20 @@ func httpClientSrcIP(localAddr net.IP, proxy *url.URL) *http.Client {
 	}
 
 	return webclient
+}
+
+func httpClientAddCerts(client *http.Client, certs [][]byte) (*http.Client, error) {
+	if client == nil || len(certs) == 0 {
+		return client, nil
+	}
+	caCertPool := x509.NewCertPool()
+	for _, pem := range certs {
+		if !caCertPool.AppendCertsFromPEM(pem) {
+			return client, fmt.Errorf("Failed to append datastore certs")
+		}
+	}
+	client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{RootCAs: caCertPool}
+	return client, nil
 }
 
 // given interface get the ip
@@ -167,7 +184,6 @@ func (ctx *DronaCtx) handleQuit() error {
 // postSize:
 //  post the progress report we haven't completed the download/upload yet
 func (ctx *DronaCtx) postSize(req *DronaRequest, size, asize int64) {
-	req.setInprogress()
 	req.updateOsize(size)
 	req.updateAsize(asize)
 	req.result <- req
@@ -184,8 +200,8 @@ func (ctx *DronaCtx) postChunk(req *DronaRequest, chunkDetail ChunkData) {
 //   make sure the reply is always sent back
 //
 func (ctx *DronaCtx) postResponse(req *DronaRequest, status error) {
-	// status is already set up by action, we just have to clear inprogress flag
-	req.clearInprogress()
+	// status is already set up by action, we just have to set processed flag
+	req.setProcessed()
 	req.result <- req
 }
 

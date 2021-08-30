@@ -93,6 +93,7 @@ type zedrouterContext struct {
 	// cipher context
 	pubCipherBlockStatus pubsub.Publication
 	decryptCipherContext cipher.DecryptCipherContext
+	pubAppInstMetaData   pubsub.Publication
 }
 
 var debug = false
@@ -242,6 +243,16 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	}
 	zedrouterCtx.pubNetworkInstanceStatus = pubNetworkInstanceStatus
 
+	pubAppInstMetaData, err := ps.NewPublication(pubsub.PublicationOptions{
+		AgentName:  agentName,
+		Persistent: true,
+		TopicType:  types.AppInstMetaData{},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	zedrouterCtx.pubAppInstMetaData = pubAppInstMetaData
+
 	pubAppNetworkStatus, err := ps.NewPublication(pubsub.PublicationOptions{
 		AgentName: agentName,
 		TopicType: types.AppNetworkStatus{},
@@ -316,6 +327,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	}
 
 	zedrouterCtx.decryptCipherContext.Log = log
+	zedrouterCtx.decryptCipherContext.AgentName = agentName
 
 	// Look for controller certs which will be used for decryption
 	subControllerCert, err := ps.NewSubscription(pubsub.SubscriptionOptions{
@@ -615,7 +627,12 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 			// XXX can we trigger it as part of boot? Or watch file?
 			// XXX add file watch...
 			checkAndPublishDhcpLeases(&zedrouterCtx)
-			err = cipherMetricsPub.Publish("global", cipher.GetCipherMetrics())
+
+			// Transfer to a local copy in since updates are
+			// done concurrently
+			cmm := cipher.Append(types.CipherMetricsMap{},
+				cipher.GetCipherMetrics(log))
+			err = cipherMetricsPub.Publish("global", cmm)
 			if err != nil {
 				log.Errorln(err)
 			}
@@ -785,7 +802,7 @@ func lookupAppNetworkStatusByAppIP(ctx *zedrouterContext, ip net.IP) *types.AppN
 	for _, st := range items {
 		status := st.(types.AppNetworkStatus)
 		for _, ulStatus := range status.UnderlayNetworkList {
-			if ipStr == ulStatus.AllocatedIPAddr {
+			if ipStr == ulStatus.AllocatedIPv4Addr {
 				return &status
 			}
 		}
@@ -1022,8 +1039,8 @@ func appNetworkDoActivateUnderlayNetwork(
 	}
 	log.Functionf("bridgeIPAddr %s appIPAddr %s\n", bridgeIPAddr, appIPAddr)
 	ulStatus.BridgeIPAddr = bridgeIPAddr
-	// appIPAddr is "" for switch NI. DHCP snoop will set AllocatedIPAddr later
-	ulStatus.AllocatedIPAddr = appIPAddr
+	// appIPAddr is "" for switch NI. DHCP snoop will set AllocatedIPv4Addr later
+	ulStatus.AllocatedIPv4Addr = appIPAddr
 	hostsDirpath := runDirname + "/hosts." + bridgeName
 	if appIPAddr != "" {
 		addToHostsConfiglet(hostsDirpath, config.DisplayName,
@@ -1475,7 +1492,7 @@ func doAppNetworkModifyUnderlayNetwork(
 	ipsets []string, force bool) {
 
 	bridgeName := ulStatus.Bridge
-	appIPAddr := ulStatus.AllocatedIPAddr
+	appIPAddr := ulStatus.AllocatedIPv4Addr
 
 	netstatus := lookupNetworkInstanceStatus(ctx, ulConfig.Network.String())
 
@@ -1634,7 +1651,7 @@ func appNetworkDoInactivateUnderlayNetwork(
 		}
 	}
 
-	appIPAddr := ulStatus.AllocatedIPAddr
+	appIPAddr := ulStatus.AllocatedIPv4Addr
 	if appIPAddr != "" {
 		removehostDnsmasq(bridgeName, ulStatus.Mac,
 			appIPAddr)
@@ -2311,7 +2328,7 @@ func getCloudInitUserData(ctx *zedrouterContext,
 	dc *types.AppNetworkConfig) (string, error) {
 	if dc.CipherBlockStatus.IsCipher {
 		status, decBlock, err := cipher.GetCipherCredentials(&ctx.decryptCipherContext,
-			agentName, dc.CipherBlockStatus)
+			dc.CipherBlockStatus)
 		ctx.pubCipherBlockStatus.Publish(status.Key(), status)
 		if err != nil {
 			log.Errorf("%s, appnetwork config cipherblock decryption unsuccessful, falling back to cleartext: %v",
@@ -2321,10 +2338,10 @@ func getCloudInitUserData(ctx *zedrouterContext,
 			// data. Hence this is a fallback if there is
 			// some cleartext.
 			if decBlock.ProtectedUserData != "" {
-				cipher.RecordFailure(agentName,
+				cipher.RecordFailure(log, agentName,
 					types.CleartextFallback)
 			} else {
-				cipher.RecordFailure(agentName,
+				cipher.RecordFailure(log, agentName,
 					types.MissingFallback)
 			}
 			return decBlock.ProtectedUserData, nil
@@ -2336,9 +2353,9 @@ func getCloudInitUserData(ctx *zedrouterContext,
 	decBlock := types.EncryptionBlock{}
 	decBlock.ProtectedUserData = *dc.CloudInitUserData
 	if decBlock.ProtectedUserData != "" {
-		cipher.RecordFailure(agentName, types.NoCipher)
+		cipher.RecordFailure(log, agentName, types.NoCipher)
 	} else {
-		cipher.RecordFailure(agentName, types.NoData)
+		cipher.RecordFailure(log, agentName, types.NoData)
 	}
 	return decBlock.ProtectedUserData, nil
 }

@@ -46,6 +46,9 @@ const (
 	runDirname = "/run/" + agentName
 	xenDirname = runDirname + "/xen"       // We store xen cfg files here
 	ciDirname  = runDirname + "/cloudinit" // For cloud-init images
+	//dir with runtime files of containerd for eve user apps
+	ctrdAppsRunDir = "/persist/containerd/io.containerd.runtime.v1.linux/eve-user-apps"
+
 	// Time limits for event loop handlers
 	errorTime           = 3 * time.Minute
 	warningTime         = 40 * time.Second
@@ -167,6 +170,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		if err := os.RemoveAll(ciDirname); err != nil {
 			log.Fatal(err)
 		}
+	}
+	if err := os.RemoveAll(ctrdAppsRunDir); err != nil {
+		log.Errorf("Failed cleanup %s: %v", ctrdAppsRunDir, err)
 	}
 	if _, err := os.Stat(xenDirname); err != nil {
 		if err := os.MkdirAll(xenDirname, 0700); err != nil {
@@ -292,6 +298,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		log.Fatal(err)
 	}
 	domainCtx.decryptCipherContext.Log = log
+	domainCtx.decryptCipherContext.AgentName = agentName
 	domainCtx.decryptCipherContext.SubControllerCert = subControllerCert
 	subControllerCert.Activate()
 
@@ -580,7 +587,11 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 
 		case <-publishTimer.C:
 			start := time.Now()
-			err = cipherMetricsPub.Publish("global", cipher.GetCipherMetrics())
+			// Transfer to a local copy in since updates are
+			// done concurrently
+			cmm := cipher.Append(types.CipherMetricsMap{},
+				cipher.GetCipherMetrics(log))
+			err = cipherMetricsPub.Publish("global", cmm)
 			if err != nil {
 				log.Errorln(err)
 			}
@@ -816,7 +827,7 @@ func verifyStatus(ctx *domainContext, status *types.DomainStatus) {
 		configActivate = true
 	}
 
-	domainID, domainStatus, err := hyper.Task(status).Info(status.DomainName, status.DomainId)
+	domainID, domainStatus, err := hyper.Task(status).Info(status.DomainName)
 	if err != nil || domainStatus == types.HALTED {
 		if status.Activated && configActivate {
 			errStr := fmt.Sprintf("verifyStatus(%s) failed %s",
@@ -833,8 +844,11 @@ func verifyStatus(ctx *domainContext, status *types.DomainStatus) {
 				err := fmt.Errorf("one of the %s tasks has crashed (%v)", status.Key(), err)
 				log.Errorf(err.Error())
 				status.SetErrorNow("one of the application's tasks has crashed - please restart application instance")
-				if err := hyper.Task(status).Delete(status.DomainName, status.DomainId); err != nil {
+				if err := hyper.Task(status).Delete(status.DomainName); err != nil {
 					log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
+				}
+				if err := hyper.Task(status).Cleanup(status.DomainName); err != nil {
+					log.Errorf("failed to cleanup domain: %s (%v)", status.DomainName, err)
 				}
 				status.State = types.BROKEN
 			}
@@ -1095,7 +1109,7 @@ func doAssignIoAdaptersToDomain(ctx *domainContext, config types.DomainConfig,
 			if ib == nil {
 				continue
 			}
-			log.Functionf("doAssignIoAdaptersToDomain processing adapter %d %s member %s",
+			log.Functionf("doAssignIoAdaptersToDomain processing adapter %d %s phylabel %s",
 				adapter.Type, adapter.Name, ib.Phylabel)
 			if ib.UsedByUUID != config.UUIDandVersion.UUID {
 				log.Fatalf("doAssignIoAdaptersToDomain IoBundle stolen by %s: %d %s for %s",
@@ -1157,11 +1171,11 @@ func doActivate(ctx *domainContext, config types.DomainConfig,
 	log.Functionf("doActivate(%v) for %s",
 		config.UUIDandVersion, config.DisplayName)
 
-	if err := reserveAdapters(ctx, config); err != nil {
+	if errDescription := reserveAdapters(ctx, config); errDescription != nil {
 		log.Errorf("Failed to reserve adapters for %s: %s",
-			config.Key(), err)
+			config.Key(), errDescription.Error)
 		status.PendingAdd = false
-		status.SetErrorNow(err.Error())
+		status.SetErrorDescription(*errDescription)
 		status.AdaptersFailed = true
 		publishDomainStatus(ctx, status)
 		releaseAdapters(ctx, config.IoAdapterList, config.UUIDandVersion.UUID,
@@ -1276,14 +1290,18 @@ func doActivateTail(ctx *domainContext, status *types.DomainStatus,
 	status.State = types.BOOTING
 	publishDomainStatus(ctx, status)
 
-	err := hyper.Task(status).Start(status.DomainName, domainID)
+	err := hyper.Task(status).Start(status.DomainName)
 	if err != nil {
 		log.Errorf("domain start for %s: %s", status.DomainName, err)
 		status.SetErrorNow(err.Error())
 
-		// Cleanup
-		if err := hyper.Task(status).Delete(status.DomainName, status.DomainId); err != nil {
+		// Delete
+		if err := hyper.Task(status).Delete(status.DomainName); err != nil {
 			log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
+		}
+		// Cleanup
+		if err := hyper.Task(status).Cleanup(status.DomainName); err != nil {
+			log.Errorf("failed to cleanup domain: %s (%v)", status.DomainName, err)
 		}
 
 		// Set BootFailed to cause retry
@@ -1296,7 +1314,7 @@ func doActivateTail(ctx *domainContext, status *types.DomainStatus,
 	status.VifList = checkIfEmu(status.VifList)
 
 	status.State = types.RUNNING
-	domainID, state, err := hyper.Task(status).Info(status.DomainName, status.DomainId)
+	domainID, state, err := hyper.Task(status).Info(status.DomainName)
 
 	if err != nil {
 		// Immediate failure treat as above
@@ -1306,9 +1324,13 @@ func doActivateTail(ctx *domainContext, status *types.DomainStatus,
 		status.SetErrorNow(err.Error())
 		log.Errorf("doActivateTail(%v) failed for %s: %s",
 			status.UUIDandVersion, status.DisplayName, err)
-		// Cleanup
-		if err := hyper.Task(status).Delete(status.DomainName, status.DomainId); err != nil {
+		// Delete
+		if err := hyper.Task(status).Delete(status.DomainName); err != nil {
 			log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
+		}
+		// Cleanup
+		if err := hyper.Task(status).Cleanup(status.DomainName); err != nil {
+			log.Errorf("failed to cleanup domain: %s (%v)", status.DomainName, err)
 		}
 		return
 	}
@@ -1433,7 +1455,7 @@ func doInactivate(ctx *domainContext, status *types.DomainStatus, impatient bool
 
 	log.Functionf("doInactivate(%v) for %s domainId %d",
 		status.UUIDandVersion, status.DisplayName, status.DomainId)
-	domainID, _, err := hyper.Task(status).Info(status.DomainName, status.DomainId)
+	domainID, _, err := hyper.Task(status).Info(status.DomainName)
 	if err == nil && domainID != status.DomainId {
 		status.DomainId = domainID
 		status.BootTime = time.Now()
@@ -1507,7 +1529,7 @@ func doInactivate(ctx *domainContext, status *types.DomainStatus, impatient bool
 	}
 
 	if status.DomainId != 0 {
-		if err := hyper.Task(status).Delete(status.DomainName, status.DomainId); err != nil {
+		if err := hyper.Task(status).Delete(status.DomainName); err != nil {
 			log.Errorf("Failed to delete domain %s (%v)", status.DomainName, err)
 		} else {
 			log.Functionf("doInactivate(%v) for %s: Delete succeeded",
@@ -1520,6 +1542,11 @@ func doInactivate(ctx *domainContext, status *types.DomainStatus, impatient bool
 		if gone {
 			status.DomainId = 0
 		}
+	}
+
+	// Cleanup
+	if err := hyper.Task(status).Cleanup(status.DomainName); err != nil {
+		log.Errorf("failed to cleanup domain: %s (%v)", status.DomainName, err)
 	}
 
 	// If everything failed we leave it marked as Activated
@@ -1687,7 +1714,8 @@ func configToStatus(ctx *domainContext, config types.DomainConfig,
 }
 
 // Check for errors and reserve any assigned adapters by setting UsedByUUID
-func reserveAdapters(ctx *domainContext, config types.DomainConfig) error {
+func reserveAdapters(ctx *domainContext, config types.DomainConfig) *types.ErrorDescription {
+	description := types.ErrorDescription{}
 
 	log.Functionf("reserveAdapters(%v) for %s",
 		config.UUIDandVersion, config.DisplayName)
@@ -1708,19 +1736,21 @@ func reserveAdapters(ctx *domainContext, config types.DomainConfig) error {
 		// Lookup to make sure adapter exists on this device
 		list := ctx.assignableAdapters.LookupIoBundleAny(adapter.Name)
 		if len(list) == 0 {
-			return fmt.Errorf("unknown adapter %d %s",
+			description.Error = fmt.Sprintf("unknown adapter %d %s",
 				adapter.Type, adapter.Name)
+			return &description
 		}
 
 		for _, ibp := range list {
 			if ibp == nil {
 				continue
 			}
-			log.Functionf("reserveAdapters processing adapter %d %s member %s",
+			log.Functionf("reserveAdapters processing adapter %d %s phylabel %s",
 				adapter.Type, adapter.Name, ibp.Phylabel)
 			if ibp.AssignmentGroup == "" {
-				return fmt.Errorf("adapter %d %s member %s is not assignable",
+				description.Error = fmt.Sprintf("adapter %d %s phylabel %s is not assignable",
 					adapter.Type, adapter.Name, ibp.Phylabel)
+				return &description
 			}
 			if ibp.UsedByUUID != config.UUIDandVersion.UUID &&
 				ibp.UsedByUUID != nilUUID {
@@ -1731,20 +1761,29 @@ func reserveAdapters(ctx *domainContext, config types.DomainConfig) error {
 					log.Warnf("UsedByUUID %s but no status",
 						ibp.UsedByUUID)
 					extraStr = "(which is missing)"
-				} else if other.State == types.HALTING {
-					extraStr = "(which is halting)"
+				} else {
+					description.ErrorSeverity = types.ErrorSeverityWarning
+					if other.State == types.HALTING {
+						extraStr = "(which is halting)"
+						description.ErrorSeverity = types.ErrorSeverityNotice
+					}
+					description.ErrorEntities = []*types.ErrorEntity{{EntityID: ibp.UsedByUUID.String(), EntityType: types.ErrorEntityAppInstance}}
+					description.ErrorRetryCondition = fmt.Sprintf("Will wait for adapter to release from app: %s", other.DisplayName)
 				}
-				return fmt.Errorf("adapter %d %s used by %s %s",
+				description.Error = fmt.Sprintf("adapter %d %s used by %s %s",
 					adapter.Type, adapter.Name,
 					ibp.UsedByUUID, extraStr)
+				return &description
 			}
 			if ibp.IsPort {
-				return fmt.Errorf("adapter %d %s member %s is (part of) a zedrouter port",
+				description.Error = fmt.Sprintf("adapter %d %s phylabel %s is (part of) a zedrouter port",
 					adapter.Type, adapter.Name, ibp.Phylabel)
+				return &description
 			}
 			if ibp.Error != "" {
-				return fmt.Errorf("adapter %d %s member %s has error: %s",
+				description.Error = fmt.Sprintf("adapter %d %s phylabel %s has error: %s",
 					adapter.Type, adapter.Name, ibp.Phylabel, ibp.Error)
+				return &description
 			}
 		}
 		for _, ibp := range list {
@@ -1752,10 +1791,11 @@ func reserveAdapters(ctx *domainContext, config types.DomainConfig) error {
 				continue
 			}
 			if ibp.PciLong != "" && !hasIOVirtualization {
-				return fmt.Errorf("no I/O virtualization support: adapter %d %s member %s cannot be assigned",
+				description.Error = fmt.Sprintf("no I/O virtualization support: adapter %d %s phylabel %s cannot be assigned",
 					adapter.Type, adapter.Name, ibp.Phylabel)
+				return &description
 			}
-			log.Tracef("reserveAdapters setting uuid %s for adapter %d %s member %s",
+			log.Tracef("reserveAdapters setting uuid %s for adapter %d %s phylabel %s",
 				config.Key(), adapter.Type, adapter.Name, ibp.Phylabel)
 			ibp.UsedByUUID = config.UUIDandVersion.UUID
 		}
@@ -1916,7 +1956,7 @@ func waitForDomainGone(status types.DomainStatus, maxDelay time.Duration) bool {
 			time.Sleep(delay)
 			waited += delay
 		}
-		_, state, err := hyper.Task(&status).Info(status.DomainName, status.DomainId)
+		_, state, err := hyper.Task(&status).Info(status.DomainName)
 		if err != nil {
 			log.Errorf("waitForDomainGone(%v) for %s error %s state %s",
 				status.UUIDandVersion, status.DisplayName,
@@ -2014,7 +2054,7 @@ func DomainShutdown(status types.DomainStatus, force bool) error {
 
 	// Stop the domain
 	log.Functionf("Stopping domain - %s", status.DomainName)
-	err = hyper.Task(&status).Stop(status.DomainName, status.DomainId, force)
+	err = hyper.Task(&status).Stop(status.DomainName, force)
 
 	return err
 }
@@ -2149,7 +2189,7 @@ func getCloudInitUserData(ctx *domainContext,
 
 	if dc.CipherBlockStatus.IsCipher {
 		status, decBlock, err := cipher.GetCipherCredentials(&ctx.decryptCipherContext,
-			agentName, dc.CipherBlockStatus)
+			dc.CipherBlockStatus)
 		ctx.pubCipherBlockStatus.Publish(status.Key(), status)
 		if err != nil {
 			log.Errorf("%s, domain config cipherblock decryption unsuccessful, falling back to cleartext: %v",
@@ -2159,10 +2199,10 @@ func getCloudInitUserData(ctx *domainContext,
 			// data. Hence this is a fallback if there is
 			// some cleartext.
 			if decBlock.ProtectedUserData != "" {
-				cipher.RecordFailure(agentName,
+				cipher.RecordFailure(log, agentName,
 					types.CleartextFallback)
 			} else {
-				cipher.RecordFailure(agentName,
+				cipher.RecordFailure(log, agentName,
 					types.MissingFallback)
 			}
 			return decBlock, nil
@@ -2174,9 +2214,9 @@ func getCloudInitUserData(ctx *domainContext,
 	decBlock := types.EncryptionBlock{}
 	decBlock.ProtectedUserData = *dc.CloudInitUserData
 	if decBlock.ProtectedUserData != "" {
-		cipher.RecordFailure(agentName, types.NoCipher)
+		cipher.RecordFailure(log, agentName, types.NoCipher)
 	} else {
-		cipher.RecordFailure(agentName, types.NoData)
+		cipher.RecordFailure(log, agentName, types.NoData)
 	}
 	return decBlock, nil
 }

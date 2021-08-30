@@ -8,6 +8,7 @@ package zedagent
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -104,12 +105,16 @@ func prepareAndPublishNetworkInstanceInfoMsg(ctx *zedagentContext,
 		info.BridgeName = status.BridgeName
 		info.BridgeIPAddr = status.BridgeIPAddr
 
-		for mac, ip := range status.IPAssignments {
+		for mac, addrs := range status.IPAssignments {
 			assignment := new(zinfo.ZmetIPAssignmentEntry)
 			assignment.MacAddress = mac
-			assignment.IpAddress = append(assignment.IpAddress, ip.String())
-			info.IpAssignments = append(info.IpAssignments,
-				assignment)
+			if !addrs.IPv4Addr.Equal(net.IP{}) {
+				assignment.IpAddress = append(assignment.IpAddress, addrs.IPv4Addr.String())
+			}
+			for _, ip := range addrs.IPv6Addrs {
+				assignment.IpAddress = append(assignment.IpAddress, ip.String())
+			}
+			info.IpAssignments = append(info.IpAssignments, assignment)
 		}
 		for _, s := range status.BridgeIPSets {
 			info.BridgeIPSets = append(info.BridgeIPSets, s)
@@ -129,14 +134,15 @@ func prepareAndPublishNetworkInstanceInfoMsg(ctx *zedagentContext,
 			}
 			reportAA := new(zinfo.ZioBundle)
 			reportAA.Type = zcommon.PhyIoType(ia.Type)
-			reportAA.Name = ia.Phylabel
+			reportAA.Name = ia.Logicallabel
+			// XXX Add Phylabel in protobuf message?
 			reportAA.UsedByAppUUID = zcdevUUID.String()
 			list := ctx.assignableAdapters.LookupIoBundleAny(ia.Phylabel)
 			for _, ib := range list {
 				if ib == nil {
 					continue
 				}
-				reportAA.Members = append(reportAA.Members, ib.Phylabel)
+				reportAA.Members = append(reportAA.Members, ib.Logicallabel)
 				if ib.MacAddr != "" {
 					reportMac := new(zinfo.IoAddresses)
 					reportMac.MacAddress = ib.MacAddr
