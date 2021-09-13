@@ -230,6 +230,8 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 	ReportZmetric := new(metrics.ZmetricTypes)
 	*ReportZmetric = metrics.ZmetricTypes_ZmDevice
 
+	// This will be overridden with the timestamp for the CPU metrics
+	// below to make CPU usage calculations more accurate
 	ReportMetrics.AtTimeStamp = ptypes.TimestampNow()
 
 	info, err := host.Info()
@@ -530,12 +532,23 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 		ReportDeviceMetric.MetricItems = append(ReportDeviceMetric.MetricItems, item)
 	}
 
+	const nanoSecToSec uint64 = 1000000000
+
 	// Get device info using nil UUID
 	dm := lookupDomainMetric(ctx, nilUUID.String())
 	if dm != nil {
-		log.Tracef("host CPU: %d, percent used %d",
-			dm.CPUTotal, (100*dm.CPUTotal)/uint64(info.Uptime))
-		ReportDeviceMetric.CpuMetric.Total = *proto.Uint64(dm.CPUTotal)
+		log.Tracef("host CPU: %d, at %v, percent used %d",
+			dm.CPUTotalNs, dm.LastHeard, (100*dm.CPUTotalNs)/uint64(info.Uptime))
+		// Override the time of the report with the time from
+		// domainmgr
+		if !dm.LastHeard.IsZero() {
+			lh, _ := ptypes.TimestampProto(dm.LastHeard)
+			ReportMetrics.AtTimeStamp = lh
+		}
+
+		// XXX add field in CpuMetric so we can report with better
+		// granularity than one second
+		ReportDeviceMetric.CpuMetric.Total = *proto.Uint64(dm.CPUTotalNs / nanoSecToSec)
 
 		ReportDeviceMetric.SystemServicesMemoryMB = new(metrics.MemoryMetric)
 		ReportDeviceMetric.SystemServicesMemoryMB.UsedMem = dm.UsedMemory
@@ -594,9 +607,11 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 		dm := lookupDomainMetric(ctx, aiStatus.Key())
 		if dm != nil {
 			log.Tracef("metrics for %s CPU %d, usedMem %v, availMem %v, availMemPercent %v",
-				aiStatus.DomainName, dm.CPUTotal, dm.UsedMemory,
+				aiStatus.DomainName, dm.CPUTotalNs, dm.UsedMemory,
 				dm.AvailableMemory, dm.UsedMemoryPercent)
-			ReportAppMetric.Cpu.Total = *proto.Uint64(dm.CPUTotal)
+			// XXX add field in CpuMetric so we can report with better
+			// granularity than one second
+			ReportAppMetric.Cpu.Total = *proto.Uint64(dm.CPUTotalNs / nanoSecToSec)
 			ReportAppMetric.Memory.UsedMem = dm.UsedMemory
 			ReportAppMetric.Memory.AvailMem = dm.AvailableMemory
 			ReportAppMetric.Memory.UsedPercentage = dm.UsedMemoryPercent

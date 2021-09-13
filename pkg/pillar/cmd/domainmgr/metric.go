@@ -17,9 +17,10 @@ func metricsTimerTask(ctx *domainContext, hyper hypervisor.Hypervisor) {
 	log.Functionln("starting metrics timer task")
 	getAndPublishMetrics(ctx, hyper)
 
-	// Publish 4X more often than zedagent publishes to controller
+	// Publish 20X more often than zedagent publishes to controller
+	// to reduce effect of quantization errors
 	interval := time.Duration(ctx.metricInterval) * time.Second
-	max := float64(interval) / 4
+	max := float64(interval) / 20
 	min := max * 0.3
 	ticker := flextimer.NewRangeTicker(time.Duration(min), time.Duration(max))
 
@@ -41,8 +42,40 @@ func metricsTimerTask(ctx *domainContext, hyper hypervisor.Hypervisor) {
 	}
 }
 
+func logWatermarks(ctx *domainContext, status *types.DomainStatus, dm *types.DomainMetric) {
+	if status == nil {
+		return
+	}
+
+	config := lookupDomainConfig(ctx, status.Key())
+	if config == nil {
+		return
+	}
+
+	var CurrMaxUsedMemory uint32
+	st, _ := ctx.pubDomainMetric.Get(dm.Key())
+	if st != nil {
+		previousMetric := st.(types.DomainMetric)
+		CurrMaxUsedMemory = previousMetric.MaxUsedMemory
+	}
+
+	if CurrMaxUsedMemory < dm.MaxUsedMemory && config.Memory != 0 {
+		usedPercents := dm.MaxUsedMemory * 100 * 1024 / uint32(config.Memory)
+		log.Noticef("Memory watermark for %s increased: %d MiB,"+
+			" app-memory %d MiB (%d%%), %.2f%% of cgroup limit",
+			status.DomainName,
+			dm.MaxUsedMemory, config.Memory>>10,
+			usedPercents, dm.UsedMemoryPercent)
+	}
+}
+
 func getAndPublishMetrics(ctx *domainContext, hyper hypervisor.Hypervisor) {
 	dmList, _ := hyper.GetDomsCPUMem()
+	hm, err := hyper.GetHostCPUMem()
+	if err != nil {
+		log.Errorf("Cannot obtain HostCPUMem: %s", err)
+		return
+	}
 	now := time.Now()
 	for domainName, dm := range dmList {
 		uuid, version, _, err := types.DomainnameToUUID(domainName)
@@ -65,13 +98,27 @@ func getAndPublishMetrics(ctx *domainContext, hyper hypervisor.Hypervisor) {
 				continue
 			}
 			dm.Activated = status.Activated
+			// Scale the CPU nanoseconds based on the number of VCpus
+			if status.VCpus != 0 {
+				dm.CPUTotalNs /= uint64(status.VCpus)
+				dm.CPUScaled = uint32(status.VCpus)
+			}
+		} else if dm.UUIDandVersion.UUID == nilUUID && hm.Ncpus != 0 {
+			// Scale Xen Dom0 based CPUs seen by hypervisor
+			dm.CPUTotalNs /= uint64(hm.Ncpus)
+			dm.CPUScaled = hm.Ncpus
+			dm.Activated = true
 		}
 		if !dm.Activated {
 			// We clear the memory so it doesn't accidentally get
-			// reported.  We keep the CPUTotal and AvailableMemory
+			// reported.  We keep the CPUTotalNs and AvailableMemory
 			dm.UsedMemory = 0
+			dm.MaxUsedMemory = 0
 			dm.UsedMemoryPercent = 0
 		}
+
+		logWatermarks(ctx, status, &dm)
+
 		dm.LastHeard = now
 		ctx.pubDomainMetric.Publish(dm.Key(), dm)
 	}
@@ -90,18 +137,13 @@ func getAndPublishMetrics(ctx *domainContext, hyper hypervisor.Hypervisor) {
 		}
 		dm.Activated = false
 		// We clear the memory so it doesn't accidentally get reported
-		// We keep the CPUTotal and AvailableMemory
+		// We keep the CPUTotalNs and AvailableMemory
 		dm.UsedMemory = 0
 		dm.UsedMemoryPercent = 0
 		ctx.pubDomainMetric.Publish(dm.Key(), dm)
 	}
-	hm, err := hyper.GetHostCPUMem()
-	if err != nil {
-		log.Errorf("Cannot obtain HostCPUMem: %s", err)
-		return
-	}
 	if hyper.Name() != "xen" {
-		// the the hypervisor other than Xen, we don't have the Dom0 stats. Get the host
+		// the the hypervisor other than Xen, we don't have the Dom0 stats in dmList. Get the host
 		// cpu and memory for the device here
 		formatAndPublishHostCPUMem(ctx, hm, now)
 	}
@@ -127,27 +169,22 @@ func formatAndPublishHostCPUMem(ctx *domainContext, hm types.HostMemory, now tim
 		busy += t.User + t.System + t.Nice + t.Irq + t.Softirq
 	}
 
-	CPUnum, err := cpu.Counts(false)
-	if err != nil {
-		log.Errorf("getAndPublishMetrics: cpu.Counts failed: %v", err)
-		return
-	}
-	if CPUnum == 0 {
-		// Assume 1 i.e. don't scale busy
-		log.Warnf("getAndPublishMetrics: cpu count zero")
-	} else {
-		busy /= float64(CPUnum)
+	if hm.Ncpus != 0 {
+		// Scale based on the CPUs seen by the hypervisor
+		busy /= float64(hm.Ncpus)
 	}
 
+	const nanoSecToSec uint64 = 1000000000
 	dm := types.DomainMetric{
 		UUIDandVersion:    hostUUID,
-		CPUTotal:          uint64(busy),
+		CPUTotalNs:        uint64(busy * float64(nanoSecToSec)),
+		CPUScaled:         hm.Ncpus,
 		UsedMemory:        uint32(used),
 		AvailableMemory:   uint32(hm.FreeMemoryMB),
 		UsedMemoryPercent: usedPerc,
 		LastHeard:         now,
 		Activated:         true,
 	}
-	log.Tracef("formatAndPublishHostCPUMem: hostcpu, dm %+v, CPU num %d", dm, CPUnum)
+	log.Tracef("formatAndPublishHostCPUMem: hostcpu, dm %+v, CPU num %d busy %f", dm, hm.Ncpus, busy)
 	ctx.pubDomainMetric.Publish(dm.Key(), dm)
 }

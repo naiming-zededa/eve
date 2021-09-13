@@ -637,6 +637,8 @@ func (ctx xenContext) GetHostCPUMem() (types.HostMemory, error) {
 		} else {
 			hm.TotalMemoryMB = res
 		}
+	} else {
+		logrus.Warnf("Missing total_memory in %+v", dict)
 	}
 	if str, ok := dict["free_memory"]; ok {
 		res, err := strconv.ParseUint(str, 10, 64)
@@ -645,6 +647,8 @@ func (ctx xenContext) GetHostCPUMem() (types.HostMemory, error) {
 		} else {
 			hm.FreeMemoryMB = res
 		}
+	} else {
+		logrus.Warnf("Missing free_memory in %+v", dict)
 	}
 	if str, ok := dict["nr_cpus"]; ok {
 		// Note that this is the set of physical CPUs which is different
@@ -655,6 +659,8 @@ func (ctx xenContext) GetHostCPUMem() (types.HostMemory, error) {
 		} else {
 			hm.Ncpus = uint32(res)
 		}
+	} else {
+		logrus.Warnf("Missing nr_cpus in %+v", dict)
 	}
 	return hm, nil
 }
@@ -741,6 +747,21 @@ func (ctx xenContext) GetDomsCPUMem() (map[string]types.DomainMetric, error) {
 		logrus.Errorf("Calling fallbackDomainMetric")
 		dmList = fallbackDomainMetric()
 	}
+	// Need to add all of the others CPU nanoseconds into the Domain-0 entry
+	// since it represents all of the device
+	// XXX what about adding memory?
+	dom0, ok := dmList[dom0Name]
+	if !ok {
+		logrus.Errorf("No Domain-0 in CPUMemoryStat")
+	} else {
+		for d, dm := range dmList {
+			if d == dom0Name {
+				continue
+			}
+			dom0.CPUTotalNs += dm.CPUTotalNs
+		}
+		dmList[dom0Name] = dom0
+	}
 	return dmList, nil
 }
 
@@ -785,7 +806,8 @@ func parseCPUMemoryStat(cpuMemoryStat [][]string, dmList map[string]types.Domain
 		availableMemory := float64(totalMemory) - usedMemory
 
 		dm := types.DomainMetric{
-			CPUTotal:          cpuTotal,
+			CPUTotalNs:        cpuTotal * nanoSecToSec,
+			CPUScaled:         1, // Caller will scale
 			UsedMemory:        uint32(usedMemory),
 			AvailableMemory:   uint32(availableMemory),
 			UsedMemoryPercent: float64(usedMemoryPercent),
@@ -821,7 +843,8 @@ func fallbackDomainMetric() map[string]types.DomainMetric {
 		return dmList
 	}
 	for _, cpu := range cpuStat {
-		dm.CPUTotal = uint64(cpu.Total())
+		dm.CPUTotalNs = uint64(cpu.Total() * float64(nanoSecToSec))
+		dm.CPUScaled = 1 // Caller will scale
 		break
 	}
 	dmList[dom0Name] = dm
