@@ -120,11 +120,11 @@ One big driving factor for this is protecting Edge Containers and the Data Volum
 
 For more details, please consider [Encrypting Sensitive Information at Rest at the Edge](https://wiki.lfedge.org/display/EVE/Encrypting+Sensitive+Information+at+Rest+at+the+Edge) design proposal.
 
-The encryption key is sealed into TPM using PCR values. This means that the key can only be retrieved from TPM when the software booting sequence has not changed. In addition, the encryption key is escrowed with the Controller. This is done so that after an EVE/firmware upgrade, the device will fail to unseal the key from TPM (because its PCRs have changed), and after proving that the device software is trustworthy (via PCR quote etc), Controller will send back the key to the device.
+This storage encryption key is sealed into TPM using PCR values. This means that the key can only be retrieved from TPM when the firmware and software booting sequence has not changed. In addition, a TPM-encrypted copy of the storage encryption key is saved with the Controller. This is done so that after an EVE/firmware upgrade, the device will fail to unseal the key from TPM (because its PCRs have changed), and after proving that the device software is trustworthy (via PCR quote etc), the controller will provide that encrypted backup to the device, and the TPM on the device will decrypt it thereby being able to both access the application data volumes and seal the storage encryption key under the new TPM PCR values.
 
-However, in the above mechanism, it is desired that, the key is not sent in clear text, but instead be encrypted using a TPM based key, so that, the key is protected from being exposed in Controller. To this effect, the vault key itself is encrypted using a TPM based key. To decrypt the key, one has to be on the same device with access to the same TPM.
+Thus, in the above mechanism, the storage key is not not known to the controller since it is encrypted using a TPM based key. To this effect, the vault key itself is encrypted using a TPM based key. To decrypt the key, one has to be on the same device with access to the same TPM, and the firmware+software on that device has to pass the remote attestation check in the controller.
 
-For more details, please refer to [Measured Boot and Remote Attestation](https://wiki.lfedge.org/display/EVE/Measured+Boot+and+Remote+Attestation) design proposal.
+For more details, please refer to [Measured Boot and Remote Attestation](https://wiki.lfedge.org/display/EVE/Measured+Boot+and+Remote+Attestation) design specification.
 
 ## Secure Overlay Network
 
@@ -135,3 +135,7 @@ Each ECO has a unique certificate and private key generated when the ECO is depl
 Two ECOs communicating using the overlay will get an secure channel since LISP will perform a key exchange using the pair of public keys (which are bound to the EIDs per above).
 
 In addition, the LISP map server can provide ability to limit access to the mappings for certain EIDs based on the EID which is trying to look them up.
+
+## Details on keys and certificates
+
+These details are specified in [KEYS-AND-CERTS](KEYS-AND-CERTS.md).
