@@ -4,6 +4,7 @@
 package types
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -868,7 +869,8 @@ type DhcpConfig struct {
 	Gateway    net.IP
 	DomainName string
 	NtpServer  net.IP
-	DnsServers []net.IP // If not set we use Gateway as DNS server
+	DnsServers []net.IP    // If not set we use Gateway as DNS server
+	Type       NetworkType // IPv4 or IPv6 or Dual stack
 }
 
 // WifiConfig - Wifi structure
@@ -935,6 +937,7 @@ type NetworkPortStatus struct {
 	IsMgmt         bool   // Used to talk to controller
 	Cost           uint8
 	Dhcp           DhcpType
+	Type           NetworkType // IPv4 or IPv6 or Dual stack
 	Subnet         net.IPNet
 	NtpServer      net.IP // This comes from network instance configuration
 	DomainName     string
@@ -1822,8 +1825,19 @@ const (
 	NT_NOOP NetworkType = 0
 	NT_IPV4             = 4
 	NT_IPV6             = 6
-	// XXX Do we need a NT_DUAL/NT_IPV46? Implies two subnets/dhcp ranges?
-	// XXX how do we represent a bridge? NT_L2??
+
+	// EVE has been running with Dual stack DHCP behavior with both IPv4 & IPv6 specific networks.
+	// There can be users who are currently benefitting from this behavior.
+	// It makes sense to introduce two new types IPv4_ONLY & IPv6_ONLY and allow
+	// the same family selection from UI for the use cases where only one of the IP families
+	// is required on management/app-shared adapters.
+
+	// NtIpv4Only : IPv4 addresses only
+	NtIpv4Only = 5
+	// NtIpv6Only : IPv6 addresses only
+	NtIpv6Only = 7
+	// NtDualStack : Run with dual stack
+	NtDualStack = 8
 )
 
 // Extracted from the protobuf NetworkConfig. Used by parseSystemAdapter
@@ -1849,6 +1863,16 @@ type NetworkXObjectConfig struct {
 type IpRange struct {
 	Start net.IP
 	End   net.IP
+}
+
+// Contains used to evaluate whether an IP address
+// is within the range
+func (ipRange IpRange) Contains(ipAddr net.IP) bool {
+	if bytes.Compare(ipAddr, ipRange.Start) >= 0 &&
+		bytes.Compare(ipAddr, ipRange.End) <= 0 {
+		return true
+	}
+	return false
 }
 
 func (config NetworkXObjectConfig) Key() string {
@@ -2911,3 +2935,82 @@ type AppInstMetaData struct {
 func (data AppInstMetaData) Key() string {
 	return data.AppInstUUID.String()
 }
+
+// Bitmap :
+// Bitmap of the reserved and allocated resources
+// Keeps 256 bits indexed by 0 to 255.
+type Bitmap [32]byte
+
+// IsSet :
+// Test the bit value
+func (bits *Bitmap) IsSet(i int) bool {
+	return bits[i/8]&(1<<uint(7-i%8)) != 0
+}
+
+// Set :
+// Set the bit value
+func (bits *Bitmap) Set(i int) {
+	bits[i/8] |= 1 << uint(7-i%8)
+}
+
+// Clear :
+// Clear the bit value
+func (bits *Bitmap) Clear(i int) {
+	bits[i/8] &^= 1 << uint(7-i%8)
+}
+
+// AddToIP :
+func AddToIP(ip net.IP, addition int) net.IP {
+	if addr := ip.To4(); addr != nil {
+		val := uint32(addr[0])<<24 + uint32(addr[1])<<16 +
+			uint32(addr[2])<<8 + uint32(addr[3])
+		val += uint32(addition)
+		byte0 := byte((val >> 24) & 0xFF)
+		byte1 := byte((val >> 16) & 0xFF)
+		byte2 := byte((val >> 8) & 0xFF)
+		byte3 := byte(val & 0xFF)
+		return net.IPv4(byte0, byte1, byte2, byte3)
+	}
+	//TBD:XXX, IPv6 handling
+	return net.IP{}
+}
+
+// GetIPAddrCountOnSubnet IP address count on subnet
+func GetIPAddrCountOnSubnet(subnet net.IPNet) int {
+	prefixLen, _ := subnet.Mask.Size()
+	if prefixLen != 0 {
+		if subnet.IP.To4() != nil {
+			return 0x01 << (32 - prefixLen)
+		}
+		if subnet.IP.To16() != nil {
+			return 0x01 << (128 - prefixLen)
+		}
+	}
+	return 0
+}
+
+// GetIPNetwork  :
+// returns the first IP Address of the subnet(Network Address)
+func GetIPNetwork(subnet net.IPNet) net.IP {
+	return subnet.IP.Mask(subnet.Mask)
+}
+
+// GetIPBroadcast :
+// returns the last IP Address of the subnet(Broadcast Address)
+func GetIPBroadcast(subnet net.IPNet) net.IP {
+	if network := GetIPNetwork(subnet); network != nil {
+		if addrCount := GetIPAddrCountOnSubnet(subnet); addrCount != 0 {
+			return AddToIP(network, addrCount-1)
+		}
+	}
+	return net.IP{}
+}
+
+// AppNumber :
+// PS. Any change to BitMapMax, must be
+// reflected in the BitMap Size(32 bytes)
+const (
+	BitMapMax       = 255 // with 0 base, its 256
+	MinSubnetSize   = 8   // minimum Subnet Size
+	LargeSubnetSize = 16  // for determining default Dhcp Range
+)

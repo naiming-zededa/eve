@@ -427,7 +427,7 @@ func applyACLRules(aclArgs types.AppNetworkACLArgs,
 		aclArgs.IPVer, aclArgs.BridgeName, aclArgs.AppIP, len(rules))
 
 	// the catch all log/drop rules are towards the end of the rule list
-	// hance we are inserting the rule in reverse order at
+	// hence we are inserting the rule in reverse order at
 	// the top of a target chain, to ensure the drop rules
 	// will be at the end of the rule stack, and the acl match
 	// rules will be at the top of the rule stack for an app
@@ -1465,7 +1465,7 @@ func updateACLConfiglet(ctx *zedrouterContext, aclArgs types.AppNetworkACLArgs, 
 		aclArgs.BridgeName, aclArgs.VifName, aclArgs.AppIP)
 
 	aclArgs.IPVer = determineIPVer(aclArgs.IsMgmt, aclArgs.BridgeIP)
-	if compareACLs(oldACLs, ACLs) == true && !force {
+	if !force && compareACLs(oldACLs, ACLs) {
 		log.Functionf("updateACLConfiglet: bridgeName %s, vifName %s, appIP %s: no change\n",
 			aclArgs.BridgeName, aclArgs.VifName, aclArgs.AppIP)
 		return oldRules, oldDepend, nil
