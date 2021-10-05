@@ -8,6 +8,7 @@
 # in /bits, some will be constructed on the fly depending
 # on settings that were passed via kernel command line:
 #   eve_blackbox
+#   eve_nuke_disks
 #   eve_nuke_all_disks
 #   eve_install_disk
 #   eve_persist_disk
@@ -88,6 +89,16 @@ mount_part() {
    mount "$@" "/dev/$ID" "/run/$PART"
 }
 
+# run command in a chroot with system mount points provisioned
+ctr_run() {
+   local SYS_DIRS="/sys /proc /dev"
+   local DIR="$1"
+   shift
+   for d in $SYS_DIRS; do mount --bind "$d" "$DIR/$d"; done
+   chroot "$DIR" "$@"
+   for d in $SYS_DIRS; do umount "$DIR/$d"; done
+}
+
 # collect_black_box FOLDER_TO_PUT_BLACK_BOX
 collect_black_box() {
    lsblk > "$1/lsblk.txt"
@@ -121,6 +132,18 @@ adjust_zfs_mounts_and_umount() {
 
 # do this just in case
 modprobe usbhid && modprobe usbkbd
+
+# clean partition tables on disks defined to nuke
+if grep -q eve_nuke_disks /proc/cmdline; then
+  NUKE_DISKS=$(</proc/cmdline tr ' ' '\012' | sed -ne '/^eve_nuke_disks=/s#^.*=##p')
+  printf '%s' "Nuking partition tables on:"
+  IFS=',' ;for dev in $NUKE_DISKS; do
+      printf ' %s' "$dev"
+      dd if=/dev/zero of="/dev/$dev" bs=512 count=34 >/dev/null 2>&1
+  done
+  sync; sleep 5; sync
+  echo " done!"
+fi
 
 # measure of last resort: we nuke all partition tables
 # so that we can get to a blank state. NOTE that this
@@ -282,6 +305,10 @@ if mount_part INVENTORY "$(root_dev)" -t vfat -o iocharset=iso8859-1; then
 
    # first lets look at hardware model
    dmidecode > "$REPORT/hardwaremodel.txt"
+
+   # try to generate model json file
+   ctr_run /opt/debug spec.sh > "$REPORT/controller-model.json"
+   ctr_run /opt/debug spec.sh -v > "$REPORT/controller-model-verbose.json"
 
    # then we can collect our black box
    grep -q eve_blackbox /proc/cmdline && collect_black_box "$REPORT" 2>/dev/null

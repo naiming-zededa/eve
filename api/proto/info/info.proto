@@ -276,10 +276,17 @@ enum DataSecAtRestStatus {
   DATASEC_AT_REST_ERROR = 4;    // Enabled, but encountered an error
 }
 
+enum PCRStatus {
+  PCR_UNKNOWN = 0;  // Status is unknown
+  PCR_ENABLED = 1;  // Enabled PCR
+  PCR_DISABLED = 2; // Disabled PCR
+}
+
 message VaultInfo {
   string name = 1;                //Name of the vault
   DataSecAtRestStatus status = 2; //Status of the vault
   ErrorInfo vaultErr = 3;         //Additional info in case of failure
+  PCRStatus pcrStatus = 4;        //Status of the PCR
 }
 
 message DataSecAtRest {
@@ -425,6 +432,7 @@ message ZInfoDevice {
   repeated ZInfoDeviceTasks tasks = 37;
 
   bool maintenance_mode = 38;
+  // XXX to be deprecated in favor of maintenance_mode_reasons
   MaintenanceModeReason maintenance_mode_reason = 39;
 
   // Is /dev/watchdog present in the system
@@ -450,6 +458,7 @@ message ZInfoDevice {
   // Is there a local_profile from a local_profile_server?
   // The global_profile from the controller is not echoed in this field.
   string local_profile = 45;
+  repeated MaintenanceModeReason maintenance_mode_reasons = 46;
 }
 
 // Different reasons for a boot/reboot

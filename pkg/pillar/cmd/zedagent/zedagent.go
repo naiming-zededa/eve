@@ -26,12 +26,14 @@
 package zedagent
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/lf-edge/eve/api/go/attest"
 	"github.com/lf-edge/eve/api/go/flowlog"
 	"github.com/lf-edge/eve/api/go/info"
 	"github.com/lf-edge/eve/pkg/pillar/agentlog"
@@ -39,9 +41,9 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/pidfile"
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
 	"github.com/lf-edge/eve/pkg/pillar/types"
-	"github.com/lf-edge/eve/pkg/pillar/utils"
 	"github.com/lf-edge/eve/pkg/pillar/zedcloud"
 
+	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -81,6 +83,7 @@ type DNSContext struct {
 	subDeviceNetworkStatus pubsub.Subscription
 	triggerGetConfig       bool
 	triggerDeviceInfo      bool
+	triggerHandleDeferred  bool
 }
 
 type zedagentContext struct {
@@ -302,18 +305,37 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	zedagentCtx.attestCtx = &attestCtx
 
 	// Wait until we have been onboarded aka know our own UUID
-	onboard, err := utils.WaitForOnboarded(ps, log, agentName, warningTime, errorTime)
+	subOnboardStatus, err := ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:     "zedclient",
+		MyAgentName:   agentName,
+		TopicImpl:     types.OnboardingStatus{},
+		Activate:      true,
+		Persistent:    true,
+		Ctx:           &zedagentCtx,
+		CreateHandler: handleOnboardStatusCreate,
+		ModifyHandler: handleOnboardStatusModify,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Functionf("processed onboarded")
-	devUUID = onboard.DeviceUUID
+	// Wait for Onboarding to be done by client
+	nilUUID := uuid.UUID{}
+	for devUUID == nilUUID {
+		log.Functionf("Waiting for OnboardStatus UUID")
+		select {
+		case change := <-subOnboardStatus.MsgChan():
+			subOnboardStatus.ProcessChange(change)
+		case <-stillRunning.C:
+		}
+		ps.StillRunning(agentName, warningTime, errorTime)
+	}
 
 	// We know our own UUID; prepare for communication with controller
 	zedcloudCtx = handleConfigInit(zedagentCtx.globalConfig.GlobalValueInt(types.NetworkSendTimeout))
-
 	// Timer for deferred sends of info messages
-	deferredChan := zedcloud.GetDeferredChan(zedcloudCtx)
+	deferredChan := zedcloud.GetDeferredChan(zedcloudCtx, getDeferredSentHandlerFunction(), getDeferredPriorityFunctions()...)
 
 	subAssignableAdapters, err := ps.NewSubscription(pubsub.SubscriptionOptions{
 		AgentName:     "domainmgr",
@@ -977,6 +999,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	for !zedagentCtx.GCInitialized {
 		log.Functionf("Waiting for GCInitialized")
 		select {
+		case change := <-subOnboardStatus.MsgChan():
+			subOnboardStatus.ProcessChange(change)
+
 		case change := <-subGlobalConfig.MsgChan():
 			subGlobalConfig.ProcessChange(change)
 
@@ -989,6 +1014,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	// wait till, zboot status is ready
 	for !zedagentCtx.zbootRestarted {
 		select {
+		case change := <-subOnboardStatus.MsgChan():
+			subOnboardStatus.ProcessChange(change)
+
 		case change := <-subZbootStatus.MsgChan():
 			subZbootStatus.ProcessChange(change)
 			if zedagentCtx.zbootRestarted {
@@ -1017,11 +1045,20 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 			DNSctx.DNSinitialized)
 
 		select {
+		case change := <-subOnboardStatus.MsgChan():
+			subOnboardStatus.ProcessChange(change)
+
 		case change := <-subGlobalConfig.MsgChan():
 			subGlobalConfig.ProcessChange(change)
 
 		case change := <-subDeviceNetworkStatus.MsgChan():
 			subDeviceNetworkStatus.ProcessChange(change)
+			if DNSctx.triggerHandleDeferred {
+				start := time.Now()
+				zedcloud.HandleDeferred(zedcloudCtx, start, 100*time.Millisecond, false)
+				ps.CheckMaxTimeTopic(agentName, "deferredChan", start, warningTime, errorTime)
+				DNSctx.triggerHandleDeferred = false
+			}
 
 		case change := <-subAssignableAdapters.MsgChan():
 			subAssignableAdapters.ProcessChange(change)
@@ -1046,7 +1083,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 
 		case change := <-deferredChan:
 			start := time.Now()
-			zedcloud.HandleDeferred(zedcloudCtx, change, 100*time.Millisecond)
+			zedcloud.HandleDeferred(zedcloudCtx, change, 100*time.Millisecond, false)
 			ps.CheckMaxTimeTopic(agentName, "deferredChan", start,
 				warningTime, errorTime)
 
@@ -1195,6 +1232,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 
 	for {
 		select {
+		case change := <-subOnboardStatus.MsgChan():
+			subOnboardStatus.ProcessChange(change)
+
 		case change := <-subZbootStatus.MsgChan():
 			subZbootStatus.ProcessChange(change)
 
@@ -1242,6 +1282,12 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 				log.Functionf("NetworkStatus triggered PublishDeviceInfo")
 				triggerPublishDevInfo(&zedagentCtx)
 				DNSctx.triggerDeviceInfo = false
+			}
+			if DNSctx.triggerHandleDeferred {
+				start := time.Now()
+				zedcloud.HandleDeferred(zedcloudCtx, start, 100*time.Millisecond, false)
+				ps.CheckMaxTimeTopic(agentName, "deferredChan", start, warningTime, errorTime)
+				DNSctx.triggerHandleDeferred = false
 			}
 
 		case change := <-subAssignableAdapters.MsgChan():
@@ -1299,7 +1345,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 
 		case change := <-deferredChan:
 			start := time.Now()
-			zedcloud.HandleDeferred(zedcloudCtx, change, 100*time.Millisecond)
+			zedcloud.HandleDeferred(zedcloudCtx, change, 100*time.Millisecond, false)
 			ps.CheckMaxTimeTopic(agentName, "deferredChan", start,
 				warningTime, errorTime)
 
@@ -1579,6 +1625,10 @@ func handleDNSImpl(ctxArg interface{}, key string,
 		log.Functionf("handleDNSImpl no change")
 		ctx.DNSinitialized = true
 		return
+	}
+	// if status changed to DPC_SUCCESS try to send deferred objects
+	if status.State == types.DPC_SUCCESS && deviceNetworkStatus.State != types.DPC_SUCCESS {
+		ctx.triggerHandleDeferred = true
 	}
 	log.Functionf("handleDNSImpl: changed %v",
 		cmp.Diff(*deviceNetworkStatus, status))
@@ -1873,4 +1923,86 @@ func handleNodeAgentStatusDelete(ctxArg interface{}, key string,
 	log.Functionf("handleNodeAgentStatusDelete: for %s", key)
 	// Nothing to do
 	triggerPublishDevInfo(ctx)
+}
+
+func getDeferredSentHandlerFunction() *zedcloud.SentHandlerFunction {
+	var function zedcloud.SentHandlerFunction
+	function = func(itemType interface{}, data *bytes.Buffer, result types.SenderResult) {
+		if result == types.SenderStatusNone {
+			if data == nil {
+				return
+			}
+			if el, ok := itemType.(info.ZInfoTypes); ok && el == info.ZInfoTypes_ZiDevice {
+				writeSentDeviceInfoProtoMessage(data.Bytes())
+			}
+			if el, ok := itemType.(info.ZInfoTypes); ok && el == info.ZInfoTypes_ZiApp {
+				writeSentAppInfoProtoMessage(data.Bytes())
+			}
+		} else {
+			if _, ok := itemType.(attest.ZAttestReqType); ok {
+				switch result {
+				case types.SenderStatusUpgrade:
+					log.Functionf("sendAttestReqProtobuf: Controller upgrade in progress")
+				case types.SenderStatusRefused:
+					log.Functionf("sendAttestReqProtobuf: Controller returned ECONNREFUSED")
+				case types.SenderStatusCertInvalid:
+					log.Warnf("sendAttestReqProtobuf: Controller certificate invalid time")
+				case types.SenderStatusCertMiss:
+					log.Functionf("sendAttestReqProtobuf: Controller certificate miss")
+				}
+			}
+		}
+	}
+	return &function
+}
+
+func getDeferredPriorityFunctions() []zedcloud.TypePriorityCheckFunction {
+	var functions []zedcloud.TypePriorityCheckFunction
+	functions = append(functions, func(itemType interface{}) bool {
+		if _, ok := itemType.(attest.ZAttestReqType); ok {
+			return true
+		}
+		return false
+	})
+
+	functions = append(functions, func(itemType interface{}) bool {
+		if el, ok := itemType.(info.ZInfoTypes); ok && el == info.ZInfoTypes_ZiApp {
+			return true
+		}
+		return false
+	})
+	return functions
+}
+
+// Track the DeviceUUID
+func handleOnboardStatusCreate(ctxArg interface{}, key string,
+	statusArg interface{}) {
+	handleOnboardStatusImpl(ctxArg, key, statusArg)
+}
+
+func handleOnboardStatusModify(ctxArg interface{}, key string,
+	statusArg interface{}, oldStatusArg interface{}) {
+	handleOnboardStatusImpl(ctxArg, key, statusArg)
+}
+
+func handleOnboardStatusImpl(ctxArg interface{}, key string,
+	statusArg interface{}) {
+
+	status := statusArg.(types.OnboardingStatus)
+	ctx := ctxArg.(*zedagentContext)
+	if devUUID == status.DeviceUUID {
+		return
+	}
+	log.Noticef("Device UUID changed from %s to %s", devUUID, status.DeviceUUID)
+	devUUID = status.DeviceUUID
+	if zedcloudCtx != nil {
+		zedcloudCtx.DevUUID = devUUID
+	}
+	// Make sure trigger function isn't going to trip on a nil pointer
+	if ctx.getconfigCtx != nil && ctx.getconfigCtx.zedagentCtx != nil &&
+		ctx.getconfigCtx.subAppInstanceStatus != nil {
+
+		// Re-publish all objects with new device UUID
+		triggerPublishAllInfo(ctx.getconfigCtx.zedagentCtx)
+	}
 }

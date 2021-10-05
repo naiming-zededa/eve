@@ -226,7 +226,7 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 	ReportDeviceMetric.Memory = new(metrics.MemoryMetric)
 	ReportDeviceMetric.CpuMetric = new(metrics.AppCpuMetric)
 
-	ReportMetrics.DevID = *proto.String(zcdevUUID.String())
+	ReportMetrics.DevID = *proto.String(devUUID.String())
 	ReportZmetric := new(metrics.ZmetricTypes)
 	*ReportZmetric = metrics.ZmetricTypes_ZmDevice
 
@@ -929,21 +929,16 @@ func PublishAppInfoToZedCloud(ctx *zedagentContext, uuid string,
 	appType := new(info.ZInfoTypes)
 	*appType = info.ZInfoTypes_ZiApp
 	ReportInfo.Ztype = *appType
-	ReportInfo.DevId = *proto.String(zcdevUUID.String())
+	ReportInfo.DevId = *proto.String(devUUID.String())
 	ReportInfo.AtTimeStamp = ptypes.TimestampNow()
 
 	ReportAppInfo := new(info.ZInfoApp)
 
 	ReportAppInfo.AppID = uuid
 	ReportAppInfo.SystemApp = false
-	ReportAppInfo.State = info.ZSwState_HALTED
-	var state types.SwState
-	var objErr bool
 	if aiStatus != nil {
 		ReportAppInfo.AppName = aiStatus.DisplayName
 		ReportAppInfo.State = aiStatus.State.ZSwState()
-		state = aiStatus.State
-		objErr = aiStatus.HasError()
 		if !aiStatus.ErrorTime.IsZero() {
 			errInfo := encodeErrorInfo(
 				aiStatus.ErrorAndTimeWithSource.ErrorDescription)
@@ -1047,30 +1042,18 @@ func PublishAppInfoToZedCloud(ctx *zedagentContext, uuid string,
 	}
 	statusUrl := zedcloud.URLPathString(serverNameAndPort, zedcloudCtx.V2API, devUUID, "info")
 
-	zedcloud.RemoveDeferred(zedcloudCtx, uuid)
 	buf := bytes.NewBuffer(data)
 	if buf == nil {
 		log.Fatal("malloc error")
 	}
 	size := int64(proto.Size(ReportInfo))
-	start := time.Now()
-	err = SendProtobuf(statusUrl, buf, size, iteration)
-	if err != nil {
-		log.Errorf("PublishAppInfoToZedCloud failed: %s", err)
-		// Try sending later
-		// The buf might have been consumed
-		buf := bytes.NewBuffer(data)
-		if buf == nil {
-			log.Fatal("malloc error")
-		}
-		zedcloud.SetDeferred(zedcloudCtx, uuid, buf, size, statusUrl,
-			true)
-	} else {
-		writeSentAppInfoProtoMessage(data)
 
-		log.Functionf("sent app info %s state %s err %t took %v",
-			uuid, state.String(), objErr, time.Since(start))
-	}
+	//We queue the message and then get the highest priority message to send.
+	//If there are no failures and defers we'll send this message,
+	//but if there is a queue we'll retry sending the highest priority message.
+	zedcloud.SetDeferred(zedcloudCtx, uuid, buf, size, statusUrl,
+		true, info.ZInfoTypes_ZiApp)
+	zedcloud.HandleDeferred(zedcloudCtx, time.Now(), 0, true)
 }
 
 // PublishContentInfoToZedCloud is called per change, hence needs to try over all management ports
@@ -1085,20 +1068,15 @@ func PublishContentInfoToZedCloud(ctx *zedagentContext, uuid string,
 	contentType := new(info.ZInfoTypes)
 	*contentType = info.ZInfoTypes_ZiContentTree
 	ReportInfo.Ztype = *contentType
-	ReportInfo.DevId = *proto.String(zcdevUUID.String())
+	ReportInfo.DevId = *proto.String(devUUID.String())
 	ReportInfo.AtTimeStamp = ptypes.TimestampNow()
 
 	ReportContentInfo := new(info.ZInfoContentTree)
 
 	ReportContentInfo.Uuid = uuid
-	ReportContentInfo.State = info.ZSwState_HALTED
-	var state types.SwState
-	var objErr bool
 	if ctStatus != nil {
 		ReportContentInfo.DisplayName = ctStatus.DisplayName
 		ReportContentInfo.State = ctStatus.State.ZSwState()
-		state = ctStatus.State
-		objErr = ctStatus.HasError()
 		if !ctStatus.ErrorTime.IsZero() {
 			errInfo := encodeErrorInfo(
 				ctStatus.ErrorAndTimeWithSource.ErrorDescription)
@@ -1134,28 +1112,18 @@ func PublishContentInfoToZedCloud(ctx *zedagentContext, uuid string,
 	}
 	statusURL := zedcloud.URLPathString(serverNameAndPort, zedcloudCtx.V2API, devUUID, "info")
 
-	zedcloud.RemoveDeferred(zedcloudCtx, uuid)
 	buf := bytes.NewBuffer(data)
 	if buf == nil {
 		log.Fatal("malloc error")
 	}
 	size := int64(proto.Size(ReportInfo))
-	start := time.Now()
-	err = SendProtobuf(statusURL, buf, size, iteration)
-	if err != nil {
-		log.Errorf("PublishContentInfoToZedCloud failed: %s", err)
-		// Try sending later
-		// The buf might have been consumed
-		buf := bytes.NewBuffer(data)
-		if buf == nil {
-			log.Fatal("malloc error")
-		}
-		zedcloud.SetDeferred(zedcloudCtx, uuid, buf, size, statusURL,
-			true)
-	} else {
-		log.Functionf("sent content info %s state %s err %t took %v",
-			uuid, state.String(), objErr, time.Since(start))
-	}
+
+	//We queue the message and then get the highest priority message to send.
+	//If there are no failures and defers we'll send this message,
+	//but if there is a queue we'll retry sending the highest priority message.
+	zedcloud.SetDeferred(zedcloudCtx, uuid, buf, size, statusURL,
+		true, info.ZInfoTypes_ZiContentTree)
+	zedcloud.HandleDeferred(zedcloudCtx, time.Now(), 0, true)
 }
 
 // PublishVolumeToZedCloud is called per change, hence needs to try over all management ports
@@ -1170,20 +1138,15 @@ func PublishVolumeToZedCloud(ctx *zedagentContext, uuid string,
 	volumeType := new(info.ZInfoTypes)
 	*volumeType = info.ZInfoTypes_ZiVolume
 	ReportInfo.Ztype = *volumeType
-	ReportInfo.DevId = *proto.String(zcdevUUID.String())
+	ReportInfo.DevId = *proto.String(devUUID.String())
 	ReportInfo.AtTimeStamp = ptypes.TimestampNow()
 
 	ReportVolumeInfo := new(info.ZInfoVolume)
 
 	ReportVolumeInfo.Uuid = uuid
-	ReportVolumeInfo.State = info.ZSwState_INITIAL
-	var state types.SwState
-	var objErr bool
 	if volStatus != nil {
 		ReportVolumeInfo.DisplayName = volStatus.DisplayName
 		ReportVolumeInfo.State = volStatus.State.ZSwState()
-		state = volStatus.State
-		objErr = volStatus.HasError()
 		if !volStatus.ErrorTime.IsZero() {
 			errInfo := encodeErrorInfo(
 				volStatus.ErrorAndTimeWithSource.ErrorDescription)
@@ -1227,29 +1190,18 @@ func PublishVolumeToZedCloud(ctx *zedagentContext, uuid string,
 	}
 	statusURL := zedcloud.URLPathString(serverNameAndPort, zedcloudCtx.V2API, devUUID, "info")
 
-	zedcloud.RemoveDeferred(zedcloudCtx, uuid)
 	buf := bytes.NewBuffer(data)
 	if buf == nil {
 		log.Fatal("malloc error")
 	}
 	size := int64(proto.Size(ReportInfo))
-	start := time.Now()
-	err = SendProtobuf(statusURL, buf, size, iteration)
-	if err != nil {
-		log.Errorf("PublishVolumeToZedCloud failed: %s", err)
-		// Try sending later
-		// The buf might have been consumed
-		buf := bytes.NewBuffer(data)
-		if buf == nil {
-			log.Fatal("malloc error")
-		}
-		zedcloud.SetDeferred(zedcloudCtx, uuid, buf, size, statusURL,
-			true)
-	} else {
-		log.Functionf("sent vol info %s state %s err %t took %v",
-			uuid, state.String(), objErr, time.Since(start))
-	}
 
+	//We queue the message and then get the highest priority message to send.
+	//If there are no failures and defers we'll send this message,
+	//but if there is a queue we'll retry sending the highest priority message.
+	zedcloud.SetDeferred(zedcloudCtx, uuid, buf, size, statusURL,
+		true, info.ZInfoTypes_ZiVolume)
+	zedcloud.HandleDeferred(zedcloudCtx, time.Now(), 0, true)
 }
 
 // PublishBlobInfoToZedCloud is called per change, hence needs to try over all management ports
@@ -1262,7 +1214,7 @@ func PublishBlobInfoToZedCloud(ctx *zedagentContext, blobSha string, blobStatus 
 	contentType := new(info.ZInfoTypes)
 	*contentType = info.ZInfoTypes_ZiBlobList
 	ReportInfo.Ztype = *contentType
-	ReportInfo.DevId = *proto.String(zcdevUUID.String())
+	ReportInfo.DevId = *proto.String(devUUID.String())
 	ReportInfo.AtTimeStamp = ptypes.TimestampNow()
 
 	ReportBlobInfoList := new(info.ZInfoBlobList)
@@ -1270,12 +1222,8 @@ func PublishBlobInfoToZedCloud(ctx *zedagentContext, blobSha string, blobStatus 
 	ReportBlobInfo := new(info.ZInfoBlob)
 
 	ReportBlobInfo.Sha256 = blobSha
-	var state types.SwState
-	var objErr bool
 	if blobStatus != nil {
 		ReportBlobInfo.State = blobStatus.State.ZSwState()
-		state = blobStatus.State
-		objErr = blobStatus.HasError()
 		ReportBlobInfo.ProgressPercentage = blobStatus.GetDownloadedPercentage()
 		createTime, _ := ptypes.TimestampProto(blobStatus.CreateTime)
 		lastChangeTime, _ := ptypes.TimestampProto(blobStatus.LastRefCountChangeTime)
@@ -1301,28 +1249,18 @@ func PublishBlobInfoToZedCloud(ctx *zedagentContext, blobSha string, blobStatus 
 	}
 	statusURL := zedcloud.URLPathString(serverNameAndPort, zedcloudCtx.V2API, devUUID, "info")
 
-	zedcloud.RemoveDeferred(zedcloudCtx, blobSha)
 	buf := bytes.NewBuffer(data)
 	if buf == nil {
 		log.Fatal("malloc error")
 	}
 	size := int64(proto.Size(ReportInfo))
-	start := time.Now()
-	err = SendProtobuf(statusURL, buf, size, iteration)
-	if err != nil {
-		log.Errorf("PublishBlobInfoToZedCloud failed: %s", err)
-		// Try sending later
-		// The buf might have been consumed
-		buf := bytes.NewBuffer(data)
-		if buf == nil {
-			log.Fatal("malloc error")
-		}
-		zedcloud.SetDeferred(zedcloudCtx, blobSha, buf, size, statusURL,
-			true)
-	} else {
-		log.Functionf("sent blob info %s state %s err %t took %v",
-			blobSha, state.String(), objErr, time.Since(start))
-	}
+
+	//We queue the message and then get the highest priority message to send.
+	//If there are no failures and defers we'll send this message,
+	//but if there is a queue we'll retry sending the highest priority message.
+	zedcloud.SetDeferred(zedcloudCtx, blobSha, buf, size, statusURL,
+		true, info.ZInfoTypes_ZiBlobList)
+	zedcloud.HandleDeferred(zedcloudCtx, time.Now(), 0, true)
 }
 
 func appIfnameToNetworkInstance(ctx *zedagentContext,

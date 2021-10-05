@@ -58,13 +58,20 @@ func handleNetworkInstanceDelete(ctxArg interface{}, key string,
 	log.Functionf("handleNetworkInstanceDelete(%s) done", key)
 }
 
+// prepareAndPublishNetworkInstanceInfoMsg sends a message
+// which is mostly empty if deleted is set as a delete indication.
+// XXX When a network instance is deleted it is ideal to
+// send a flag such as deleted/gone inside
+// ZInfoNetworkInstance message. Having a separate flag
+// (indicating deletion) would make is explicit
+// and easy for the cloud process.
 func prepareAndPublishNetworkInstanceInfoMsg(ctx *zedagentContext,
 	status types.NetworkInstanceStatus, deleted bool) {
 
 	infoMsg := &zinfo.ZInfoMsg{}
 	infoType := new(zinfo.ZInfoTypes)
 	*infoType = zinfo.ZInfoTypes_ZiNetworkInstance
-	infoMsg.DevId = *proto.String(zcdevUUID.String())
+	infoMsg.DevId = *proto.String(devUUID.String())
 	infoMsg.Ztype = *infoType
 	infoMsg.AtTimeStamp = ptypes.TimestampNow()
 
@@ -72,33 +79,23 @@ func prepareAndPublishNetworkInstanceInfoMsg(ctx *zedagentContext,
 	info := new(zinfo.ZInfoNetworkInstance)
 	info.NetworkID = uuid
 	info.NetworkVersion = status.UUIDandVersion.Version
-	info.Displayname = status.DisplayName
-	info.InstType = uint32(status.Type)
-	info.CurrentUplinkIntf = status.CurrentUplinkIntf
+	if !deleted {
+		info.Displayname = status.DisplayName
+		info.InstType = uint32(status.Type)
+		info.CurrentUplinkIntf = status.CurrentUplinkIntf
 
-	if !status.ErrorTime.IsZero() {
-		errInfo := new(zinfo.ErrorInfo)
-		errInfo.Description = status.Error
-		errTime, _ := ptypes.TimestampProto(status.ErrorTime)
-		errInfo.Timestamp = errTime
-		info.NetworkErr = append(info.NetworkErr, errInfo)
-		info.State = zinfo.ZNetworkInstanceState_ZNETINST_STATE_ERROR
-	} else {
-		if status.Activated {
+		if !status.ErrorTime.IsZero() {
+			errInfo := new(zinfo.ErrorInfo)
+			errInfo.Description = status.Error
+			errTime, _ := ptypes.TimestampProto(status.ErrorTime)
+			errInfo.Timestamp = errTime
+			info.NetworkErr = append(info.NetworkErr, errInfo)
+			info.State = zinfo.ZNetworkInstanceState_ZNETINST_STATE_ERROR
+		} else if status.Activated {
 			info.State = zinfo.ZNetworkInstanceState_ZNETINST_STATE_ONLINE
 		} else {
 			info.State = zinfo.ZNetworkInstanceState_ZNETINST_STATE_INIT
 		}
-	}
-
-	if deleted {
-		// XXX When a network instance is deleted it is ideal to
-		// send a flag such as deleted/gone inside
-		// ZInfoNetworkInstance message. Having a separate flag
-		// (indicating deletion) would make is explicit
-		// and easy for the cloud process.
-		info.Activated = false
-	} else {
 		info.Activated = status.Activated
 
 		info.BridgeNum = uint32(status.BridgeNum)
@@ -136,7 +133,7 @@ func prepareAndPublishNetworkInstanceInfoMsg(ctx *zedagentContext,
 			reportAA.Type = zcommon.PhyIoType(ia.Type)
 			reportAA.Name = ia.Logicallabel
 			// XXX Add Phylabel in protobuf message?
-			reportAA.UsedByAppUUID = zcdevUUID.String()
+			reportAA.UsedByAppUUID = devUUID.String()
 			list := ctx.assignableAdapters.LookupIoBundleAny(ia.Phylabel)
 			for _, ib := range list {
 				if ib == nil {
@@ -168,7 +165,24 @@ func prepareAndPublishNetworkInstanceInfoMsg(ctx *zedagentContext,
 	}
 	log.Tracef("Publish NetworkInstance Info message to zedcloud: %v",
 		infoMsg)
-	publishInfo(ctx, uuid, infoMsg)
+
+	data, err := proto.Marshal(infoMsg)
+	if err != nil {
+		log.Fatal("Publish NetworkInstance proto marshaling error: ", err)
+	}
+	statusURL := zedcloud.URLPathString(serverNameAndPort, zedcloudCtx.V2API, devUUID, "info")
+	buf := bytes.NewBuffer(data)
+	if buf == nil {
+		log.Fatal("malloc error")
+	}
+	size := int64(proto.Size(infoMsg))
+
+	//We queue the message and then get the highest priority message to send.
+	//If there are no failures and defers we'll send this message,
+	//but if there is a queue we'll retry sending the highest priority message.
+	zedcloud.SetDeferred(zedcloudCtx, uuid, buf, size, statusURL,
+		true, zinfo.ZInfoTypes_ZiNetworkInstance)
+	zedcloud.HandleDeferred(zedcloudCtx, time.Now(), 0, true)
 }
 
 func fillVpnInfo(info *zinfo.ZInfoNetworkInstance, vpnStatus *types.VpnStatus) {
@@ -405,41 +419,6 @@ func publishVpnConnection(vpnInfo *zinfo.ZInfoVpn,
 	return vpnConnInfo
 }
 
-func publishInfo(ctx *zedagentContext, UUID string, infoMsg *zinfo.ZInfoMsg) {
-	publishInfoToZedCloud(UUID, infoMsg, ctx.iteration)
-	ctx.iteration += 1
-}
-
-func publishInfoToZedCloud(UUID string, infoMsg *zinfo.ZInfoMsg, iteration int) {
-
-	log.Functionf("publishInfoToZedCloud sending %v", infoMsg)
-	data, err := proto.Marshal(infoMsg)
-	if err != nil {
-		log.Fatal("publishInfoToZedCloud proto marshaling error: ", err)
-	}
-	statusURL := zedcloud.URLPathString(serverNameAndPort, zedcloudCtx.V2API, devUUID, "info")
-	zedcloud.RemoveDeferred(zedcloudCtx, UUID)
-	buf := bytes.NewBuffer(data)
-	if buf == nil {
-		log.Fatal("malloc error")
-	}
-	size := int64(proto.Size(infoMsg))
-	err = SendProtobuf(statusURL, buf, size, iteration)
-	if err != nil {
-		log.Errorf("publishInfoToZedCloud failed: %s", err)
-		// Try sending later
-		// The buf might have been consumed
-		buf := bytes.NewBuffer(data)
-		if buf == nil {
-			log.Fatal("malloc error")
-		}
-		zedcloud.SetDeferred(zedcloudCtx, UUID, buf, size, statusURL,
-			true)
-	} else {
-		writeSentDeviceInfoProtoMessage(data)
-	}
-}
-
 func handleAppFlowMonitorCreate(ctxArg interface{}, key string,
 	statusArg interface{}) {
 	handleAppFlowMonitorImpl(ctxArg, key, statusArg)
@@ -488,7 +467,7 @@ func aclActionToProtoAction(action types.ACLActionType) flowlog.ACLAction {
 func protoEncodeAppFlowMonitorProto(ipflow types.IPFlow) *flowlog.FlowMessage {
 
 	pflows := new(flowlog.FlowMessage)
-	pflows.DevId = ipflow.DevID.String()
+	pflows.DevId = *proto.String(devUUID.String())
 
 	// ScopeInfo fill in
 	pScope := new(flowlog.ScopeInfo)

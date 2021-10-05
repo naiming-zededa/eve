@@ -515,7 +515,7 @@ func checkAndPublishDhcpLeases(ctx *zedrouterContext) {
 					ipv4Assigned, leasedIPv4.String(), ulStatus.Mac)
 			}
 			assignedIP := net.ParseIP(ulStatus.AllocatedIPv4Addr)
-			if ulStatus.IPv4Assigned != ipv4Assigned || !assignedIP.Equal(leasedIPv4) {
+			if ulStatus.IPv4Assigned != ipv4Assigned || assignedIP == nil || !assignedIP.Equal(leasedIPv4) {
 				log.Functionf("Changing(%s) %s mac %s to %t",
 					status.Key(), status.DisplayName,
 					ulStatus.Mac, ipv4Assigned)
@@ -526,8 +526,8 @@ func checkAndPublishDhcpLeases(ctx *zedrouterContext) {
 					continue
 				}
 				// Pick up from VIFIPTrig on change
-				if ulStatus.AllocatedIPv4Addr == "" ||
-					(netconfig.Type == types.NetworkInstanceTypeSwitch && !assignedIP.Equal(leasedIPv4)) {
+				if ulStatus.AllocatedIPv4Addr == "" || assignedIP == nil ||
+					(netconfig != nil && netconfig.Type == types.NetworkInstanceTypeSwitch && !assignedIP.Equal(leasedIPv4)) {
 					ulStatus.IPAddrMisMatch = false
 					if !isEmptyIP(leasedIPv4) {
 						ulStatus.AllocatedIPv4Addr = leasedIPv4.String()
@@ -537,7 +537,7 @@ func checkAndPublishDhcpLeases(ctx *zedrouterContext) {
 						leasedIPv4.String())
 					continue
 				}
-				if !assignedIP.Equal(leasedIPv4) {
+				if assignedIP != nil && !assignedIP.Equal(leasedIPv4) {
 					log.Errorf("IP address mismatch found - App: %s, Mac: %s, Allocated IP: %s, Leased IP: %s",
 						status.DisplayName, ulStatus.Mac, ulStatus.AllocatedIPv4Addr, leasedIPv4.String())
 					ulStatus.IPAddrMisMatch = true
