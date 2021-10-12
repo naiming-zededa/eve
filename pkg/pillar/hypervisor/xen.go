@@ -650,6 +650,16 @@ func (ctx xenContext) GetHostCPUMem() (types.HostMemory, error) {
 	} else {
 		logrus.Warnf("Missing free_memory in %+v", dict)
 	}
+
+	// Calculate what EVE is using. This excludes any memory the hypervisor is using
+	// FWIW hm.TotalMemoryMB - hm.FreeMemoryMB would include the Xen hypervisor
+	vm, err := mem.VirtualMemory()
+	if err != nil {
+		logrus.Error(err)
+	} else {
+		used := vm.Total - vm.Available
+		hm.UsedEveMB = roundFromBytesToMbytes(used)
+	}
 	if str, ok := dict["nr_cpus"]; ok {
 		// Note that this is the set of physical CPUs which is different
 		// than the set of CPUs assigned to dom0
@@ -808,6 +818,7 @@ func parseCPUMemoryStat(cpuMemoryStat [][]string, dmList map[string]types.Domain
 		dm := types.DomainMetric{
 			CPUTotalNs:        cpuTotal * nanoSecToSec,
 			CPUScaled:         1, // Caller will scale
+			AllocatedMB:       uint32(totalMemory),
 			UsedMemory:        uint32(usedMemory),
 			AvailableMemory:   uint32(availableMemory),
 			UsedMemoryPercent: float64(usedMemoryPercent),

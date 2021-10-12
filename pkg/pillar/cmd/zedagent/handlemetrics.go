@@ -250,13 +250,14 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 	ReportDeviceMetric.CpuMetric.UpTime = uptime
 
 	// Memory related info for the device
-	var totalMemory, freeMemory uint64
+	var totalMemory, freeMemory, usedEveMB uint64
 	sub := ctx.getconfigCtx.subHostMemory
 	m, _ := sub.Get("global")
 	if m != nil {
 		metric := m.(types.HostMemory)
 		totalMemory = metric.TotalMemoryMB
 		freeMemory = metric.FreeMemoryMB
+		usedEveMB = metric.UsedEveMB + metric.KmemUsedEveMB
 	}
 	// total_memory and free_memory is in MBytes
 	used := totalMemory - freeMemory
@@ -384,6 +385,8 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 		CurrentProcessDelay: newlogMetrics.ServerStats.CurrProcessMsec,
 		AverageProcessDelay: newlogMetrics.ServerStats.AvgProcessMsec,
 		GzipFilesRemoved:    newlogMetrics.NumGZipFileRemoved,
+		TooManyRequest:      newlogMetrics.NumTooManyRequest,
+		SkipUploadAppFile:   newlogMetrics.NumSkipUploadAppFile,
 	}
 	if !newlogMetrics.FailSentStartTime.IsZero() {
 		nlm.FailSentStartTime, _ = ptypes.TimestampProto(newlogMetrics.FailSentStartTime)
@@ -550,6 +553,38 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 		// granularity than one second
 		ReportDeviceMetric.CpuMetric.Total = *proto.Uint64(dm.CPUTotalNs / nanoSecToSec)
 
+		// Report new DeviceMemoryMetric
+		ReportDeviceMetric.DeviceMemory = new(metrics.DeviceMemoryMetric)
+		ReportDeviceMetric.DeviceMemory.MemoryMB = uint32(totalMemory)
+		// Loop over AppInstanceConfig to get sum for AllocatedAppsMB
+		// independent of status; use DomainMetric if it exists since
+		// it has the number which includes the qemu overhead.
+		var sumKB uint64
+		pub := ctx.getconfigCtx.pubAppInstanceConfig
+		items := pub.GetAll()
+		for _, c := range items {
+			aiConfig := c.(types.AppInstanceConfig)
+
+			dm := lookupDomainMetric(ctx, aiConfig.Key())
+			if dm != nil {
+				sumKB += 1024 * uint64(dm.AllocatedMB)
+			} else {
+				sumKB += uint64(aiConfig.FixedResources.Memory)
+			}
+		}
+		ReportDeviceMetric.DeviceMemory.AllocatedAppsMB = uint32((sumKB + 1023) / 1024)
+
+		allocatedEve, err := types.GetEveMemoryLimitInBytes()
+		if err != nil {
+			log.Errorf("GetEveMemoryLimitInBytes failed: %v", err)
+		} else {
+			ReportDeviceMetric.DeviceMemory.AllocatedEveMB =
+				uint32((allocatedEve + 1024*1024 - 1) / (1024 * 1024))
+		}
+		ReportDeviceMetric.DeviceMemory.UsedEveMB = uint32(usedEveMB)
+
+		// SystemServicesMemoryMB is deprecated and replaced by DeviceMemoryMetric.
+		// Report to support there are old controllers
 		ReportDeviceMetric.SystemServicesMemoryMB = new(metrics.MemoryMetric)
 		ReportDeviceMetric.SystemServicesMemoryMB.UsedMem = dm.UsedMemory
 		ReportDeviceMetric.SystemServicesMemoryMB.AvailMem = dm.AvailableMemory
@@ -594,6 +629,9 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 
 		ReportAppMetric := new(metrics.AppMetric)
 		ReportAppMetric.Cpu = new(metrics.AppCpuMetric)
+		// New AppMemoryMetric
+		ReportAppMetric.AppMemory = new(metrics.AppMemoryMetric)
+		// MemoryMetric is deprecated; keep for old controllers for now
 		ReportAppMetric.Memory = new(metrics.MemoryMetric)
 		ReportAppMetric.AppName = aiStatus.DisplayName
 		ReportAppMetric.AppID = aiStatus.Key()
@@ -612,6 +650,12 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 			// XXX add field in CpuMetric so we can report with better
 			// granularity than one second
 			ReportAppMetric.Cpu.Total = *proto.Uint64(dm.CPUTotalNs / nanoSecToSec)
+
+			// New AppMemoryMetric fields
+			ReportAppMetric.AppMemory.AllocatedMB = dm.AllocatedMB
+			ReportAppMetric.AppMemory.UsedMB = dm.UsedMemory
+
+			// Deprecated MemoryMetric fields
 			ReportAppMetric.Memory.UsedMem = dm.UsedMemory
 			ReportAppMetric.Memory.AvailMem = dm.AvailableMemory
 			ReportAppMetric.Memory.UsedPercentage = dm.UsedMemoryPercent
@@ -712,9 +756,19 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 					appContainerMetric.Cpu.Total = stats.CPUTotal
 					appContainerMetric.Cpu.SystemTotal = stats.SystemCPUTotal
 
+					// New AppMemoryMetric
+					appContainerMetric.AppContainerMemory = new(metrics.AppMemoryMetric)
+					appContainerMetric.AppContainerMemory.AllocatedMB = stats.AllocatedMem
+					appContainerMetric.AppContainerMemory.UsedMB = stats.UsedMem
+
+					// MemoryMetric is deprecated; keep for old controllers for now
+
 					appContainerMetric.Memory = new(metrics.MemoryMetric)
 					appContainerMetric.Memory.UsedMem = stats.UsedMem
-					appContainerMetric.Memory.AvailMem = stats.AvailMem
+					// We report the Allocated aka Limit
+					// in the AvailMem field, which is confusing
+					// but this MemoryMetric is deprecated.
+					appContainerMetric.Memory.AvailMem = stats.AllocatedMem
 
 					appContainerMetric.Network = new(metrics.NetworkMetric)
 					appContainerMetric.Network.TxBytes = stats.TxBytes
