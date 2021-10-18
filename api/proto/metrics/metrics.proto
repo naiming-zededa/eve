@@ -85,6 +85,28 @@ message networkMetric {
   string localName = 16; // local vif name e.g., nbu*
 }
 
+message CellularMetric {
+  // Logical label assigned to the physical cellular modem.
+  string logicallabel = 1;
+  CellularSignalStrength signal_strength = 2;
+  CellularPacketStats packet_stats = 3;
+}
+
+// CellularSignalStrength contains cellular signal strength information.
+// The maximum value of int32 (0x7FFFFFFF) represents unspecified/unavailable metric.
+message CellularSignalStrength {
+  int32 rssi = 1;
+  int32 rsrq = 2;
+  int32 rsrp = 3;
+  int32 snr = 4;
+}
+
+// Stats collected by the cellular modem itself.
+message CellularPacketStats {
+  NetworkStats rx = 1;
+  NetworkStats tx = 2;
+}
+
 // Failures and successes for commuication to zedcloud
 // for each management port
 message zedcloudMetric {
@@ -144,8 +166,10 @@ message appCpuMetric {
   // deprecated = 2;
   // deprecated = 3;
   google.protobuf.Timestamp upTime = 4;
+  // should be deprecated
   uint64 total = 5;                   // cpu total in secs. In docker stats, it's the container user usage
   uint64 systemTotal = 6;             // docker host system cpu total in secs. inc user, system and idle
+  uint64 total_ns = 7;                 // like 'total' but in nanoseconds. Overflow may happen after ~40 years without EVE restart
 }
 
 message deviceMetric {
@@ -180,6 +204,8 @@ message deviceMetric {
 
   // Last change to EdgeDevConfig processed by device
   google.protobuf.Timestamp last_processed_config = 19;
+
+  repeated CellularMetric cellular = 20;
 }
 
 message AclMetric {
