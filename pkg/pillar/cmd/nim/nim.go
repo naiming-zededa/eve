@@ -163,6 +163,16 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	}
 	pubDeviceNetworkStatus.ClearRestarted()
 
+	cloudPingMetricPub, err := ps.NewPublication(
+		pubsub.PublicationOptions{
+			AgentName: agentName,
+			TopicType: types.MetricsMap{},
+		})
+	if err != nil {
+		log.Fatal(err)
+	}
+	nimCtx.deviceNetworkContext.PubPingMetricMap = cloudPingMetricPub
+
 	pubDevicePortConfig, err := ps.NewPublication(
 		pubsub.PublicationOptions{
 			AgentName: agentName,
@@ -209,6 +219,15 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		AgentName: agentName,
 		TopicType: types.CipherMetricsMap{},
 	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	pubWwanMetrics, err := ps.NewPublication(
+		pubsub.PublicationOptions{
+			AgentName: agentName,
+			TopicType: types.WwanMetrics{},
+		})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -273,6 +292,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	nimCtx.deviceNetworkContext.PubDevicePortConfigList = pubDevicePortConfigList
 	nimCtx.deviceNetworkContext.PubCipherBlockStatus = pubCipherBlockStatus
 	nimCtx.deviceNetworkContext.PubDeviceNetworkStatus = pubDeviceNetworkStatus
+	nimCtx.deviceNetworkContext.PubWwanMetrics = pubWwanMetrics
 	dnc := &nimCtx.deviceNetworkContext
 	devicenetwork.IngestPortConfigList(dnc)
 
@@ -341,6 +361,23 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 	}
 	nimCtx.deviceNetworkContext.SubDevicePortConfigS = subDevicePortConfigS
 	subDevicePortConfigS.Activate()
+
+	subZedAgentStatus, err := ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:     "zedagent",
+		MyAgentName:   agentName,
+		TopicImpl:     types.ZedAgentStatus{},
+		Activate:      false,
+		Ctx:           &nimCtx.deviceNetworkContext,
+		CreateHandler: devicenetwork.HandleZedAgentStatusCreate,
+		ModifyHandler: devicenetwork.HandleZedAgentStatusModify,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	nimCtx.deviceNetworkContext.SubZedAgentStatus = subZedAgentStatus
+	subZedAgentStatus.Activate()
 
 	subAssignableAdapters, err := ps.NewSubscription(pubsub.SubscriptionOptions{
 		AgentName:     "domainmgr",
@@ -484,6 +521,15 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 
 	devicenetwork.RestartVerify(dnc, "Initial config")
 
+	// Watch for status and metrics published by wwan service.
+	wwanWatcher, err := devicenetwork.InitWwanWatcher(log)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer wwanWatcher.Close()
+	// Load initial wwan status if there is any.
+	devicenetwork.ReloadWwanStatus(dnc)
+
 	// To avoid a race between domainmgr starting and moving this to pciback
 	// and zedagent publishing its DevicePortConfig using those assigned-away
 	// adapter(s), we first wait for domainmgr to initialize AA, then enable
@@ -505,6 +551,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 
 		case change := <-subDevicePortConfigS.MsgChan():
 			subDevicePortConfigS.ProcessChange(change)
+
+		case change := <-subZedAgentStatus.MsgChan():
+			subZedAgentStatus.ProcessChange(change)
 
 		case change := <-subAssignableAdapters.MsgChan():
 			subAssignableAdapters.ProcessChange(change)
@@ -560,6 +609,13 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 			}
 			ps.CheckMaxTimeTopic(agentName, "linkChanges", start,
 				warningTime, errorTime)
+
+		case event, ok := <-wwanWatcher.Events:
+			if !ok {
+				log.Warnf("wwan watcher stopped")
+				continue
+			}
+			devicenetwork.ProcessWwanWatchEvent(dnc, event)
 
 		case <-geoTimer.C:
 			start := time.Now()
@@ -657,6 +713,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		case change := <-subDevicePortConfigS.MsgChan():
 			subDevicePortConfigS.ProcessChange(change)
 
+		case change := <-subZedAgentStatus.MsgChan():
+			subZedAgentStatus.ProcessChange(change)
+
 		case change := <-subAssignableAdapters.MsgChan():
 			subAssignableAdapters.ProcessChange(change)
 			updateFilteredFallback(&nimCtx)
@@ -716,6 +775,13 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 			}
 			ps.CheckMaxTimeTopic(agentName, "routeChanges", start,
 				warningTime, errorTime)
+
+		case event, ok := <-wwanWatcher.Events:
+			if !ok {
+				log.Noticef("wwan watcher stopped")
+				continue
+			}
+			devicenetwork.ProcessWwanWatchEvent(dnc, event)
 
 		case <-geoTimer.C:
 			start := time.Now()
@@ -923,8 +989,7 @@ func tryDeviceConnectivityToCloud(ctx *devicenetwork.DeviceNetworkContext) bool 
 	// Start with a different port to cycle through them all over time
 	ctx.Iteration++
 	rtf, intfStatusMap, err := devicenetwork.VerifyDeviceNetworkStatus(
-		log, agentName, *ctx.DeviceNetworkStatus, successCount,
-		ctx.Iteration, ctx.TestSendTimeout)
+		log, ctx, *ctx.DeviceNetworkStatus, successCount, ctx.TestSendTimeout)
 	ctx.DevicePortConfig.UpdatePortStatusFromIntfStatusMap(intfStatusMap)
 	// Use TestResults to update the DevicePortConfigList and publish
 	// Note that the TestResults will at least have an updated timestamp

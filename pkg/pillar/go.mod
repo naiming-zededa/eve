@@ -11,21 +11,21 @@ require (
 	github.com/bugsnag/bugsnag-go v1.8.0 // indirect
 	github.com/bugsnag/panicwrap v1.2.1 // indirect
 	github.com/containerd/cgroups v1.0.1
-	github.com/containerd/containerd v1.5.4
+	github.com/containerd/containerd v1.5.7
 	github.com/containerd/typeurl v1.0.2
 	github.com/cshari-zededa/eve-tpm2-tools v0.0.4
 	github.com/digitalocean/go-libvirt v0.0.0-20190715144809-7b622097a793 // indirect
 	github.com/digitalocean/go-qemu v0.0.0-20181112162955-dd7bb9c771b8
-	github.com/docker/docker v20.10.3+incompatible
+	github.com/docker/docker v20.10.7+incompatible
 	github.com/docker/libtrust v0.0.0-20160708172513-aabc10ec26b7 // indirect
 	github.com/eriknordmark/ipinfo v0.0.0-20190220084921-7ee0839158f9
 	github.com/fsnotify/fsnotify v1.4.9
 	github.com/garyburd/redigo v1.6.2 // indirect
 	github.com/go-ole/go-ole v1.2.4 // indirect
 	github.com/gofrs/uuid v3.3.0+incompatible // indirect
-	github.com/golang/protobuf v1.4.3
-	github.com/google/go-cmp v0.5.4
-	github.com/google/go-containerregistry v0.1.4
+	github.com/golang/protobuf v1.5.2
+	github.com/google/go-cmp v0.5.6
+	github.com/google/go-containerregistry v0.6.0
 	github.com/google/go-tpm v0.3.0
 	github.com/google/gopacket v1.1.19
 	github.com/gorilla/handlers v1.5.1 // indirect
@@ -42,13 +42,13 @@ require (
 	github.com/onsi/gomega v1.10.3
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.1
-	github.com/opencontainers/runtime-spec v1.0.3-0.20200929063507-e6143ca7d51d
+	github.com/opencontainers/runtime-spec v1.0.3-0.20210326190908-1c3f411f0417
 	github.com/packetcap/go-pcap v0.0.0-20210809221331-e2e6b14e1812
 	github.com/prometheus/client_golang v1.9.0 // indirect
 	github.com/prometheus/common v0.17.0 // indirect
 	github.com/rackn/gohai v0.0.0-20190321191141-5053e7f1fa36
 	github.com/robertkrimen/otto v0.0.0-20180617131154-15f95af6e78d // indirect
-	github.com/satori/go.uuid v1.2.0
+	github.com/satori/go.uuid v1.2.1-0.20180404165556-75cca531ea76
 	github.com/shirou/gopsutil v0.0.0-20190323131628-2cbc9195c892
 	github.com/sirupsen/logrus v1.8.1
 	github.com/stretchr/testify v1.7.0
@@ -61,8 +61,7 @@ require (
 	golang.org/x/crypto v0.0.0-20210513164829-c07d793c2f9a
 	golang.org/x/net v0.0.0-20210805182204-aaa1db679c0d
 	golang.org/x/sys v0.0.0-20210809222454-d867a43fc93e
-	google.golang.org/genproto v0.0.0-20210224155714-063164c882e6 // indirect
-	google.golang.org/grpc v1.36.0
+	google.golang.org/grpc v1.38.0
 	gopkg.in/sourcemap.v1 v1.0.5 // indirect
 )
 

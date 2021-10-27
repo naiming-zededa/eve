@@ -127,7 +127,7 @@ func parseBaseOS(getconfigCtx *getconfigContext,
 
 	baseOS := config.GetBaseos()
 	if baseOS == nil {
-		log.Warn("parseBaseOS: nil config received")
+		log.Function("parseBaseOS: nil config received")
 		return
 	}
 	h := sha256.New()
@@ -1289,6 +1289,8 @@ func parseNetworkWirelessConfig(ctx *getconfigContext, key string, netEnt *zconf
 		for _, cellular := range cellulars {
 			var wcell types.CellConfig
 			wcell.APN = cellular.GetAPN()
+			wcell.ProbeAddr = cellular.GetProbe().GetProbeAddress()
+			wcell.DisableProbe = cellular.GetProbe().GetDisable()
 			wconfig.Cellular = append(wconfig.Cellular, wcell)
 		}
 		log.Functionf("parseNetworkWirelessConfig: Wireless of network Cellular, %v", wconfig.Cellular)

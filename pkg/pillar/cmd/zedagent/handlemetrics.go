@@ -317,6 +317,8 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 	aclMetric.TotalRuleCount = networkMetrics.TotalRuleCount
 	ReportDeviceMetric.Acl = aclMetric
 
+	ReportDeviceMetric.Cellular = getCellularMetrics(ctx)
+
 	zedboxStats := new(metrics.ZedboxStats)
 	zedboxStats.NumGoRoutines = uint32(runtime.NumGoroutine()) // number of zedbox goroutines
 	ReportDeviceMetric.Zedbox = zedboxStats
@@ -335,6 +337,15 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 	}
 	if loguploaderMetrics != nil {
 		cms = zedcloud.Append(cms, loguploaderMetrics)
+	}
+	if diagMetrics != nil {
+		cms = zedcloud.Append(cms, diagMetrics)
+	}
+	if nimMetrics != nil {
+		cms = zedcloud.Append(cms, nimMetrics)
+	}
+	if zrouterMetrics != nil {
+		cms = zedcloud.Append(cms, zrouterMetrics)
 	}
 	for ifname, cm := range cms {
 		metric := metrics.ZedcloudMetric{IfName: ifname,
@@ -362,6 +373,7 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 			urlMet.RecvMsgCount = um.RecvMsgCount
 			urlMet.RecvByteCount = um.RecvByteCount
 			urlMet.TotalTimeSpent = um.TotalTimeSpent
+			urlMet.SessResumeCount = um.SessionResume
 			metric.UrlMetrics = append(metric.UrlMetrics, urlMet)
 		}
 		ReportDeviceMetric.Zedcloud = append(ReportDeviceMetric.Zedcloud,
@@ -523,17 +535,6 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 		runtimeStorageOverhead, appRunTimeStorage)
 	ReportDeviceMetric.RuntimeStorageOverheadMB = runtimeStorageOverhead
 	ReportDeviceMetric.AppRunTimeStorageMB = appRunTimeStorage
-
-	// Note that these are associated with the device and not with a
-	// device name like ppp0 or wwan0
-	lte := readLTEMetrics()
-	for _, i := range lte {
-		item := new(metrics.MetricItem)
-		item.Key = i.Key
-		item.Type = metrics.MetricItemType(i.Type)
-		setMetricAnyValue(item, i.Value)
-		ReportDeviceMetric.MetricItems = append(ReportDeviceMetric.MetricItems, item)
-	}
 
 	const nanoSecToSec uint64 = 1000000000
 
@@ -726,13 +727,18 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 			appDiskDetails := new(metrics.AppDiskMetric)
 			if vrs.ActiveFileLocation == "" {
 				log.Functionf("ActiveFileLocation is empty for %s", vrs.Key())
-			} else {
-				err := getDiskInfo(ctx, vrs, appDiskDetails)
-				if err != nil {
-					log.Warnf("getDiskInfo(%s) failed %v",
-						vrs.ActiveFileLocation, err)
-					continue
+				continue
+			}
+			err := getDiskInfo(ctx, vrs, appDiskDetails)
+			if err != nil {
+				logData := fmt.Sprintf("getDiskInfo(%s) failed %v",
+					vrs.ActiveFileLocation, err)
+				if vrs.State >= types.CREATED_VOLUME {
+					log.Warn(logData)
+				} else {
+					log.Function(logData)
 				}
+				continue
 			}
 			ReportAppMetric.Disk = append(ReportAppMetric.Disk,
 				appDiskDetails)
@@ -806,12 +812,52 @@ func publishMetrics(ctx *zedagentContext, iteration int) {
 	}
 }
 
+func getCellularMetrics(ctx *zedagentContext) (cellularMetrics []*metrics.CellularMetric) {
+	m, err := ctx.subWwanMetrics.Get("global")
+	if err != nil {
+		log.Errorf("subWwanMetrics.Get failed: %v", err)
+		return
+	}
+	wwanMetrics, ok := m.(types.WwanMetrics)
+	if !ok {
+		log.Errorln("unexpected type of wwan metrics")
+		return
+	}
+	for _, network := range wwanMetrics.Networks {
+		if network.LogicalLabel == "" {
+			// skip unmanaged modems for now
+			continue
+		}
+		cellularMetrics = append(cellularMetrics,
+			&metrics.CellularMetric{
+				Logicallabel: network.LogicalLabel,
+				SignalStrength: &metrics.CellularSignalStrength{
+					Rssi: network.SignalInfo.RSSI,
+					Rsrq: network.SignalInfo.RSRQ,
+					Rsrp: network.SignalInfo.RSRP,
+					Snr:  network.SignalInfo.SNR,
+				},
+				PacketStats: &metrics.CellularPacketStats{
+					Rx: &metrics.NetworkStats{
+						TotalPackets: network.PacketStats.RxPackets,
+						Drops:        network.PacketStats.RxDrops,
+						TotalBytes:   network.PacketStats.RxBytes,
+					},
+					Tx: &metrics.NetworkStats{
+						TotalPackets: network.PacketStats.TxPackets,
+						Drops:        network.PacketStats.TxDrops,
+						TotalBytes:   network.PacketStats.TxBytes,
+					},
+				},
+			})
+	}
+	return cellularMetrics
+}
+
 func getDiskInfo(ctx *zedagentContext, vrs types.VolumeRefStatus, appDiskDetails *metrics.AppDiskMetric) error {
 	appDiskMetric := lookupAppDiskMetric(ctx, vrs.ActiveFileLocation)
 	if appDiskMetric == nil {
-		err := fmt.Errorf("getDiskInfo: No AppDiskMetric found for %s", vrs.ActiveFileLocation)
-		log.Error(err)
-		return err
+		return fmt.Errorf("getDiskInfo: No AppDiskMetric found for %s", vrs.ActiveFileLocation)
 	}
 	appDiskDetails.Disk = vrs.ActiveFileLocation
 	appDiskDetails.Used = utils.RoundToMbytes(appDiskMetric.UsedBytes)

@@ -4,6 +4,7 @@
 package devicenetwork
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -14,7 +15,8 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/cipher"
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
 	"github.com/lf-edge/eve/pkg/pillar/types"
-	"github.com/satori/go.uuid"
+	"github.com/lf-edge/eve/pkg/pillar/zedcloud"
+	uuid "github.com/satori/go.uuid"
 )
 
 const (
@@ -43,12 +45,15 @@ type DeviceNetworkContext struct {
 	SubDevicePortConfigA     pubsub.Subscription
 	SubDevicePortConfigO     pubsub.Subscription
 	SubDevicePortConfigS     pubsub.Subscription
+	SubZedAgentStatus        pubsub.Subscription
 	SubAssignableAdapters    pubsub.Subscription
 	PubDevicePortConfig      pubsub.Publication
 	PubDummyDevicePortConfig pubsub.Publication // For logging
 	PubDevicePortConfigList  pubsub.Publication
 	PubCipherBlockStatus     pubsub.Publication
 	PubDeviceNetworkStatus   pubsub.Publication
+	PubPingMetricMap         pubsub.Publication
+	PubWwanMetrics           pubsub.Publication
 	Changed                  bool
 	SubGlobalConfig          pubsub.Subscription
 
@@ -58,6 +63,8 @@ type DeviceNetworkContext struct {
 	NextDPCIndex           int
 	CloudConnectivityWorks bool
 	Iteration              int // Start with different interfaces each time
+	RadioSilence           types.RadioSilence
+	WwanService            WwanService
 
 	// Timers in seconds
 	DPCTestDuration           uint32 // Wait for DHCP address
@@ -65,6 +72,7 @@ type DeviceNetworkContext struct {
 	NetworkTestBetterInterval uint32 // Look for lower/better index
 	TestSendTimeout           uint32 // Timeout for HTTP/Send
 	Log                       *base.LogObject
+	PrevTLSConfig             *tls.Config
 }
 
 func UpdateLastResortPortConfig(ctx *DeviceNetworkContext, ports []string) {
@@ -95,7 +103,7 @@ func SetupVerify(ctx *DeviceNetworkContext, index int) {
 	pending := &ctx.Pending
 	pending.Inprogress = true
 	pending.PendDPC = ctx.DevicePortConfigList.PortConfigList[ctx.NextDPCIndex]
-	pend2 := MakeDeviceNetworkStatus(log, pending.PendDPC, pending.PendDNS)
+	pend2 := MakeDeviceNetworkStatus(ctx, pending.PendDPC, pending.PendDNS)
 	pending.PendDNS = pend2
 	pending.TestCount = 0
 	log.Functionf("SetupVerify: Started testing DPC (index %d): %v",
@@ -114,6 +122,11 @@ func RestartVerify(ctx *DeviceNetworkContext, caller string) {
 		log.Functionf("RestartVerify: DPC list verification in progress")
 		return
 	}
+	if !ctx.RadioSilence.ChangeInProgress && ctx.RadioSilence.Imposed {
+		log.Noticef("RestartVerify: Radio-silence is imposed, skipping DPC verification")
+		return
+	}
+
 	// Restart at index zero, then skip entries with LastFailed after
 	// LastSucceeded and a recent LastFailed (a minute or less).
 	nextIndex := getNextTestableDPCIndex(ctx, 0)
@@ -276,7 +289,8 @@ func VerifyPending(ctx *DeviceNetworkContext, pending *DPCPending,
 
 	if !runnableDPC.MostlyEqual(&pending.RunningDPC) {
 		log.Functionf("VerifyPending: DPC changed. check Wireless %v\n", pending.PendDPC)
-		checkAndUpdateWireless(ctx, &pending.RunningDPC, &runnableDPC)
+		updateWlanConfig(ctx, &pending.RunningDPC, &runnableDPC)
+		updateWwanConfig(ctx, &runnableDPC)
 
 		log.Functionf("VerifyPending: DPC changed. update DhcpClient.\n")
 		// ensure we rename ethN to kethN and set up bridge called
@@ -287,15 +301,15 @@ func VerifyPending(ctx *DeviceNetworkContext, pending *DPCPending,
 		pending.RunningDPC = runnableDPC
 		log.Functionf("Running with DPC %v", pending.RunningDPC)
 	}
-	pend2 := MakeDeviceNetworkStatus(log, pending.PendDPC, pending.PendDNS)
+	pend2 := MakeDeviceNetworkStatus(ctx, pending.PendDPC, pending.PendDNS)
 	pending.PendDNS = pend2
 
 	// We want connectivity to zedcloud via atleast one Management port.
 	// Hard-coded at 1 for now; at least one interface needs to work
 	const successCount uint = 1
 	ctx.Iteration++
-	rtf, intfStatusMap, err := VerifyDeviceNetworkStatus(log, ctx.AgentName,
-		pending.PendDNS, successCount, ctx.Iteration, timeout)
+	rtf, intfStatusMap, err := VerifyDeviceNetworkStatus(log, ctx,
+		pending.PendDNS, successCount, timeout)
 	// Use TestResults to update the DevicePortConfigList and DeviceNetworkStatus
 	// Note that the TestResults will at least have an updated timestamp
 	// for one of the ports.
@@ -644,6 +658,29 @@ func HandleDPCDelete(ctxArg interface{}, key string, configArg interface{}) {
 	log.Functionf("HandleDPCDelete done for %s\n", key)
 }
 
+// HandleZedAgentStatusCreate - handle creation of ZedAgent status.
+func HandleZedAgentStatusCreate(ctxArg interface{}, key string, statusArg interface{}) {
+	handleZedAgentStatusImpl(ctxArg, key, statusArg)
+}
+
+// HandleZedAgentStatusModify - handle modification of ZedAgent status.
+func HandleZedAgentStatusModify(ctxArg interface{}, key string,
+	statusArg interface{}, oldStatusArg interface{}) {
+	handleZedAgentStatusImpl(ctxArg, key, statusArg)
+}
+
+func handleZedAgentStatusImpl(ctxArg interface{}, key string, statusArg interface{}) {
+	ctx := ctxArg.(*DeviceNetworkContext)
+	log := ctx.Log
+	newStatus := statusArg.(types.ZedAgentStatus)
+	log.Functionf("handleZedAgentStatusImpl() %+v\n", newStatus)
+
+	if newStatus.RadioSilence.ChangeRequestedAt.After(ctx.RadioSilence.ChangeRequestedAt) {
+		log.Noticef("The intended radio-silence state changed to: %s", ctx.RadioSilence)
+		updateRadioSilence(ctx, newStatus.RadioSilence)
+	}
+}
+
 // HandleAssignableAdaptersCreate - Handle Assignable Adapter list creation
 func HandleAssignableAdaptersCreate(ctxArg interface{}, key string,
 	statusArg interface{}) {
@@ -704,6 +741,10 @@ func handleAssignableAdaptersImpl(ctxArg interface{}, key string,
 	// In case a verification is in progress and is waiting for return from pciback
 	if ctx.Pending.Inprogress {
 		VerifyDevicePortConfig(ctx)
+		updateWwanConfig(ctx, &ctx.Pending.RunningDPC)
+	} else {
+		// In case a wwan adapter has become (un)available
+		updateWwanConfig(ctx, ctx.DevicePortConfig)
 	}
 	log.Functionf("handleAssignableAdaptersModify() done\n")
 }
@@ -868,33 +909,6 @@ func (ctx *DeviceNetworkContext) doUpdatePortConfigListAndPublish(
 	return true
 }
 
-func checkAndUpdateWireless(ctx *DeviceNetworkContext, oCfg *types.DevicePortConfig, portCfg *types.DevicePortConfig) {
-
-	log := ctx.Log
-	log.Functionf("checkAndUpdateWireless: oCfg type %v, nil %v, portCfg Ports %v\n", portCfg.Key, oCfg == nil, portCfg.Ports)
-	for _, pCfg := range portCfg.Ports {
-		var oldPortCfg *types.NetworkPortConfig
-		if oCfg != nil {
-			for _, old := range oCfg.Ports {
-				if old.IfName == pCfg.IfName {
-					oldPortCfg = &old
-					break
-				}
-			}
-		}
-		if oldPortCfg == nil || !reflect.DeepEqual(oldPortCfg.WirelessCfg, pCfg.WirelessCfg) {
-			if pCfg.WirelessCfg.WType == types.WirelessTypeCellular ||
-				oldPortCfg != nil && oldPortCfg.WirelessCfg.WType == types.WirelessTypeCellular {
-				devPortInstallAPname(log, pCfg.IfName, pCfg.WirelessCfg)
-			} else if pCfg.WirelessCfg.WType == types.WirelessTypeWifi ||
-				oldPortCfg != nil && oldPortCfg.WirelessCfg.WType == types.WirelessTypeWifi {
-				status := devPortInstallWifiConfig(ctx, pCfg.IfName, pCfg.WirelessCfg)
-				log.Functionf("checkAndUpdateWireless: updated wpa file ok %v\n", status)
-			}
-		}
-	}
-}
-
 // Update content and move if the timestamp changed
 func updatePortConfig(ctx *DeviceNetworkContext, oldConfig *types.DevicePortConfig, portConfig types.DevicePortConfig) {
 
@@ -980,6 +994,10 @@ func DoDNSUpdate(ctx *DeviceNetworkContext) {
 			ctx.DeviceNetworkStatus)
 		ctx.PubDeviceNetworkStatus.Publish("global",
 			*ctx.DeviceNetworkStatus)
+	}
+	if ctx.PubPingMetricMap != nil {
+		cms := zedcloud.Append(types.MetricsMap{}, zedcloud.GetCloudMetrics(log))
+		ctx.PubPingMetricMap.Publish("global", cms)
 	}
 	ctx.Changed = true
 }

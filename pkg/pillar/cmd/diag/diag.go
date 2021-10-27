@@ -13,7 +13,6 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -32,7 +31,7 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/lf-edge/eve/pkg/pillar/zedcloud"
-	"github.com/satori/go.uuid"
+	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -50,6 +49,7 @@ type diagContext struct {
 	DevicePortConfigList    *types.DevicePortConfigList
 	forever                 bool // Keep on reporting until ^C
 	pacContents             bool // Print PAC file contents
+	radioSilence            bool
 	ledCounter              types.LedBlinkCount
 	derivedLedCounter       types.LedBlinkCount // Based on ledCounter + usableAddressCount
 	subGlobalConfig         pubsub.Subscription
@@ -169,6 +169,11 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		SoftSerial:       hardware.GetSoftSerial(log),
 		AgentName:        agentName,
 	})
+	zedcloudCtx.TlsConfig = &tls.Config{
+		ClientSessionCache: tls.NewLRUClientSessionCache(0),
+	}
+	// As we ping the cloud or other URLs, don't affect the LEDs
+	zedcloudCtx.NoLedManager = true
 	log.Functionf("Diag Get Device Serial %s, Soft Serial %s", zedcloudCtx.DevSerial,
 		zedcloudCtx.DevSoftSerial)
 
@@ -274,9 +279,25 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject) in
 		log.Fatal(err)
 	}
 
+	cloudPingMetricPub, err := ps.NewPublication(
+		pubsub.PublicationOptions{
+			AgentName: agentName,
+			TopicType: types.MetricsMap{},
+		})
+	if err != nil {
+		log.Fatal(err)
+	}
+	pubTimer := time.NewTimer(30 * time.Second)
+
 	for {
 		gotAll := ctx.gotBC && ctx.gotDNS && ctx.gotDPCList
 		select {
+		case <-pubTimer.C:
+			cms := zedcloud.Append(types.MetricsMap{},
+				zedcloud.GetCloudMetrics(log))
+			cloudPingMetricPub.Publish("global", cms)
+			pubTimer = time.NewTimer(30 * time.Second)
+
 		case change := <-subGlobalConfig.MsgChan():
 			subGlobalConfig.ProcessChange(change)
 
@@ -359,7 +380,7 @@ func handleLedBlinkImpl(ctxArg interface{}, key string,
 	}
 	ctx.ledCounter = config.BlinkCounter
 	ctx.derivedLedCounter = types.DeriveLedCounter(ctx.ledCounter,
-		ctx.UsableAddressCount)
+		ctx.UsableAddressCount, ctx.radioSilence)
 	log.Functionf("counter %d usableAddr %d, derived %d",
 		ctx.ledCounter, ctx.UsableAddressCount, ctx.derivedLedCounter)
 	// XXX wait in case we get another handle call?
@@ -402,12 +423,13 @@ func handleDNSImpl(ctxArg interface{}, key string,
 	newAddrCount := types.CountLocalAddrAnyNoLinkLocal(*ctx.DeviceNetworkStatus)
 	log.Functionf("handleDNSImpl %d usable addresses", newAddrCount)
 	if (ctx.UsableAddressCount == 0 && newAddrCount != 0) ||
-		(ctx.UsableAddressCount != 0 && newAddrCount == 0) {
+		(ctx.UsableAddressCount != 0 && newAddrCount == 0) ||
+		updateRadioSilence(ctx, ctx.DeviceNetworkStatus) {
 		ctx.UsableAddressCount = newAddrCount
 		ctx.derivedLedCounter = types.DeriveLedCounter(ctx.ledCounter,
-			ctx.UsableAddressCount)
-		log.Functionf("counter %d usableAddr %d, derived %d",
-			ctx.ledCounter, ctx.UsableAddressCount, ctx.derivedLedCounter)
+			ctx.UsableAddressCount, ctx.radioSilence)
+		log.Functionf("counter %d, usableAddr %d, radioSilence %t, derived %d",
+			ctx.ledCounter, ctx.UsableAddressCount, ctx.radioSilence, ctx.derivedLedCounter)
 	}
 
 	// update proxy certs if configured
@@ -440,17 +462,30 @@ func handleDNSDelete(ctxArg interface{}, key string,
 	newAddrCount := types.CountLocalAddrAnyNoLinkLocal(*ctx.DeviceNetworkStatus)
 	log.Functionf("handleDNSDelete %d usable addresses", newAddrCount)
 	if (ctx.UsableAddressCount == 0 && newAddrCount != 0) ||
-		(ctx.UsableAddressCount != 0 && newAddrCount == 0) {
+		(ctx.UsableAddressCount != 0 && newAddrCount == 0) ||
+		updateRadioSilence(ctx, ctx.DeviceNetworkStatus) {
 		ctx.UsableAddressCount = newAddrCount
 		ctx.derivedLedCounter = types.DeriveLedCounter(ctx.ledCounter,
-			ctx.UsableAddressCount)
-		log.Functionf("counter %d usableAddr %d, derived %d",
-			ctx.ledCounter, ctx.UsableAddressCount, ctx.derivedLedCounter)
+			ctx.UsableAddressCount, ctx.radioSilence)
+		log.Functionf("counter %d, usableAddr %d, radioSilence %t, derived %d",
+			ctx.ledCounter, ctx.UsableAddressCount, ctx.radioSilence, ctx.derivedLedCounter)
 	}
 	// XXX wait in case we get another handle call?
 	// XXX set output sched in ctx; print one second later?
 	printOutput(ctx)
 	log.Functionf("handleDNSDelete done for %s", key)
+}
+
+func updateRadioSilence(ctx *diagContext, status *types.DeviceNetworkStatus) (update bool) {
+	if status == nil {
+		// by default radio-silence is turned off
+		update = ctx.radioSilence != false
+		ctx.radioSilence = false
+	} else if !status.RadioSilence.ChangeInProgress {
+		update = ctx.radioSilence != status.RadioSilence.Imposed
+		ctx.radioSilence = status.RadioSilence.Imposed
+	}
+	return
 }
 
 func handleDPCCreate(ctxArg interface{}, key string,
@@ -530,7 +565,7 @@ func printOutput(ctx *diagContext) {
 	switch ctx.derivedLedCounter {
 	case types.LedBlinkOnboarded:
 		fmt.Fprintf(outfile, "INFO: Summary: %s\n", ctx.derivedLedCounter)
-	case types.LedBlinkConnectedToController:
+	case types.LedBlinkConnectedToController, types.LedBlinkRadioSilence:
 		fmt.Fprintf(outfile, "WARNING: Summary: %s\n", ctx.derivedLedCounter)
 	default:
 		fmt.Fprintf(outfile, "ERROR: Summary: %s\n", ctx.derivedLedCounter)
@@ -846,27 +881,11 @@ func tryLookupIP(ctx *diagContext, ifname string) bool {
 func tryPing(ctx *diagContext, ifname string, reqURL string) bool {
 
 	zedcloudCtx := ctx.zedcloudCtx
-	// Set the TLS config on each attempt in case it has changed due to proxies etc
 	if reqURL == "" {
 		reqURL = zedcloud.URLPathString(ctx.serverNameAndPort, zedcloudCtx.V2API, nilUUID, "ping")
-		err := zedcloud.UpdateTLSConfig(zedcloudCtx, ctx.serverName, ctx.cert)
-		if err != nil {
-			errStr := fmt.Sprintf("ERROR: %s: internal UpdateTLSConfig failed %s\n",
-				ifname, err)
-			panic(errStr)
-		}
 	} else {
-		err := zedcloud.UpdateTLSConfig(zedcloudCtx, ctx.serverName, ctx.cert)
-		if err != nil {
-			errStr := fmt.Sprintf("ERROR: %s: internal UpdateTLSConfig failed %s\n",
-				ifname, err)
-			panic(errStr)
-		}
 		zedcloudCtx.TlsConfig.InsecureSkipVerify = true
 	}
-
-	// As we ping the cloud or other URLs, don't affect the LEDs
-	zedcloudCtx.NoLedManager = true
 
 	retryCount := 0
 	done := false
@@ -908,32 +927,23 @@ func tryPostUUID(ctx *diagContext, ifname string) bool {
 	}
 	zedcloudCtx := ctx.zedcloudCtx
 
-	// Set the TLS config on each attempt in case it has changed due to proxies etc
-	err = zedcloud.UpdateTLSConfig(zedcloudCtx, ctx.serverName, ctx.cert)
-	if err != nil {
-		errStr := fmt.Sprintf("ERROR: %s: internal UpdateTLSConfig failed %s\n",
-			ifname, err)
-		panic(errStr)
-	}
-	// As we ping the cloud or other URLs, don't affect the LEDs
-	zedcloudCtx.NoLedManager = true
 	retryCount := 0
 	done := false
-	rtf := types.SenderStatusNone
+	senderStatus := types.SenderStatusNone
 	var delay time.Duration
 	for !done {
 		time.Sleep(delay)
 		var resp *http.Response
 		var buf []byte
 		reqURL := zedcloud.URLPathString(ctx.serverNameAndPort, zedcloudCtx.V2API,
-			ctx.devUUID, "config")
-		done, resp, rtf, buf = myPost(ctx, reqURL, ifname, retryCount,
+			nilUUID, "uuid")
+		done, resp, senderStatus, buf = myPost(ctx, reqURL, ifname, retryCount,
 			int64(len(b)), bytes.NewBuffer(b))
 		if done {
 			parsePrint(reqURL, resp, buf)
 			break
 		}
-		if rtf == types.SenderStatusCertMiss {
+		if senderStatus == types.SenderStatusCertMiss {
 			// currently only three places we need to verify envelope data
 			// 1) client
 			// 2) zedagent
@@ -961,8 +971,8 @@ func parsePrint(configURL string, resp *http.Response, contents []byte) {
 		return
 	}
 
-	if err := validateConfigMessage(configURL, resp); err != nil {
-		log.Errorln("validateConfigMessage: ", err)
+	if err := zedcloud.ValidateProtoContentType(configURL, resp); err != nil {
+		log.Errorln("ValidateProtoContentType: ", err)
 		return
 	}
 
@@ -981,29 +991,6 @@ func parsePrint(configURL string, resp *http.Response, contents []byte) {
 	config := configResponse.GetConfig()
 	uuidStr := strings.TrimSpace(config.GetId().Uuid)
 	log.Functionf("Changed ConfigResponse with uuid %s", uuidStr)
-}
-
-// From zedagent/handleconfig.go
-func validateConfigMessage(configURL string, r *http.Response) error {
-
-	var ctTypeStr = "Content-Type"
-	var ctTypeProtoStr = "application/x-proto-binary"
-
-	ct := r.Header.Get(ctTypeStr)
-	if ct == "" {
-		return fmt.Errorf("No content-type")
-	}
-	mimeType, _, err := mime.ParseMediaType(ct)
-	if err != nil {
-		return fmt.Errorf("Get Content-type error")
-	}
-	switch mimeType {
-	case ctTypeProtoStr:
-		return nil
-	default:
-		return fmt.Errorf("Content-type %s not supported",
-			mimeType)
-	}
 }
 
 func readConfigResponseProtoMessage(contents []byte) (*zconfig.ConfigResponse, error) {
@@ -1042,10 +1029,10 @@ func myGet(ctx *diagContext, reqURL string, ifname string,
 			ifname, proxyURL.String(), reqURL)
 	}
 	const allowProxy = true
-	resp, contents, rtf, err := zedcloud.SendOnIntf(zedcloudCtx,
+	resp, contents, senderStatus, err := zedcloud.SendOnIntf(zedcloudCtx,
 		reqURL, ifname, 0, nil, allowProxy, ctx.usingOnboardCert)
 	if err != nil {
-		switch rtf {
+		switch senderStatus {
 		case types.SenderStatusUpgrade:
 			fmt.Fprintf(outfile, "ERROR: %s: get %s Controller upgrade in progress\n",
 				ifname, reqURL)
@@ -1106,10 +1093,10 @@ func myPost(ctx *diagContext, reqURL string, ifname string,
 			ifname, proxyURL.String(), reqURL)
 	}
 	const allowProxy = true
-	resp, contents, rtf, err := zedcloud.SendOnIntf(zedcloudCtx,
+	resp, contents, senderStatus, err := zedcloud.SendOnIntf(zedcloudCtx,
 		reqURL, ifname, reqlen, b, allowProxy, ctx.usingOnboardCert)
 	if err != nil {
-		switch rtf {
+		switch senderStatus {
 		case types.SenderStatusUpgrade:
 			fmt.Fprintf(outfile, "ERROR: %s: post %s Controller upgrade in progress\n",
 				ifname, reqURL)
@@ -1126,23 +1113,23 @@ func myPost(ctx *diagContext, reqURL string, ifname string,
 			fmt.Fprintf(outfile, "ERROR: %s: post %s failed: %s\n",
 				ifname, reqURL, err)
 		}
-		return false, nil, rtf, nil
+		return false, nil, senderStatus, nil
 	}
 
 	switch resp.StatusCode {
 	case http.StatusOK:
 		fmt.Fprintf(outfile, "INFO: %s: %s StatusOK\n", ifname, reqURL)
-		return true, resp, rtf, contents
+		return true, resp, senderStatus, contents
 	case http.StatusNotModified:
 		fmt.Fprintf(outfile, "INFO: %s: %s StatusNotModified\n", ifname, reqURL)
-		return true, resp, rtf, contents
+		return true, resp, senderStatus, contents
 	default:
 		fmt.Fprintf(outfile, "ERROR: %s: %s statuscode %d %s\n",
 			ifname, reqURL, resp.StatusCode,
 			http.StatusText(resp.StatusCode))
 		fmt.Fprintf(outfile, "ERRROR: %s: Received %s\n",
 			ifname, string(contents))
-		return false, nil, rtf, nil
+		return false, nil, senderStatus, nil
 	}
 }
 
