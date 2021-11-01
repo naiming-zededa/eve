@@ -148,6 +148,7 @@ type zedagentContext struct {
 	globalConfig            types.ConfigItemValueMap
 	specMap                 types.ConfigItemSpecMap
 	globalStatus            types.GlobalStatus
+	flowLogMetrics          types.FlowlogMetrics
 	appContainerStatsTime   time.Time // last time the App Container stats uploaded
 	// The MaintenanceMode can come from GlobalConfig and from the config
 	// API. Those are merged into maintenanceMode
@@ -1881,7 +1882,7 @@ func handleGlobalConfigImpl(ctxArg interface{}, key string,
 	var gcp *types.ConfigItemValueMap
 	debug, gcp = agentlog.HandleGlobalConfig(log, ctx.subGlobalConfig, agentName,
 		debugOverride, logger)
-	if gcp != nil && !ctx.GCInitialized {
+	if gcp != nil {
 		ctx.globalConfig = *gcp
 		ctx.GCInitialized = true
 		ctx.gcpMaintenanceMode = gcp.GlobalValueTriState(types.MaintenanceMode)
