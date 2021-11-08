@@ -109,7 +109,7 @@ var nilUUID uuid.UUID
 // current epoch received from controller
 var controllerEpoch int64
 
-func handleConfigInit(networkSendTimeout uint32) *zedcloud.ZedCloudContext {
+func handleConfigInit(networkSendTimeout uint32, agentMetrics *zedcloud.AgentMetrics) *zedcloud.ZedCloudContext {
 
 	// get the server name
 	bytes, err := ioutil.ReadFile(types.ServerFileName)
@@ -122,7 +122,7 @@ func handleConfigInit(networkSendTimeout uint32) *zedcloud.ZedCloudContext {
 	zedcloudCtx := zedcloud.NewContext(log, zedcloud.ContextOptions{
 		DevNetworkStatus: deviceNetworkStatus,
 		Timeout:          networkSendTimeout,
-		NeedStatsFunc:    true,
+		AgentMetrics:     agentMetrics,
 		Serial:           hardware.GetProductSerial(log),
 		SoftSerial:       hardware.GetSoftSerial(log),
 		AgentName:        agentName,
@@ -232,6 +232,13 @@ func getLatestConfig(url string, iteration int,
 	getconfigCtx *getconfigContext) bool {
 
 	log.Tracef("getLatestConfig(%s, %d)", url, iteration)
+	// If we haven't yet published our certificates we defer to ensure
+	// that the controller has our certs and can add encrypted secrets to
+	// our config.
+	if !getconfigCtx.zedagentCtx.publishedEdgeNodeCerts {
+		log.Noticef("Defer fetching config until our EdgeNodeCerts have been published")
+		return false
+	}
 	ctx := getconfigCtx.zedagentCtx
 	const bailOnHTTPErr = false // For 4xx and 5xx HTTP errors we try other interfaces
 	// except http.StatusForbidden(which returns error
