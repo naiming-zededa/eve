@@ -1,11 +1,3 @@
-#FROM naimingshen/edge-view
-#
-#COPY edge-view-init.sh /edge-view-init.sh
-#COPY client-certs/client.crt /client.pem
-#COPY client-certs/client.key /client.key
-#
-#ENTRYPOINT []
-#CMD ["/edge-view-init.sh"]
 FROM lfedge/eve-alpine:6.7.0 as build
 ENV BUILD_PKGS libc-dev git gcc linux-headers go
 ENV PKGS alpine-baselayout musl-utils iproute2 iptables
@@ -16,7 +8,8 @@ COPY go.mod /edge-view/.
 COPY go.sum /edge-view/.
 WORKDIR /edge-view
 
-RUN go build -o edge-view edge-view.go tcp-ws-proxy.go
+RUN go build -o edge-view edge-view.go tcp-ws-proxy.go basics.go \
+  websocket.go system.go network.go pubsub.go log-search.go
 RUN strip edge-view
 RUN cp edge-view /out/usr/bin
 RUN cp spec.sh /out/usr/bin
