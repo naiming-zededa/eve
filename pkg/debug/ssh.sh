@@ -4,7 +4,14 @@
 echo 0 >  /proc/sys/kernel/kptr_restrict
 echo -1 > /proc/sys/kernel/perf_event_paranoid
 
-KEYS=$(find /etc/ssh -name 'ssh_host_*_key')
-[ -z "$KEYS" ] && ssh-keygen -A >/dev/null 2>/dev/null
+[ ! -d "/persist/.sshkeys" ] && mkdir /persist/.sshkeys && chmod 0700 /persist/.sshkeys
+
+KEYS=$(find /persist/.sshkeys -name 'ssh_host_*_key')
+if [ -z "$KEYS" ]; then
+    ssh-keygen -A >/dev/null 2>/dev/null
+    cp /etc/ssh/ssh_host_*_key /persist/.sshkeys/.
+else
+    cp /persist/.sshkeys/ssh_host_*_key /etc/ssh/.
+fi
 
 exec /usr/sbin/sshd -D -e
