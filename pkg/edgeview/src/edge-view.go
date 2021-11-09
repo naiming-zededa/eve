@@ -28,8 +28,8 @@ var (
 	sysopts       []string
 	logdirectory  []string
 	device        string
-	isLocal       bool
-	directQuery   bool
+	runOnServer   bool       // container running inside remote linux host
+	directQuery   bool       // container using ssh-mode
 	querytype     string
 	stoken        string
 	timeout       string
@@ -48,7 +48,7 @@ var (
 	isTCPClient   bool
 	tcpRetryWait  bool
 	tcpClientRun  bool
-	isTCPProxy    bool
+	isTCPServer   bool
 	isCopy        bool           // client side
 	isSvrCopy     bool           // server side
 	copyMsgChn    chan []byte
@@ -158,7 +158,10 @@ func main() {
 	//}
 	log.SetFormatter(&log.TextFormatter{})
 
-	if *pdevip != "" && !*pServer {
+	if *pServer {
+		runOnServer = true
+	}
+	if *pdevip != "" && !runOnServer {
 		directQuery = true
 	}
 
@@ -176,7 +179,7 @@ func main() {
 		}
 	}
 
-	if *ptoken != "" && *pServer {
+	if *ptoken != "" && runOnServer {
 		stoken = *ptoken
 	}
 	initOpts()
@@ -350,9 +353,13 @@ func main() {
 	var done chan struct{}
 	hostname := ""
 	if !directQuery {
-		fmt.Printf("connecting to %s\n", urlSt.String())
-		hostname = getHostname(true)
-		ok := setupWebC(hostname, *ptoken, urlSt, *pServer)
+		if !runOnServer {
+			hostname = os.Getenv("HOSTNAME")
+		} else {
+			hostname = getHostname()
+		}
+		fmt.Printf("%s connecting to %s\n", hostname, urlSt.String())
+		ok := setupWebC(hostname, *ptoken, urlSt, runOnServer)
 		if !ok {
 			return
 		}
@@ -400,7 +407,7 @@ func main() {
 	}
 	fmt.Printf("cmd: %v\n", cmdSlice) // not printing token
 
-	if *ptoken != "" && !*pServer && !directQuery {
+	if *ptoken != "" && !runOnServer && !directQuery {
 		cmdStr = cmdStr + "-token=" + *ptoken + "+++"
 		cmdSlice = append(cmdSlice, "-token=" + *ptoken)
 	}
@@ -409,7 +416,7 @@ func main() {
 	if directQuery { // ssh query mode
 		parserAndRun(cmdSlice)
 		return
-	} else if *pServer {
+	} else if runOnServer {
 		go func() {
 			defer close(done)
 			for {
@@ -458,7 +465,7 @@ func main() {
 				if isSvrCopy {
 					copyMsgChn <- message
 					continue
-				} else if isTCPProxy {
+				} else if isTCPServer {
 					if mtype == websocket.TextMessage {
 						close(tcpServerDone)
 						continue
@@ -486,7 +493,7 @@ func main() {
 				go goRunQuery(argv0)
 			}
 		}()
-	} else {
+	} else { // query client in websocket mode
 		// send the query command to websocket server
 		err = websocketConn.WriteMessage(websocket.TextMessage, []byte(cmdStr))
 		if err != nil {
@@ -523,7 +530,7 @@ func main() {
 				} else if isTCPClient {
 					if mtype == websocket.TextMessage {
 						log.Debugf("setup tcp client: %s\n", message)
-						if !tcpClientRun {
+						if !tcpClientRun { // got ok messsage from tcp server side, run client
 							if bytes.Contains(message, []byte(TCPSetupOKMessage)) {
 								tcpClientsLaunch(tcpclientCnt, remotePorts)
 							}
@@ -604,9 +611,6 @@ func parserAndRun(argv []string) {
 		if strings.Contains(a, "device=") {
 			devs := strings.Split(a, "=")
 			device = devs[1]
-			if device == "" || device == "localhost" || device == "0.0.0.0" || device == "127.0.0.1" {
-				isLocal = true
-			}
 		} else if strings.Contains(a, "network=") {
 			nets := strings.Split(a, "network=")
 			netw = nets[1]
@@ -642,10 +646,6 @@ func parserAndRun(argv []string) {
 			fmt.Printf("session authentication failed\n")
 			return
 		}
-	}
-
-	if device == "" { // if device not specified, it's local
-		isLocal = true
 	}
 
 	getBasics()

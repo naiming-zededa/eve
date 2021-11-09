@@ -201,7 +201,7 @@ func getVolume() {
 
 func getSysApp() {
 	memfile := "/proc/meminfo"
-	if isLocal {
+	if runOnServer {
 		memfile = "/host" + memfile
 	}
 	retData, err := runCmd("cat "+memfile+" | grep 'Mem'", false, false)

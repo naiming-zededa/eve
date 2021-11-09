@@ -121,7 +121,7 @@ func goRunQuery(argv0 []string) {
 	readP, writeP, err = openPipe()
 	if err == nil {
 		parserAndRun(argv0)
-		if isTCPProxy {
+		if isTCPServer {
 			return
 		}
 		closePipe(false)

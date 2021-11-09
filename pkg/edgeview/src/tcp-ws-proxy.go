@@ -216,7 +216,7 @@ func setAndStartProxyTCP(opt string, isProxy bool) {
 	tcpDataChn = make([]chan tcpData, mappingCnt)
 
 	closePipe(false)
-	isTCPProxy = true
+	isTCPServer = true
 	tcpServerDone = make(chan struct{})
 
 	idx := 0
@@ -242,7 +242,7 @@ func setAndStartProxyTCP(opt string, isProxy bool) {
 				fmt.Printf("TCP exist. calling proxSvr.Close\n")
 				proxySvr.Close()
 			}
-			isTCPProxy = false
+			isTCPServer = false
 			return
 
 		case <- proxyServerDone:
@@ -251,11 +251,10 @@ func setAndStartProxyTCP(opt string, isProxy bool) {
 					close(d)
 				}
 			}
-			isTCPProxy = false
+			isTCPServer = false
 			return
 		}
 	}
-	//isTCPProxy = false
 }
 
 func startTCPServer(idx int, ipAddrPort string, isProxy bool, tcpServerDone chan struct{}) {
@@ -276,7 +275,7 @@ func startTCPServer(idx int, ipAddrPort string, isProxy bool, tcpServerDone chan
 			go tcpTransfer(ipAddrPort, wssMsg, idx, isProxy)
 		case <- tcpServerDone:
 			fmt.Printf("tcp server done(%d). exit\n", idx)
-			isTCPProxy = false
+			isTCPServer = false
 			cleanMapTimer.Stop()
 			doneTCPtransfer(idx)
 			cleanClosedMapEntries(idx)

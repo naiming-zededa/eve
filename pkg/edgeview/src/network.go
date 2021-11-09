@@ -668,7 +668,7 @@ func runPing(intfStr, server string, opt string) {
 			server = "zedcloud.canary.zededa.net"
 		}
 		printColor("\n - ping to "+server+", source "+ipa.String(), CYAN)
-		if isLocal {
+		if runOnServer {
 			httpsclient(server, ipa)
 		} else {
 			runCmd("curl https://"+server+":/api/v1/edgeDevice/ping", true, true)

@@ -90,12 +90,8 @@ func initOpts() {
 	}
 }
 
-func getHostname(isServer bool) string {
+func getHostname() string {
 	var hostname string
-	if !isServer {
-		return hostname
-	}
-	isLocal = true
 	retStr, err := runCmd("hostname", false, false)
 	if err != nil {
 		return hostname
@@ -131,7 +127,7 @@ func isValidOpt(value string, optslice []string) bool {
 }
 
 func getBasics() {
-	if isLocal {
+	if runOnServer {
 		if _, err := os.Stat("/config"); err != nil {
 			return
 		}
@@ -208,13 +204,13 @@ func addPackage(programName, pkgName string) error {
 }
 
 func runCmd(cmd string, isEve, isPrint bool) (string, error) {
-	if isEve && !isLocal {
+	if isEve && !runOnServer {
 		cmd = "eve exec pillar " + cmd + " 2&>1"
 	}
 	var retStr string
 	var retBytes []byte
 	var err error
-	if isLocal {
+	if runOnServer {
 		retBytes, err = exec.Command("sh", "-c", cmd).Output()
 		if err == nil {
 			retStr = string(retBytes)
