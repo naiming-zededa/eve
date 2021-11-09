@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 )
 
 type Endpt struct {
@@ -75,7 +76,7 @@ func tcpClientStart(idx int, rport int) {
 	go func (l net.Listener) {
 		for {
 			here, err := listener.Accept()
-				if err != nil {
+			if err != nil {
 				fmt.Printf("Accept error %v\n", err)
 				return
 			}
@@ -95,7 +96,7 @@ func tcpClientStart(idx int, rport int) {
 
 func clientTCPtunnel(here net.Conn, idx, chNum int, rport int) error {
 
-	fmt.Printf("clientwebtunnel(idx %d): starts in chan %d, rport %d\n", idx, chNum, rport) // XXX
+	fmt.Printf("clientwebtunnel(idx %d): starts in chan %d, rport %d\n", idx, chNum, rport)
 	done := make(chan struct{})
 	myConn := tcpconn{
 		conn:    here,
@@ -109,9 +110,9 @@ func clientTCPtunnel(here net.Conn, idx, chNum int, rport int) error {
 			case tcpmsg := <-msgChan:
 				myConn := tcpConnM[idx].RecvWssInc(chNum)
 				buf := bytes.NewBuffer(tcpmsg.msg)
-				fmt.Printf("Ch-%d[idx %d port %d], From wss recv, %s, len %d\n", chNum, idx, rport, time.Now().Format("2006-01-02 15:04:05"), tcpmsg.origSize) // XXX
+				log.Debugf("Ch-%d[idx %d port %d], From wss recv, %s, len %d\n", chNum, idx, rport, time.Now().Format("2006-01-02 15:04:05"), len(tcpmsg.msg))
 				if myConn.pending {
-					fmt.Printf("Ch(%d)-%d, pending close send to client, %v\n", idx, chNum, time.Now())
+					log.Debugf("Ch(%d)-%d, pending close send to client, %v\n", idx, chNum, time.Now())
 				}
 				io.Copy(here, buf)
 			case <- done:
@@ -133,19 +134,17 @@ func clientTCPtunnel(here net.Conn, idx, chNum int, rport int) error {
 		} else {
 			reqLen, err = here.Read(buf)
 			if err != nil {
-				fmt.Printf("clientTCPtunnel-%d[idx %d rport %d]: tcp socket error from local client, %v, %v, break\n",
-					chNum, idx, rport, time.Now(), err) // XXX
+				log.Infof("clientTCPtunnel-%d[idx %d rport %d]: tcp socket error from local client, %v, %v, break\n",
+					chNum, idx, rport, time.Now(), err)
 				if err == io.EOF {
 					time.Sleep(1 * time.Second)
-					//fmt.Printf("clientTCPtunnel-%d: delay 1 second pending close after EOF, %v\n", chNum, time.Now())
+					log.Debugf("clientTCPtunnel-%d: delay 1 second pending close after EOF, %v\n", chNum, time.Now())
 				}
 				here.Close()
 				tcpConnM[idx].CloseChan(chNum)
 				break
 			}
-			//myConn := tcpConnM.RecvLocalInc(chNum)
 			tcpConnM[idx].RecvLocalInc(chNum)
-			//fmt.Printf("ch-%d, client recv from local reqlen %d, %v\n", chNum, reqLen, time.Now()) // XXX
 		}
 
 		wrdata := tcpData{
@@ -163,25 +162,26 @@ func clientTCPtunnel(here net.Conn, idx, chNum int, rport int) error {
 			fmt.Printf("wait for tcp retry before write to wss: ch-%d\n", chNum)
 			time.Sleep(1 * time.Second)
 		}
-		fmt.Printf("ch-%d[idx %d, port %d], client wrote len %d to wss, %s\n", chNum, idx, rport, len(jdata), time.Now().Format("2006-01-02 15:04:05"))
+		log.Debugf("ch-%d[idx %d, port %d], client wrote len %d to wss, %s\n", chNum, idx, rport, len(jdata), time.Now().Format("2006-01-02 15:04:05"))
+
 		if websocketConn == nil {
 			close(done)
-			fmt.Printf("ch(%d)-%d, websocketConn nil. exit\n", idx, chNum) // XXX
+			fmt.Printf("ch(%d)-%d, websocketConn nil. exit\n", idx, chNum)
 			return nil
 		}
 		wssWrMutex.Lock()
-		err = websocketConn.WriteMessage(websocket.BinaryMessage, jdata) // XXX do we need to lock it?
+		err = websocketConn.WriteMessage(websocket.BinaryMessage, jdata)
 		wssWrMutex.Unlock()
 		if err != nil {
 			close(done)
-			fmt.Printf("ch(%d)-%d, client write wss error %v\n", idx, chNum, err) // XXX
+			fmt.Printf("ch(%d)-%d, client write wss error %v\n", idx, chNum, err)
 			return err
 		}
 	}
 	return nil
 }
 
-// server side
+// TCP server side
 func setAndStartProxyTCP(opt string, isProxy bool) {
 	var ipAddrPort []string
 	var proxySvr *http.Server
@@ -263,16 +263,15 @@ func startTCPServer(idx int, ipAddrPort string, isProxy bool, tcpServerDone chan
 	cleanMapTimer := time.NewTicker(3 * time.Minute)
 	tcpDataChn[idx] = make(chan tcpData)
 
-	fmt.Printf("tcp server(%d) proxy starts to server %s, waiting for first client packet\n", idx, ipAddrPort)
+	log.Debugf("tcp server(%d) proxy starts to server %s, waiting for first client packet\n", idx, ipAddrPort)
 	var proxyluanchCnt int
 	for {
 		select {
 		case wssMsg := <- tcpDataChn[idx]:
 			if int(wssMsg.ChanNum) > proxyluanchCnt {
 				proxyluanchCnt++
-				//fmt.Printf("tcp proxy launch: %d\n", proxyluanchCnt)
 			} else {
-				fmt.Printf("tcp proxy re-launch channel(%d): %d\n", idx, wssMsg.ChanNum)
+				log.Debugf("tcp proxy re-launch channel(%d): %d\n", idx, wssMsg.ChanNum)
 			}
 			go tcpTransfer(ipAddrPort, wssMsg, idx, isProxy)
 		case <- tcpServerDone:
@@ -326,7 +325,7 @@ func tcpTransfer(url string, wssMsg tcpData, idx int, isProxy bool) {
 	}
 	myConn.msgChan <- msg // first message from client
 
-	fmt.Printf("tcpTrasfer(%d) starts%s for chNum %d. got conn, localaddr %s\n", idx, proxyStr, chNum, conn.LocalAddr()) // XXX
+	log.Debugf("tcpTrasfer(%d) starts%s for chNum %d. got conn, localaddr %s\n", idx, proxyStr, chNum, conn.LocalAddr())
 	//done := make(chan struct{})
 	// receive from clinet/websocket and relay to tcp server
 	go func(conn net.Conn, done chan struct{}) {
@@ -339,7 +338,7 @@ func tcpTransfer(url string, wssMsg tcpData, idx int, isProxy bool) {
 					t = time.NewTimer(600 * time.Second)
 					continue
 				}
-				fmt.Printf("tcp session timeout ch(%d)-%d\n", idx, chNum)
+				log.Debugf("tcp session timeout ch(%d)-%d\n", idx, chNum)
 				wssWrMutex.Lock()
 				websocketConn.WriteMessage(websocket.TextMessage, []byte("\n"))
 				wssWrMutex.Unlock()
@@ -347,14 +346,12 @@ func tcpTransfer(url string, wssMsg tcpData, idx int, isProxy bool) {
 				tcpConnM[idx].CloseChan(chNum)
 				return
 			case <-done:
-				fmt.Printf("done here, ch(%d)-%d\n", idx, chNum)
+				log.Debugf("done here, ch(%d)-%d\n", idx, chNum)
 				t.Stop()
 				tcpConnM[idx].CloseChan(chNum)
 				return
 			case wsmsg := <-msgChan:
-				//myConn := tcpConnM.RecvWssInc(chNum)
 				tcpConnM[idx].RecvWssInc(chNum)
-				//fmt.Printf("Ch-%d, got tcp msg from websocket, %v, count (%d)\n", chNum, time.Now(), myConn.recvWss) // XXX
 				if wsmsg.mtype == websocket.TextMessage {
 					conn.Close()
 					t.Stop()
@@ -362,7 +359,6 @@ func tcpTransfer(url string, wssMsg tcpData, idx int, isProxy bool) {
 					return
 				}
 				buf := bytes.NewBuffer(wsmsg.msg)
-				//fmt.Printf("Ch-%d, copy to conn here\n", chNum) // XXX
 				io.Copy(conn, buf)
 				t.Stop()
 				t = time.NewTimer(600 * time.Second)
@@ -430,7 +426,7 @@ func proxyServer(done chan struct{}) *http.Server {
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
 
-	fmt.Printf("proxyServer: before listenAndServeTLS\n")
+	fmt.Printf("proxyServer: listenAndServeTLS\n")
 	// always accept http from local, no proxy certs involved
 	go func() {
 		defer close(done)
@@ -450,7 +446,8 @@ func handleTunneling(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	fmt.Printf("handleTunneling: %s\n", r.Host)
+
+	log.Debugf("handleTunneling: %s\n", r.Host)
 	w.WriteHeader(http.StatusOK)
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -469,7 +466,7 @@ func handleTunneling(w http.ResponseWriter, r *http.Request) {
 func transfer(destination io.WriteCloser, source io.ReadCloser, toremote bool) {
 	defer destination.Close()
 	defer source.Close()
-	fmt.Printf("transfer: before io.Copy to-remove %v\n", toremote)
+	log.Debugf("transfer: before io.Copy to-remove %v\n", toremote)
 	io.Copy(destination, source)
 }
 
@@ -504,10 +501,9 @@ func cleanClosedMapEntries(idx int) {
 			recvWss += m.recvWss
 			delete(tcpConnM[idx].m, i)
 			deleted++
-			fmt.Printf("deleted map(%d) chn %d, rec local/wss %d/%d\n", idx, i, recvlocal, recvWss)
 		}
 	}
-	fmt.Printf("done with cleanup(%d). deleted %d, exist num %d\n", idx, deleted, len(tcpConnM[idx].m))
+	log.Debugf("done with cleanup(%d). deleted %d, exist num %d\n", idx, deleted, len(tcpConnM[idx].m))
 	tcpMapMutex.Unlock()
 }
 
@@ -521,7 +517,7 @@ func doneTCPtransfer(idx int) {
 		}
 	}
 	tcpMapMutex.Unlock()
-	fmt.Printf("doneTCPtransfer(%d) closed %d threads\n", idx, closed)
+	log.Infof("doneTCPtransfer(%d) closed %d threads\n", idx, closed)
 }
 
 func (r tcpConnRWMap) Get(ch int) (tcpconn, bool) {

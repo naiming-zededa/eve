@@ -301,6 +301,10 @@ func getJsonFileID(path string) string {
 	return ""
 }
 
+var helpStr string=`edge-view [ -ws <ip:port> -token <session-token> | -device <ip-addr> ] [ -debug ] <query string>
+ options:
+  log/search-pattern [ -time <start_time>-<end_time> -json -type <app|dev> -extra num ]
+`
 func printHelp(opt string) {
 	if opt == "" {
 		fmt.Println(helpStr)

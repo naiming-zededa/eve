@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lf-edge/eve/api/go/logs"
 )
 
 func runLogSearch(pattern string) {
@@ -161,7 +163,7 @@ func colorMatch(olines, pattern string) {
 				fmt.Printf(" (%d) %s\n", i+1, buff)
 			}
 		} else {
-			var entry LogEntry
+			var entry logs.LogEntry
 			var content LogContent
 			var bufStr string
 			json.Unmarshal([]byte(l), &entry)

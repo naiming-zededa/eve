@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	timestamp "github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
@@ -58,10 +57,6 @@ var (
 	tcpServerDone chan struct{}
 )
 
-var helpStr string=`edge-view [ -ws <ip:port> -token <session-token> | -device <ip-addr> ] <query string>
- options:
-  log/search-pattern [ -time <start_time>-<end_time> -json -type <app|dev> -extra num ]
-`
 const (
 	CloseMessage      = "+++Done+++"
 	StartCopyMessage  = "+++Start-Copy+++"
@@ -86,7 +81,6 @@ const (
 
 type wsMessage struct {
 	mtype      int
-	origSize   int // XXX for debug on client side
 	msg        []byte
 }
 
@@ -111,18 +105,6 @@ type tcpData struct {
 type logfiletime struct {
 	filepath    string
 	filesec     int64
-}
-
-type LogEntry struct {
-	Severity  string               `json:"severity,omitempty"`  // e.g., INFO, DEBUG, ERROR etc.
-	Source    string               `json:"source,omitempty"`    // Source of the msg, zedmanager etc.
-	Iid       string               `json:"iid,omitempty"`       // instance ID of the source (e.g., PID)
-	Content   string               `json:"content,omitempty"`   // actual log message
-	Msgid     uint64               `json:"msgid,omitempty"`     // monotonically increasing number (detect drops)
-	Tags      map[string]string    `json:"tags,omitempty"`      // additional meta info <key,value>
-	Timestamp *timestamp.Timestamp `json:"timestamp,omitempty"` // timestamp of the msg
-	Filename  string               `json:"filename,omitempty"`
-	Function  string               `json:"function,omitempty"`
 }
 
 type LogContent struct {
@@ -168,6 +150,7 @@ func main() {
 	pdevip := flag.String("device", "", "device ip option")
 	pServer := flag.Bool("server", false, "service edge-view queries")
 	ptoken := flag.String("token", "", "session token")
+	pDebug := flag.Bool("debug", false, "log more in debug")
 	flag.Parse()
 	//log.SetFlags(0)
 	//formatter := log.JSONFormatter{
@@ -232,6 +215,8 @@ func main() {
 			*pServer = true
 		} else if strings.HasSuffix(word, "-json") {
 			jsonopt = true
+		} else if strings.HasSuffix(word, "-debug") {
+			*pDebug = true
 		} else if strings.HasSuffix(word, "-device") {
 			skiptype = "dev"
 		} else if strings.HasSuffix(word, "-time") {
@@ -245,6 +230,10 @@ func main() {
 		} else {
 			pqueryopt = word
 		}
+	}
+
+	if *pDebug {
+		log.SetLevel(log.DebugLevel)
 	}
 
 	if *phopt || *phelpopt {
@@ -466,7 +455,6 @@ func main() {
 						continue
 					}
 				}
-				//fmt.Printf("got message, type %d, isTCPProxy %v\n", mtype, isTCPProxy) // XXX
 				if isSvrCopy {
 					copyMsgChn <- message
 					continue
@@ -484,7 +472,7 @@ func main() {
 					mid := jmsg.MappingID - 1
 					myChan, ok := tcpConnM[mid].Get(int(jmsg.ChanNum))
 					if !ok || myChan.closed {
-						fmt.Printf("tcpConnMap(%d) has no chan %d on server, launch\n", mid, jmsg.ChanNum)
+						log.Debugf("tcpConnMap(%d) has no chan %d on server, launch\n", mid, jmsg.ChanNum)
 						tcpDataChn[mid] <- jmsg
 						continue
 					}
@@ -513,7 +501,7 @@ func main() {
 					log.Println("client read wss:", err)
 					if errors.Is(err, syscall.ECONNRESET) {
 						if isTCPClient {
-							log.Println("reset by peer, try reconnect %v", time.Now())
+							log.Info("reset by peer, try reconnect %v", time.Now())
 							websocketConn.Close()
 							tcpRetryWait = true
 							time.Sleep(100 * time.Millisecond)
@@ -522,26 +510,25 @@ func main() {
 							if ok {
 								continue
 							} else {
-								log.Println("retry failed. exit")
+								log.Info("retry failed. exit")
 							}
 						}
 					}
 					return
 				}
 				if strings.Contains(string(message), CloseMessage) {
-					log.Printf("%s\n", string(message))
-					log.Printf("receive message done\n")
+					log.Infof("%s\nreceive message done\n", string(message))
 					done <- struct{}{}
 					break
 				} else if isTCPClient {
 					if mtype == websocket.TextMessage {
-						log.Printf("setup tcp client: %s\n", message)
+						log.Debugf("setup tcp client: %s\n", message)
 						if !tcpClientRun {
 							if bytes.Contains(message, []byte(TCPSetupOKMessage)) {
 								tcpClientsLaunch(tcpclientCnt, remotePorts)
 							}
 						} else {
-							fmt.Printf(" tcp client running, receiving close probably due to server timed out: %v\n", string(message))
+							log.Infof(" tcp client running, receiving close probably due to server timed out: %v\n", string(message))
 							done <- struct{}{}
 							break
 						}
@@ -569,7 +556,6 @@ func main() {
 						msg := wsMessage{
 							mtype:    mtype,
 							msg:      jmsg.Data,
-							origSize: len(message),
 						}
 						//fmt.Printf("in TCP Client, send msg to chan %d\n", jmsg.ChanNum)
 						myChan.msgChan <- msg
