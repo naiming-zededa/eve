@@ -279,9 +279,8 @@ func startTCPServer(idx int, ipAddrPort string, isProxy bool, tcpServerDone chan
 			fmt.Printf("tcp server done(%d). exit\n", idx)
 			isTCPProxy = false
 			cleanMapTimer.Stop()
-			cleanClosedMapEntries(idx)
 			doneTCPtransfer(idx)
-			// XXX need to close things here, map, chan, etc
+			cleanClosedMapEntries(idx)
 			return
 		case <- cleanMapTimer.C:
 			cleanClosedMapEntries(idx)

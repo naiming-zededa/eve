@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 
@@ -229,6 +233,41 @@ func runCmd(cmd string, isEve, isPrint bool) (string, error) {
 		}
 	}
 	return retStr, err
+}
+
+func remoteRun(user string, addr string, privateKey []byte, cmd string) (string, error) {
+	key, err := ssh.ParsePrivateKey(privateKey)
+	if err != nil {
+		fmt.Printf("ssh parse key error: %v\n", err)
+		return "", err
+	}
+	// Authentication
+	config := &ssh.ClientConfig{
+		User: user,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(key),
+		},
+	}
+	// Connect
+	client, err := ssh.Dial("tcp", net.JoinHostPort(addr, "22"), config)
+	if err != nil {
+		fmt.Printf("ssh dial error: %v\n", err)
+		return "", err
+	}
+	// Create a session. It is one session per command.
+	session, err := client.NewSession()
+	if err != nil {
+		fmt.Printf("ssh session error: %v\n", err)
+		return "", err
+	}
+	defer session.Close()
+	var b bytes.Buffer
+	session.Stdout = &b // get output
+
+	// Finally, run the command
+	err = session.Run(cmd)
+	return b.String(), err
 }
 
 func printColor(msg, color string) {

@@ -275,6 +275,10 @@ func main() {
 		} else if strings.HasPrefix(pqueryopt, "app") {
 			psysopt = pqueryopt
 		} else if strings.HasPrefix(pqueryopt, "tcp/") {
+			if directQuery {
+				fmt.Printf("tcp is not supported in ssh mode\n")
+				return
+			}
 			tcpopts := strings.SplitN(pqueryopt, "tcp/", 2)
 			tcpparam := tcpopts[1]
 
@@ -313,10 +317,18 @@ func main() {
 			fmt.Printf("%s\n", RESET)
 			pnetopt = pqueryopt
 		} else if strings.HasPrefix(pqueryopt, "proxy") {
+			if directQuery {
+				fmt.Printf("proxy is not supported in ssh mode\n")
+				return
+			}
 			isTCPClient = true
 			fmt.Printf("proxy server locally listening on: 0.0.0.0:9001\n")
 			pnetopt = pqueryopt
 		} else if strings.HasPrefix(pqueryopt, "cp/") {
+			if directQuery {
+				fmt.Printf("cp is not supported in ssh mode\n")
+				return
+			}
 			psysopt = pqueryopt
 			isCopy = true
 		} else {
@@ -405,7 +417,7 @@ func main() {
 	}
 	cmdSlice = append(cmdSlice, "")
 
-	if directQuery {
+	if directQuery { // ssh query mode
 		parserAndRun(cmdSlice)
 		return
 	} else if *pServer {
@@ -663,39 +675,4 @@ func parserAndRun(argv []string) {
 		fmt.Printf("no supported options\n")
 		return
 	}
-}
-
-func remoteRun(user string, addr string, privateKey []byte, cmd string) (string, error) {
-	key, err := ssh.ParsePrivateKey(privateKey)
-	if err != nil {
-		fmt.Printf("ssh parse key error: %v\n", err)
-		return "", err
-	}
-	// Authentication
-	config := &ssh.ClientConfig{
-		User: user,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(key),
-		},
-	}
-	// Connect
-	client, err := ssh.Dial("tcp", net.JoinHostPort(addr, "22"), config)
-	if err != nil {
-		fmt.Printf("ssh dial error: %v\n", err)
-		return "", err
-	}
-	// Create a session. It is one session per command.
-	session, err := client.NewSession()
-	if err != nil {
-		fmt.Printf("ssh session error: %v\n", err)
-		return "", err
-	}
-	defer session.Close()
-	var b bytes.Buffer
-	session.Stdout = &b // get output
-
-	// Finally, run the command
-	err = session.Run(cmd)
-	return b.String(), err
 }
