@@ -201,7 +201,7 @@ func main() {
 		needDebug = true
 	}
 
-    http.HandleFunc("/echo", socketHandler)
+    http.HandleFunc("/edge-view", socketHandler)
 	localIP := GetOutboundIP()
 	fmt.Printf("Listen TLS on: %s:4000\n", localIP)
     log.Fatal(http.ListenAndServeTLS(localIP+":4000",

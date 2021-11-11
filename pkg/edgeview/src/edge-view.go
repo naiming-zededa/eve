@@ -367,7 +367,7 @@ func main() {
 
 	intSigStart()
 
-	urlSt := url.URL{Scheme: "wss", Host: *wsAddr, Path: "/echo"}
+	urlSt := url.URL{Scheme: "wss", Host: *wsAddr, Path: "/edge-view"}
 
 	var done chan struct{}
 	hostname := ""

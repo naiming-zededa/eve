@@ -3,3 +3,4 @@ edge-view-query:
 
 wss-server:
 	go build src/wss-server.go
+
