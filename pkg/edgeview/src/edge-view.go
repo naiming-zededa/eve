@@ -79,6 +79,19 @@ const (
 	RESET   = "\033[0m"
 )
 
+type cmdOpt struct {
+	DevIPAddr    string     `json:"devIPAddr"`
+	Network      string     `json:"network"`
+	System       string     `json:"system"`
+	Pubsub       string     `json:"pubsub"`
+	Logopt       string     `json:"logopt"`
+	Timerange    string     `json:"timerange"`
+	IsJson       bool       `json:"isJson"`
+	Extraline    int        `json:"extraline"`
+	Logtype      string     `json:"logtype"`
+	SessToken    string     `json:"sessToken"`
+}
+
 type wsMessage struct {
 	mtype      int
 	msg        []byte
@@ -193,6 +206,13 @@ func main() {
 	tcpclientCnt := 1
 	values := flag.Args()
 	var skiptype string
+	// the reason for this loop to get our own params is that it allows
+	// some options do not have to specify the "-something" in the front.
+	// the flag does not allow this.
+	// for example, put all the common usage in a script:
+	// ./myscript.sh log/<pattern>
+	// or ./myscript.sh log/<pattern> -time 0.2-0.5 -json
+	// or ./myscript.sh -device <ip-addr> route
 	for _, word := range values {
 		if skiptype != "" {
 			switch skiptype  {
@@ -349,7 +369,6 @@ func main() {
 
 	urlSt := url.URL{Scheme: "wss", Host: *wsAddr, Path: "/echo"}
 
-	var err error
 	var done chan struct{}
 	hostname := ""
 	if !directQuery {
@@ -367,56 +386,25 @@ func main() {
 		done = make(chan struct{})
 	}
 
-	var cmdStr string
-	var cmdSlice []string
-	if *pdevip != "" {
-		cmdStr = cmdStr + "-device=" + *pdevip + "+++"
-		cmdSlice = append(cmdSlice, "-device=" + *pdevip)
-	}
-	if pnetopt != "" {
-		cmdStr = cmdStr + "-network=" + pnetopt + "+++"
-		cmdSlice = append(cmdSlice, "-network=" + pnetopt)
-	}
-	if psysopt != "" {
-		cmdStr = cmdStr + "-system=" + psysopt + "+++"
-		cmdSlice = append(cmdSlice, "-system=" + psysopt)
-	}
-	if ppubsubopt != "" {
-		cmdStr = cmdStr + "-pubsub=" + ppubsubopt + "+++"
-		cmdSlice = append(cmdSlice, "-pubsub=" + ppubsubopt)
-	}
-	if logopt != "" {
-		cmdStr = cmdStr + "-log=" + logopt + "+++"
-		cmdSlice = append(cmdSlice, "-log=" + logopt)
-	}
-	if timeopt != "" {
-		cmdStr = cmdStr + "-time=" + timeopt + "+++"
-		cmdSlice = append(cmdSlice, "-time=" + timeopt)
-	}
-	if jsonopt {
-		cmdStr = cmdStr + "-json" + "+++"
-		cmdSlice = append(cmdSlice, "-json")
-	}
-	if extraopt != 0 {
-		cmdStr = cmdStr + "-extra=" + strconv.Itoa(extraopt) + "+++"
-		cmdSlice = append(cmdSlice, "-extra=" + strconv.Itoa(extraopt))
+	queryCmds := cmdOpt{
+		DevIPAddr:  *pdevip,
+		Network:    pnetopt,
+		System:     psysopt,
+		Pubsub:     ppubsubopt,
+		Logopt:     logopt,
+		Timerange:  timeopt,
+		IsJson:     jsonopt,
+		Extraline:  extraopt,
+		SessToken:  *ptoken,
 	}
 	if typeopt != "all" {
-		cmdStr = cmdStr + "-type=" + typeopt + "+++"
-		cmdSlice = append(cmdSlice, "-type=" + typeopt)
+		queryCmds.Logtype = typeopt
 	}
-	fmt.Printf("cmd: %v\n", cmdSlice) // not printing token
-
-	if *ptoken != "" && !runOnServer && !directQuery {
-		cmdStr = cmdStr + "-token=" + *ptoken + "+++"
-		cmdSlice = append(cmdSlice, "-token=" + *ptoken)
-	}
-	cmdSlice = append(cmdSlice, "")
 
 	if directQuery { // ssh query mode
-		parserAndRun(cmdSlice)
+		parserAndRun(queryCmds)
 		return
-	} else if runOnServer {
+	} else if runOnServer { // websocket mode on device 'server' side
 		go func() {
 			defer close(done)
 			for {
@@ -438,27 +426,19 @@ func main() {
 					return
 				}
 				// remove the token to be printed
-				var argv0 []string
+				var recvCmds cmdOpt
+				var isJson bool
 				if mtype == websocket.TextMessage {
-					lmsg := strings.Split(string(message), "-token=")
-					if len(lmsg) == 2 {
-						lmsg2 := strings.Split(lmsg[1], "+++")
-						msg := lmsg[0] + lmsg2[1]
-						log.Printf("recv: %s", msg)
+					err := json.Unmarshal(message, &recvCmds)
+					if err != nil {
+						log.Printf("recv not json msg: %s\n", message)
 					} else {
-						log.Printf("recv: %s", message)
+						log.Printf("recv: %+v", recvCmds)
+						isJson = true
 					}
-					if strings.Contains(string(message), "no device online") ||
-						strings.Contains(string(message), CloseMessage) {
+					if !isJson && (strings.Contains(string(message), "no device online") ||
+						strings.Contains(string(message), CloseMessage)) {
 						log.Println("read: no device, continue")
-						continue
-					}
-					cmds := strings.Split(string(message), "+++")
-					for _, c := range cmds {
-						argv0 = append(argv0, c)
-					}
-					if len(argv0) == 0 {
-						log.Println("read: no argv")
 						continue
 					}
 				}
@@ -490,12 +470,17 @@ func main() {
 					myChan.msgChan <- msg
 					continue
 				}
-				go goRunQuery(argv0)
+				go goRunQuery(recvCmds)
 			}
 		}()
 	} else { // query client in websocket mode
 		// send the query command to websocket server
-		err = websocketConn.WriteMessage(websocket.TextMessage, []byte(cmdStr))
+		jdata, err := json.Marshal(queryCmds)
+		if err != nil {
+			log.Println("json Marshal queryCmds error", err)
+			return
+		}
+		err = websocketConn.WriteMessage(websocket.TextMessage, jdata)
 		if err != nil {
 			log.Println("write:", err)
 			return
@@ -592,71 +577,49 @@ func main() {
 	}
 }
 
-func parserAndRun(argv []string) {
-	if len(argv) < 1 {
-		return
-	}
-	inargv0 := argv[:len(argv)-1]
-	var netw, sysopt, pubsub, logopt, queryToken string
-	logjson = false
-	querytype = "all"
-	extralog = 0
-	timeout = ""
-	var tokenSet bool
-	for _, a := range inargv0 {
-		if strings.Contains(a, "query") {
-			continue
-		}
-
-		if strings.Contains(a, "device=") {
-			devs := strings.Split(a, "=")
-			device = devs[1]
-		} else if strings.Contains(a, "network=") {
-			nets := strings.Split(a, "network=")
-			netw = nets[1]
-		} else if strings.Contains(a, "system=") {
-			syss := strings.Split(a, "system=")
-			sysopt = syss[1]
-		} else if strings.Contains(a, "pubsub=") {
-			pubs := strings.Split(a, "pubsub=")
-			pubsub = pubs[1]
-		} else if strings.Contains(a, "log=") {
-			logs := strings.Split(a, "log=")
-			logopt = logs[1]
-		} else if strings.Contains(a, "time=") {
-			times := strings.Split(a, "time=")
-			timeout = times[1]
-		} else if strings.Contains(a, "extra=") {
-			extraopt := strings.Split(a, "extra=")
-			extralog, _ = strconv.Atoi(extraopt[1])
-		} else if strings.Contains(a, "json") {
-			logjson = true
-		} else if strings.Contains(a, "type=") {
-			topt := strings.Split(a, "type=")
-			querytype = topt[1]
-		} else if strings.Contains(a, "token=") {
-			tok := strings.Split(a, "token=")
-			queryToken = tok[1]
-			tokenSet = true
-		}
-	}
-
-	if stoken != "" {
-		if !tokenSet || queryToken != stoken {
-			fmt.Printf("session authentication failed\n")
+func goRunQuery(cmds cmdOpt) {
+	var err error
+	wsMsgCount = 0
+	wsSentBytes = 0
+	readP, writeP, err = openPipe()
+	if err == nil {
+		parserAndRun(cmds)
+		if isTCPServer {
 			return
 		}
+		closePipe(false)
+		err = websocketConn.WriteMessage(websocket.TextMessage, []byte(CloseMessage))
+		if err != nil {
+			log.Println("sent done msg error:", err)
+		}
+		log.Printf("Sent %d messages, total %d bytes to websocket\n", wsMsgCount, wsSentBytes)
+	}
+}
+
+func parserAndRun(cmds cmdOpt) {
+	if stoken != "" && stoken != cmds.SessToken {
+		fmt.Printf("session authentication failed\n")
+		return
+	}
+
+	if cmds.Timerange != "" {
+		timeout = cmds.Timerange
+	}
+	device = cmds.DevIPAddr
+	logjson = cmds.IsJson
+	if cmds.Logtype != "" {
+		querytype = cmds.Logtype
 	}
 
 	getBasics()
-	if netw != "" {
-		runNetwork(netw)
-	} else if pubsub != "" {
-		runPubsub(pubsub)
-	} else if sysopt != "" {
-		runSystem(sysopt)
-	} else if logopt != "" {
-		runLogSearch(logopt)
+	if cmds.Network != "" {
+		runNetwork(cmds.Network)
+	} else if cmds.Pubsub != "" {
+		runPubsub(cmds.Pubsub)
+	} else if cmds.System != "" {
+		runSystem(cmds.System)
+	} else if cmds.Logopt != "" {
+		runLogSearch(cmds.Logopt)
 	} else {
 		fmt.Printf("no supported options\n")
 		return

@@ -114,26 +114,6 @@ func tlsDial(isServer bool, pIP string, pport int) *websocket.Dialer {
 }
 
 
-func goRunQuery(argv0 []string) {
-	var err error
-	wsMsgCount = 0
-	wsSentBytes = 0
-	readP, writeP, err = openPipe()
-	if err == nil {
-		parserAndRun(argv0)
-		if isTCPServer {
-			return
-		}
-		closePipe(false)
-		err = websocketConn.WriteMessage(websocket.TextMessage, []byte(CloseMessage))
-		if err != nil {
-			log.Println("sent done msg error:", err)
-		}
-		log.Printf("Sent %d messages, total %d bytes to websocket\n", wsMsgCount, wsSentBytes)
-	}
-}
-
-
 func openPipe() (*os.File, *os.File, error) {
 	if socketOpen {
 		return nil, nil, fmt.Errorf("socket already opened\n")
