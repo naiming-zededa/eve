@@ -42,7 +42,7 @@ func runLogSearch(pattern string) {
 		}
 	}
 
-	if now - t1 < 10 { // search for collect
+	if now - t1 < 10 { // search for collect directory for uncompressed files
 		if querytype != "app" {
 			searchLiveLogs(pattern, now, "dev")
 		}

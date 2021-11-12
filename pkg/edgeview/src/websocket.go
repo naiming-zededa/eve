@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"strconv"
 	"time"
 
@@ -18,11 +17,10 @@ import (
 
 
 func setupWebC(hostname, token string, u url.URL, isServer bool) bool {
-	//var err error
-	//var c *websocket.Conn
 	var pport int
 	var pIP string
 	retry := 0
+	// if the device uses proxy cert, add to the container side
 	if isServer {
 		proxyIP, proxyPort, proxyPEM := getProxy(false)
 		if len(proxyPEM) > 0 {
@@ -48,7 +46,7 @@ func setupWebC(hostname, token string, u url.URL, isServer bool) bool {
 		pport = proxyPort
 		pIP = proxyIP
 	}
-	for {
+	for { // wait to be connected to the dispatcher
 		tlsDialer := tlsDial(isServer, pIP, pport)
 		c, resp, err := tlsDialer.Dial(u.String(),
 			http.Header{
@@ -68,20 +66,11 @@ func setupWebC(hostname, token string, u url.URL, isServer bool) bool {
 			break
 		}
 		retry++
-		if !isServer && retry > 2 {
+		if !isServer && retry > 1 {
 			return false
 		}
 	}
 	return true
-}
-
-func intSigStart() {
-	intSignal = make(chan os.Signal, 1)
-	signal.Notify(intSignal, os.Interrupt)
-}
-
-func intSigStop() {
-	signal.Stop(intSignal)
 }
 
 // TLS Dialer
@@ -90,6 +79,7 @@ func tlsDial(isServer bool, pIP string, pport int) *websocket.Dialer {
 		InsecureSkipVerify: true,
 	}
 
+	// attach the client certs if configured so
 	_, err1 := os.Stat(clientCertFile)
 	_, err2 := os.Stat(clientKeyFile)
 	if err1 == nil && err2 == nil {
@@ -113,7 +103,8 @@ func tlsDial(isServer bool, pIP string, pport int) *websocket.Dialer {
 	return dialer
 }
 
-
+// hijack the stdout to buffer and later send the content through
+// websocket to the requester of the info
 func openPipe() (*os.File, *os.File, error) {
 	if socketOpen {
 		return nil, nil, fmt.Errorf("socket already opened\n")

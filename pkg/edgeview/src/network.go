@@ -107,8 +107,6 @@ func runNetwork(netw string) {
 					runCmd("traceroute -4 -m 10 -q 2 "+server, false, true)
 				}
 			}
-		} else if opt == "proxy" {
-			setAndStartProxyTCP(substring, true)
 		} else if opt == "ping" {
 			runPing(intfStr, server, substring)
 		} else if opt == "tcpdump" {
@@ -121,8 +119,10 @@ func runNetwork(netw string) {
 			getFlow(substring)
 		} else if opt == "mdns" {
 			runmDNS(substring)
-		} else if opt == "tcp" {
+		} else if opt == "tcp" { // tcp and proxy are special
 			setAndStartProxyTCP(substring, false)
+		} else if opt == "proxy" {
+			setAndStartProxyTCP(substring, true)
 		} else {
 			fmt.Printf("\n not supported yet\n")
 		}

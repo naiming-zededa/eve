@@ -12,7 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-
+// all the supported options
 func initOpts() {
 	netopts = []string{
 		"acl",
@@ -186,7 +186,7 @@ func getBasics() {
 	closePipe(true)
 }
 
-
+// dynamically install package for uncommon options
 func addPackage(programName, pkgName string) error {
 	retStr, err := runCmd("which "+programName, false, false)
 	if err == nil {
@@ -231,6 +231,7 @@ func runCmd(cmd string, isEve, isPrint bool) (string, error) {
 	return retStr, err
 }
 
+// used in ssh-mode
 func remoteRun(user string, addr string, privateKey []byte, cmd string) (string, error) {
 	key, err := ssh.ParsePrivateKey(privateKey)
 	if err != nil {

@@ -193,6 +193,7 @@ func GetOutboundIP() string {
     return localAddr.IP.String()
 }
 
+// the edge-view websocket dispatcher example
 func main() {
 	reqAddrTokenEP = make(map[string]map[string]endPoint)
 	debugPtr := flag.Bool("debug", false, "more debug info")

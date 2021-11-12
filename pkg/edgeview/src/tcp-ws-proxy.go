@@ -25,12 +25,13 @@ func (endpoint *Endpt) String() string {
 	return fmt.Sprintf("%s:%d", endpoint.Host, endpoint.Port)
 }
 
-// client TCP service to be forwarded
+// client TCP service to be forwarded, starts from 9001
 var clientTCPEndpoint = Endpt{
 	Host: "0.0.0.0",
 	Port: 9000,
 }
 
+// internal proxy server endpoint on device side
 var proxyServerEndpoint = Endpt{
 	Host: "localhost",
 	Port: 8888,
@@ -40,6 +41,10 @@ type tcpConnRWMap struct {
 	m map[int]tcpconn
 }
 
+const (
+	TCPMaxMappingNUM int = 5
+)
+
 var tcpMapMutex sync.Mutex
 var wssWrMutex  sync.Mutex
 var tcpConnM []tcpConnRWMap
@@ -47,6 +52,9 @@ var tcpConnM []tcpConnRWMap
 var tcpServerRecvTime time.Time   // updated by all the tcp sessions
 var tcpTimeMutex      sync.Mutex
 
+// Virtual TCP Port Mapping service
+
+// tcp mapping on the client end
 func tcpClientsLaunch(tcpclientCnt int, remotePorts map[int]int) {
 	tcpConnM = make([]tcpConnRWMap, tcpclientCnt)
 	idx := 0
@@ -181,7 +189,7 @@ func clientTCPtunnel(here net.Conn, idx, chNum int, rport int) error {
 	return nil
 }
 
-// TCP server side
+// TCP mapping on server side
 func setAndStartProxyTCP(opt string, isProxy bool) {
 	var ipAddrPort []string
 	var proxySvr *http.Server
@@ -257,6 +265,8 @@ func setAndStartProxyTCP(opt string, isProxy bool) {
 	}
 }
 
+// each mapping of port with 'idx', and each flow within the mapping in the 'ChnNum'
+// the 'idx' is fixed after setup, but flow of 'Chn' is dynamic
 func startTCPServer(idx int, ipAddrPort string, isProxy bool, tcpServerDone chan struct{}) {
 	tcpConnM[idx].m = make(map[int]tcpconn)
 	cleanMapTimer := time.NewTicker(3 * time.Minute)
@@ -411,6 +421,7 @@ func tcpTransfer(url string, wssMsg tcpData, idx int, isProxy bool) {
 	}
 }
 
+// Virtual forward proxy server for handling the https service
 func proxyServer(done chan struct{}) *http.Server {
 	server := &http.Server{
 		Addr: proxyServerEndpoint.String(),

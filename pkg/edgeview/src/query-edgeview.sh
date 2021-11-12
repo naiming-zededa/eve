@@ -1,5 +1,5 @@
 #!/bin/sh
-# in this query-edgeview.sh script:
+# in this query-edgeview.sh example script:
 # - when ssh-mode is used, the ssh-key is mounted from ~/tmp/dev-ssh-key or your own location
 # - when token is used, the websocket server endpoint "ip-addr:port" needs to be setup in $WSSADDRPORT environment
 # - port mapping is optional for some query options

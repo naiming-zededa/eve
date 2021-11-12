@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -165,10 +166,6 @@ func main() {
 	ptoken := flag.String("token", "", "session token")
 	pDebug := flag.Bool("debug", false, "log more in debug")
 	flag.Parse()
-	//log.SetFlags(0)
-	//formatter := log.JSONFormatter{
-	//	TimestampFormat: time.RFC3339Nano,
-	//}
 	log.SetFormatter(&log.TextFormatter{})
 
 	if *pServer {
@@ -178,7 +175,7 @@ func main() {
 		directQuery = true
 	}
 
-	if directQuery {
+	if directQuery { // ssh-mode
 		var err error
 		sshprivkey, err = ioutil.ReadFile("/ssh-private-key")
 		if err != nil {
@@ -264,6 +261,7 @@ func main() {
 		return
 	}
 
+	// query option syntax checks
 	if pqueryopt != "" {
 		if strings.HasPrefix(pqueryopt, "log/") {
 			logs := strings.SplitN(pqueryopt, "log/", 2)
@@ -297,8 +295,8 @@ func main() {
 			var params []string
 			if strings.Contains(tcpparam, "/") {
 				params = strings.Split(tcpparam, "/")
-				if tcpclientCnt > 5 {
-					log.Println("tcp maximum mapping is 5")
+				if tcpclientCnt > TCPMaxMappingNUM {
+					log.Println("tcp maximum mapping is: ", TCPMaxMappingNUM)
 					return
 				}
 			} else {
@@ -367,7 +365,7 @@ func main() {
 
 	intSigStart()
 
-	urlSt := url.URL{Scheme: "wss", Host: *wsAddr, Path: "/edge-view"}
+	urlWSS := url.URL{Scheme: "wss", Host: *wsAddr, Path: "/edge-view"}
 
 	var done chan struct{}
 	hostname := ""
@@ -377,8 +375,8 @@ func main() {
 		} else {
 			hostname = getHostname()
 		}
-		fmt.Printf("%s connecting to %s\n", hostname, urlSt.String())
-		ok := setupWebC(hostname, *ptoken, urlSt, runOnServer)
+		fmt.Printf("%s connecting to %s\n", hostname, urlWSS.String())
+		ok := setupWebC(hostname, *ptoken, urlWSS, runOnServer)
 		if !ok {
 			return
 		}
@@ -417,7 +415,7 @@ func main() {
 						websocketConn.Close()
 						tcpRetryWait = true
 						time.Sleep(100 * time.Millisecond)
-						ok := setupWebC(hostname, *ptoken, urlSt, true)
+						ok := setupWebC(hostname, *ptoken, urlWSS, true)
 						tcpRetryWait = false
 						if ok {
 							continue
@@ -425,7 +423,7 @@ func main() {
 					}
 					return
 				}
-				// remove the token to be printed
+
 				var recvCmds cmdOpt
 				var isJson bool
 				if mtype == websocket.TextMessage {
@@ -470,11 +468,12 @@ func main() {
 					myChan.msgChan <- msg
 					continue
 				}
+				// process client query
 				go goRunQuery(recvCmds)
 			}
 		}()
 	} else { // query client in websocket mode
-		// send the query command to websocket server
+		// send the query command to websocket/server
 		jdata, err := json.Marshal(queryCmds)
 		if err != nil {
 			log.Println("json Marshal queryCmds error", err)
@@ -497,7 +496,7 @@ func main() {
 							websocketConn.Close()
 							tcpRetryWait = true
 							time.Sleep(100 * time.Millisecond)
-							ok := setupWebC(hostname, *ptoken, urlSt, false)
+							ok := setupWebC(hostname, *ptoken, urlWSS, false)
 							tcpRetryWait = false
 							if ok {
 								continue
@@ -558,6 +557,7 @@ func main() {
 						defer fstatus.f.Close()
 					}
 				} else {
+					// print query replies
 					fmt.Printf("%s\n", message)
 				}
 			}
@@ -581,6 +581,7 @@ func goRunQuery(cmds cmdOpt) {
 	var err error
 	wsMsgCount = 0
 	wsSentBytes = 0
+	// save output to buffer
 	readP, writeP, err = openPipe()
 	if err == nil {
 		parserAndRun(cmds)
@@ -624,4 +625,9 @@ func parserAndRun(cmds cmdOpt) {
 		fmt.Printf("no supported options\n")
 		return
 	}
+}
+
+func intSigStart() {
+	intSignal = make(chan os.Signal, 1)
+	signal.Notify(intSignal, os.Interrupt)
 }

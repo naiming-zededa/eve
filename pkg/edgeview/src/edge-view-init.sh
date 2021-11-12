@@ -2,7 +2,7 @@
 
 while true;
 do
-  sleep 5
+  sleep 10
   PID=$(pgrep /usr/bin/edge-view)
   if [ -z "$PID" ]; then
     if [ -f /run/edgeview/edge-view-token ]; then
