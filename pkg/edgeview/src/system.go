@@ -431,20 +431,8 @@ func printCert(certdata []byte) {
 
 func runConfigItems() {
 	printColor(" - global settings:", CYAN)
-	// make a fake path. edge-view container does not have this mounted
-	// getConfigItems() reads this file
-	fakedir := "/hostfs/sys/fs/cgroup/memory/eve"
-	if _, err := os.Stat(fakedir); os.IsNotExist(err) {
-		os.MkdirAll(fakedir, 0664)
-	}
-	fakefile := fakedir + "/memory.soft_limit_in_bytes"
-	if _, err := os.Stat(fakefile); os.IsNotExist(err) {
-		ff, err := os.Create(fakedir+"/memory.soft_limit_in_bytes")
-		if err == nil {
-			ff.WriteString("786432000")
-			ff.Close()
-		}
-	}
+
+	// /hostfs is need here to read the memory limit for eve item
 	configitems := getConfigItems()
 
 	configMap := types.NewConfigItemSpecMap()
