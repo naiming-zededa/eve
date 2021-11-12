@@ -9,7 +9,7 @@ COPY go.sum /edge-view/.
 WORKDIR /edge-view
 
 RUN go build -o edge-view edge-view.go tcp-ws-proxy.go basics.go \
-  websocket.go system.go network.go pubsub.go log-search.go
+ websocket.go system.go network.go pubsub.go log-search.go copyfile.go
 RUN strip edge-view
 RUN cp edge-view /out/usr/bin
 RUN cp spec.sh /out/usr/bin
