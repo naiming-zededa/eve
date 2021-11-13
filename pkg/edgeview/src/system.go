@@ -49,7 +49,7 @@ func runSystem(sysOpt string) {
 		} else if strings.HasPrefix(opt, "pci") {
 			runPCI()
 		} else if strings.HasPrefix(opt, "model") {
-			runCmd("/usr/bin/spec.sh", false, true)
+			getModel()
 		} else if strings.HasPrefix(opt, "hw") {
 			getHW()
 		} else {
@@ -266,9 +266,13 @@ func getDataStore() {
 	}
 }
 
+func getModel() {
+	printTitle("Model:", CYAN, false)
+	runCmd("spec.sh", false, true)
+}
+
 func getHW() {
 	printTitle("HW:", CYAN, false)
-	addPackage("lshw", "lshw")
 	runCmd("lshw -json", false, true)
 }
 

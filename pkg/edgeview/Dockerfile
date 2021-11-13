@@ -12,12 +12,13 @@ RUN go build -o edge-view edge-view.go tcp-ws-proxy.go basics.go \
  websocket.go system.go network.go pubsub.go log-search.go copyfile.go
 RUN strip edge-view
 RUN cp edge-view /out/usr/bin
-RUN cp spec.sh /out/usr/bin
 RUN cp edge-view-init.sh /out/usr/bin
 
 FROM scratch
 COPY --from=build /out/ /
 RUN mkdir -p /tmp
+
+ENV PATH="/run/debug/usr/bin:${PATH}"
 
 WORKDIR /
 ENTRYPOINT ["/usr/bin/edge-view-init.sh"]

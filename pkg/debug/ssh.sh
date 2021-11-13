@@ -14,4 +14,8 @@ else
     cp /persist/.sshkeys/ssh_host_*_key /etc/ssh/.
 fi
 
+mkdir -p /run/debug/usr/bin
+cp /usr/bin/lshw /run/debug/usr/bin/.
+cp /usr/bin/spec.sh /run/debug/usr/bin/.
+
 exec /usr/sbin/sshd -D -e
