@@ -66,6 +66,7 @@ const (
 	FileCopyDir       = "/download/"
 	clientCertFile    = "/client.pem"
 	clientKeyFile     = "/client.key"
+	EdgeViewVersion   = "0.80"
 )
 
 const (
@@ -81,6 +82,7 @@ const (
 )
 
 type cmdOpt struct {
+	Version      string     `json:"version"`
 	DevIPAddr    string     `json:"devIPAddr"`
 	Network      string     `json:"network"`
 	System       string     `json:"system"`
@@ -385,6 +387,7 @@ func main() {
 	}
 
 	queryCmds := cmdOpt{
+		Version:    EdgeViewVersion,
 		DevIPAddr:  *pdevip,
 		Network:    pnetopt,
 		System:     psysopt,

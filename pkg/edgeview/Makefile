@@ -5,8 +5,7 @@ edge-view-query:
 	docker build -f Dockerfile.query -t edge-view-query .
 
 #
-# build the websocket server, should compile on a linux machine
+# build the websocket server/dispatcher, should compile on a linux machine
 #
 wss-server:
-	go build src/wss-server.go
-
+	go build dispatcher/wss-server.go

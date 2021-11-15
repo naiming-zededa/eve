@@ -174,6 +174,7 @@ func getBasics() {
 	if err == nil {
 		fmt.Printf("  EVE-OS release %s", retStr)
 	}
+	fmt.Printf("  Edge-View Ver: %s\n", EdgeViewVersion)
 	retStr, err = runCmd("uptime", false, false)
 	if err == nil {
 		ret1 := strings.Split(retStr, " load")
