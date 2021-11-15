@@ -434,7 +434,9 @@ func main() {
 					if err != nil {
 						log.Printf("recv not json msg: %s\n", message)
 					} else {
-						log.Printf("recv: %+v", recvCmds)
+						printCmds := recvCmds
+						printCmds.SessToken = ""
+						log.Printf("recv: %+v", printCmds)
 						isJson = true
 					}
 					if !isJson && (strings.Contains(string(message), "no device online") ||

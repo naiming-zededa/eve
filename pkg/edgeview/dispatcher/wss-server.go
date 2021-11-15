@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -196,15 +199,57 @@ func GetOutboundIP() string {
 // the edge-view websocket dispatcher example
 func main() {
 	reqAddrTokenEP = make(map[string]map[string]endPoint)
+	helpPtr := flag.Bool("h", false, "help string")
 	debugPtr := flag.Bool("debug", false, "more debug info")
+	portPtr := flag.String("port", "", "websocket listen port")
+	certFilePtr := flag.String("cert", "", "server certificate pem file")
+	keyFilePtr := flag.String("key", "", "server key pem file")
+	clientcertFilePtr := flag.String("clientcert", "", "client certificate pem file")
 	flag.Parse()
+
+	if *helpPtr {
+		fmt.Println(" -h                    this help")
+		fmt.Println(" -port <port number>   mandatory, tcp port number")
+		fmt.Println(" -cert <path>          mandatory, server certificate path in PEM format")
+		fmt.Println(" -key <path>           mandatory, server key file path in PEM format")
+		fmt.Println(" -debug                optional, turn on more debug")
+		fmt.Println(" -clientcert <path>    optional, client certificate path in PEM format")
+		return
+	}
+
 	if *debugPtr {
 		needDebug = true
 	}
+	if *portPtr == "" {
+		fmt.Println("port needs to be specified")
+		return
+	}
+	if *certFilePtr == "" || *keyFilePtr == "" {
+		fmt.Println("server cert and key files need to be specified")
+		return
+	}
+	clientCertPath := *clientcertFilePtr
+	tlsConfig := &tls.Config{
+	}
+	if clientCertPath != "" {
+		caCert, err := ioutil.ReadFile(clientCertPath)
+		if err != nil {
+			fmt.Println("can not read cert file", clientCertPath)
+			return
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+		tlsConfig.ClientCAs = caCertPool
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	localIP := GetOutboundIP()
+	server := &http.Server{
+		Addr:      localIP+":"+*portPtr,
+		TLSConfig: tlsConfig,
+	}
 
     http.HandleFunc("/edge-view", socketHandler)
-	localIP := GetOutboundIP()
-	fmt.Printf("Listen TLS on: %s:4000\n", localIP)
-    log.Fatal(http.ListenAndServeTLS(localIP+":4000",
-		"host-ubuntu.crt", "host-ubuntu.key", nil))
+	fmt.Printf("Listen TLS on: %s:%s\n", localIP, *portPtr)
+    log.Fatal(server.ListenAndServeTLS(*certFilePtr, *keyFilePtr))
 }

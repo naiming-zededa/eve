@@ -36,6 +36,9 @@ var proxyServerEndpoint = Endpt{
 	Port: 8888,
 }
 
+// tcpConnRWMap is fixed port-mapping, within it can have multiple flows each
+// has it's tcpconn. In other words, the tcpConnRWMap defines the destination
+// endpoint such as "10.1.0.4:8080", and it can have multiple source endpoints
 type tcpConnRWMap struct {
 	m map[int]tcpconn
 }
