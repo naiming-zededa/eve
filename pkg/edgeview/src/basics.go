@@ -24,7 +24,6 @@ func initOpts() {
 		"mdns",
 		"nslookup",
 		"ping",
-		"proxy",
 		"route",
 		"socket",
 		"speed",
@@ -347,8 +346,6 @@ func printHelp(opt string) {
 			helpOn("ping[/<ip or name>]", "ping to 8.8.8.8 from all the UP interfaces or ping a specific address")
 			helpExample("ping", "ping to 8.8.8.8 from each source IP address of the intefaces", true)
 			helpExample("ping/192.168.1.1", "ping the address of 192.168.1.1", false)
-		case "proxy":
-			helpOn("proxy", "https proxy service by pointing your browser to the proxy server address:port printed")
 		case "route":
 			helpOn("route", "display all the ip rule and their ip table entries")
 		case "socket":
@@ -357,9 +354,10 @@ func printHelp(opt string) {
 			helpOn("spped[/intf-name]", "run speed test and report the download and upload speed")
 			helpExample("speed/wlan0", "run speed test on interface wlan0", true)
 		case "tcp":
-			helpOn("tcp/ip-address:port[/ip-address:port...]", "tcp connection to the ip addresses for services, local mapping ports 9001 and above")
+			helpOn("tcp/ip-address:port[/ip-address:port...][/proxy]", "tcp connection to the ip addresses for services, local mapping ports 9001 and above")
 			helpExample("tcp/192.168.1.1:8080", "points your browser to the locally listening port and http browsing 192.168.1.1:8080", true)
 			helpExample("tcp/10.1.0.2:80/10.1.0.2:8081", "points your browser to the locally listening ports and http browsing remote 10.1.0.2 both 80 and 8081 ports", false)
+			helpExample("tcp/proxy/localhost:5903", "https proxy to locally listening ports and vnc viewer to #3 port on device", false)
 		case "tcpdump":
 			helpOn("tcpdump/intf-name/[options]", "tcpdump on the interface, can specify duration with -time, default is 60 sec")
 			helpExample("tcpdump/eth0/", "run tcpdump on eth0 with default 60 seconds or maximum of 100 entries", true)

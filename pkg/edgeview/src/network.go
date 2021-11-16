@@ -120,9 +120,7 @@ func runNetwork(netw string) {
 		} else if opt == "mdns" {
 			runmDNS(substring)
 		} else if opt == "tcp" { // tcp and proxy are special
-			setAndStartProxyTCP(substring, false)
-		} else if opt == "proxy" {
-			setAndStartProxyTCP(substring, true)
+			setAndStartProxyTCP(substring)
 		} else {
 			fmt.Printf("\n not supported yet\n")
 		}

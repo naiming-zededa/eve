@@ -192,32 +192,42 @@ func clientTCPtunnel(here net.Conn, idx, chNum int, rport int) error {
 }
 
 // TCP mapping on server side
-func setAndStartProxyTCP(opt string, isProxy bool) {
+func setAndStartProxyTCP(opt string) {
 	var ipAddrPort []string
 	var proxySvr *http.Server
 	proxyServerDone := make(chan struct{})
 
 	mappingCnt := 1
 	ipAddrPort = make([]string, mappingCnt)
-	if isProxy {
-		proxySvr = proxyServer(proxyServerDone)
-	} else if strings.Contains(opt, "/") {
+
+	var hasProxy bool
+	if strings.Contains(opt, "/") {
 		params := strings.Split(opt, "/")
 		mappingCnt = len(params)
 		ipAddrPort = make([]string, mappingCnt)
 		for i, ipport := range params {
-			if !strings.Contains(opt, ":") {
-				fmt.Printf("tcp option needs ipaddress:port format\n")
+			if ipport == "proxy" {
+				hasProxy = true
+			}
+			if !strings.Contains(opt, ":") && ipport != "proxy" {
+				fmt.Printf("tcp option needs ipaddress:port format, or is 'proxy'\n")
 				return
 			}
 			ipAddrPort[i] = ipport
 		}
 	} else {
-		if !strings.Contains(opt, ":") {
-			fmt.Printf("tcp option needs ipaddress:port format\n")
+		if opt == "proxy" {
+			hasProxy = true
+		}
+		if !strings.Contains(opt, ":") && opt != "proxy" {
+			fmt.Printf("tcp option needs ipaddress:port format, or is 'proxy'\n")
 			return
 		}
 		ipAddrPort[0] = opt
+	}
+
+	if hasProxy {
+		proxySvr = proxyServer(proxyServerDone)
 	}
 
 	// send tcp-setup-ok to client side
@@ -233,7 +243,7 @@ func setAndStartProxyTCP(opt string, isProxy bool) {
 	serverDone := make([]chan struct{}, mappingCnt)
 	for {
 		serverDone[idx] = make(chan struct{})
-		go startTCPServer(idx, ipAddrPort[idx], isProxy, serverDone[idx])
+		go startTCPServer(idx, ipAddrPort[idx], serverDone[idx])
 		idx++
 		if idx >= mappingCnt {
 			break
@@ -248,7 +258,7 @@ func setAndStartProxyTCP(opt string, isProxy bool) {
 					close(d)
 				}
 			}
-			if isProxy && proxySvr != nil {
+			if hasProxy && proxySvr != nil {
 				fmt.Printf("TCP exist. calling proxSvr.Close\n")
 				proxySvr.Close()
 			}
@@ -269,7 +279,7 @@ func setAndStartProxyTCP(opt string, isProxy bool) {
 
 // each mapping of port with 'idx', and each flow within the mapping in the 'ChnNum'
 // the 'idx' is fixed after setup, but flow of 'Chn' is dynamic
-func startTCPServer(idx int, ipAddrPort string, isProxy bool, tcpServerDone chan struct{}) {
+func startTCPServer(idx int, ipAddrPort string, tcpServerDone chan struct{}) {
 	tcpConnM[idx].m = make(map[int]tcpconn)
 	cleanMapTimer := time.NewTicker(3 * time.Minute)
 	tcpDataChn[idx] = make(chan tcpData)
@@ -284,7 +294,7 @@ func startTCPServer(idx int, ipAddrPort string, isProxy bool, tcpServerDone chan
 			} else {
 				log.Debugf("tcp proxy re-launch channel(%d): %d\n", idx, wssMsg.ChanNum)
 			}
-			go tcpTransfer(ipAddrPort, wssMsg, idx, isProxy)
+			go tcpTransfer(ipAddrPort, wssMsg, idx)
 		case <- tcpServerDone:
 			fmt.Printf("tcp server done(%d). exit\n", idx)
 			isTCPServer = false
@@ -298,7 +308,7 @@ func startTCPServer(idx int, ipAddrPort string, isProxy bool, tcpServerDone chan
 	}
 }
 
-func tcpTransfer(url string, wssMsg tcpData, idx int, isProxy bool) {
+func tcpTransfer(url string, wssMsg tcpData, idx int) {
 	var conn net.Conn
 	var err error
 	var proxyStr string
@@ -307,7 +317,7 @@ func tcpTransfer(url string, wssMsg tcpData, idx int, isProxy bool) {
 	chNum := int(wssMsg.ChanNum)
 	done := make(chan struct{})
 	d := net.Dialer{Timeout: 30 * time.Second}
-	if isProxy {
+	if url == "proxy" {
 		conn, err = d.Dial("tcp", proxyServerEndpoint.String())
 		proxyStr = "(proxy)"
 	} else {

@@ -66,7 +66,7 @@ const (
 	FileCopyDir       = "/download/"
 	clientCertFile    = "/client.pem"
 	clientKeyFile     = "/client.key"
-	EdgeViewVersion   = "0.80"
+	EdgeViewVersion   = "0.8.0"
 )
 
 const (
@@ -314,6 +314,8 @@ func main() {
 						portNum, _ := strconv.Atoi(portStr)
 						remotePorts[i] = portNum
 					}
+				} else if pStr == "proxy" {
+					remotePorts[i] = 0
 				}
 			}
 			if len(remotePorts) != tcpclientCnt {
@@ -327,14 +329,6 @@ func main() {
 				fmt.Printf("  0.0.0.0:%d -> %s\n", 9001 + i, p)
 			}
 			fmt.Printf("%s\n", RESET)
-			pnetopt = pqueryopt
-		} else if strings.HasPrefix(pqueryopt, "proxy") {
-			if directQuery {
-				fmt.Printf("proxy is not supported in ssh mode\n")
-				return
-			}
-			isTCPClient = true
-			fmt.Printf("proxy server locally listening on: 0.0.0.0:9001\n")
 			pnetopt = pqueryopt
 		} else if strings.HasPrefix(pqueryopt, "cp/") {
 			if directQuery {
