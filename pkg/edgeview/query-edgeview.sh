@@ -20,4 +20,4 @@ if [ -f $HOME/tmp/dev-ssh-key ]; then
 else
     MOUNTSSHKEY=""
 fi
-docker run -it --rm -h=`hostname` $MOUNTSSHKEY -p 9001-9005:9001-9005 -v $HOME/tmp/download:/download $MYDOCKERREOP/edge-view-query $WSS "$@"
+docker run -it --rm -h=`hostname` $MOUNTSSHKEY -p 9001-9005:9001-9005 -v $HOME/tmp/download:/download ${MYDOCKERREOP}/edge-view-query $WSS "$@"
