@@ -64,9 +64,9 @@ const (
 	TCPDONEMessage    = "+++tcpDone+++"
 	TCPSetupOKMessage = "+++tcpSetupOK+++"
 	FileCopyDir       = "/download/"
-	clientCertFile    = "/certs/client.pem"
-	clientKeyFile     = "/certs/client.key"
-	serverCertFile    = "/certs/wss-server-cert.pem"
+	clientCertFile    = "/certs/edgeview-client.pem"
+	clientKeyFile     = "/certs/edgeview-client.key"
+	serverCertFile    = "/certs/wss-server-cacert.pem"
 	EdgeViewVersion   = "0.8.0"
 )
 

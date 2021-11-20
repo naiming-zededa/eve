@@ -31,6 +31,7 @@ func runLogSearch(pattern string) {
 	if extralog > 0 {
 		op = " | grep -A " + strconv.Itoa(extralog) + " -B " + strconv.Itoa(extralog) + " -E "
 	}
+	var printIdx int
 	for _, gf := range gfiles {
 		cmd := "zcat " + gf.filepath + op + pattern
 		olines, err := runCmd(cmd, true, false)
@@ -38,16 +39,16 @@ func runLogSearch(pattern string) {
 			bout := fmt.Sprintf("\n %s, -- %v --\n", gf.filepath, time.Unix(gf.filesec, 0).Format(time.RFC3339))
 			printColor(bout, RED)
 
-			colorMatch(olines, pattern)
+			colorMatch(olines, pattern, &printIdx)
 		}
 	}
 
 	if now - t1 < 10 { // search for collect directory for uncompressed files
 		if querytype != "app" {
-			searchLiveLogs(pattern, now, "dev")
+			searchLiveLogs(pattern, now, "dev", &printIdx)
 		}
 		if querytype != "dev" {
-			searchLiveLogs(pattern, now, "app")
+			searchLiveLogs(pattern, now, "app", &printIdx)
 		}
 	}
 	fmt.Println()
@@ -121,7 +122,7 @@ func walkLogDirs(t1, t2, now int64) []logfiletime {
 	return getfiles
 }
 
-func searchLiveLogs(pattern string, now int64, typeStr string) {
+func searchLiveLogs(pattern string, now int64, typeStr string, idx *int) {
 	retStr, err := runCmd("ls /persist/newlog/collect/", false, false)
 	if err != nil {
 		return
@@ -135,21 +136,21 @@ func searchLiveLogs(pattern string, now int64, typeStr string) {
 			continue
 		}
 		file := "/persist/newlog/collect/" + l
-		searchCurrentLogs(pattern, file, typeStr, now)
+		searchCurrentLogs(pattern, file, typeStr, now, idx)
 	}
 }
 
-func searchCurrentLogs(pattern, path, typeStr string, now int64) {
+func searchCurrentLogs(pattern, path, typeStr string, now int64, idx *int) {
 	retStr, err := runCmd("grep " + pattern + " " + path, false, false)
 	if err == nil && len(retStr) > 0 {
 		bout := fmt.Sprintf("\n current " + typeStr + " log, -- %v --\n", time.Unix(now, 0).Format(time.RFC3339))
 		printColor(bout, RED)
 
-		colorMatch(retStr, pattern)
+		colorMatch(retStr, pattern, idx)
 	}
 }
 
-func colorMatch(olines, pattern string) {
+func colorMatch(olines, pattern string, idx *int) {
 	lines := strings.Split(olines, "\n")
 	if strings.Contains(pattern, "|") {
 		pat := strings.Split(pattern, "|")
@@ -168,16 +169,17 @@ func colorMatch(olines, pattern string) {
 			var bufStr string
 			json.Unmarshal([]byte(l), &entry)
 			err := json.Unmarshal([]byte(entry.Content), &content)
+			*idx++
 			if err != nil {
 				var tlog string
 				if entry.Timestamp != nil {
 					tlog = time.Unix(entry.Timestamp.Seconds, 0).Format(time.RFC3339)
 				}
-				bufStr = fmt.Sprintf(" -(%d) %s, %s, %s, %v(%d)", i+1, strings.TrimSuffix(entry.Content, "\n"), entry.Severity, entry.Source,
+				bufStr = fmt.Sprintf(" -(%d) %s, %s, %s, %v(%d)", *idx, strings.TrimSuffix(entry.Content, "\n"), entry.Severity, entry.Source,
 					tlog, entry.Msgid)
 			} else {
 				bufStr = fmt.Sprintf(" -(%d) %s, %s, %s, %s, %s, %s, %s(%d)",
-					i+1, content.Msg, entry.Severity, entry.Filename, entry.Function, content.Objtype,
+					*idx, content.Msg, entry.Severity, entry.Filename, entry.Function, content.Objtype,
 					content.Source, content.Time, entry.Msgid)
 			}
 			buff := strings.ReplaceAll(bufStr, pattern, "\033[0;93m"+pattern+"\033[0m")
