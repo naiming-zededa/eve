@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -11,18 +12,18 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Virtual forward proxy server for handling the https service
-func proxyServer(done chan struct{}) *http.Server {
+// Virtual forward proxy server for handling the https service on site
+func proxyServer(done chan struct{}, dnsIP string) *http.Server {
 	server := &http.Server{
 		Addr: proxyServerEndpoint.String(),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodConnect {
-				handleTunneling(w, r)
+				handleTunneling(w, r, dnsIP)
 			} else {
 				handleHTTP(w, r)
 			}
 		}),
-		// Disable HTTP/2.
+
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
 
@@ -40,8 +41,26 @@ func proxyServer(done chan struct{}) *http.Server {
 	return server
 }
 
-func handleTunneling(w http.ResponseWriter, r *http.Request) {
-	dest_conn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
+func handleTunneling(w http.ResponseWriter, r *http.Request, dnsIP string) {
+	var remoteHost string
+	remoteHost = r.Host
+	var dest_conn net.Conn
+	var err error
+	if dnsIP != "" { // this is probably needed for internal/vpn https service with private DNS server
+		r := &net.Resolver{
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{
+					Timeout: time.Millisecond * time.Duration(10000),
+				}
+				return d.DialContext(ctx, network, dnsIP+":53")
+			},
+		}
+		d := net.Dialer{Resolver: r, Timeout: 10*time.Second}
+		log.Debugf("handleTunneling: custom dialer")
+		dest_conn, err = d.Dial("tcp", remoteHost)
+	} else {
+		dest_conn, err = net.DialTimeout("tcp", remoteHost, 10*time.Second)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return

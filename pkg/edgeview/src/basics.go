@@ -354,10 +354,11 @@ func printHelp(opt string) {
 			helpOn("spped[/intf-name]", "run speed test and report the download and upload speed")
 			helpExample("speed/wlan0", "run speed test on interface wlan0", true)
 		case "tcp":
-			helpOn("tcp/ip-address:port[/ip-address:port...][/proxy]", "tcp connection to the ip addresses for services, local mapping ports 9001 and above")
+			helpOn("tcp/ip-address:port[/ip-address:port...][/proxy[@ip-addr]]", "tcp connection to the ip addresses for services, local mapping ports 9001 and above")
 			helpExample("tcp/192.168.1.1:8080", "points your browser to the locally listening port and http browsing 192.168.1.1:8080", true)
 			helpExample("tcp/10.1.0.2:80/10.1.0.2:8081", "points your browser to the locally listening ports and http browsing remote 10.1.0.2 both 80 and 8081 ports", false)
 			helpExample("tcp/proxy/localhost:5903", "https proxy to locally listening ports and vnc viewer to #3 port on device", false)
+			helpExample("tcp/proxy@10.1.2.3", "https proxy and specify the address of DNS name server for URL lookup", false)
 		case "tcpdump":
 			helpOn("tcpdump/intf-name/[options]", "tcpdump on the interface, can specify duration with -time, default is 60 sec")
 			helpExample("tcpdump/eth0/", "run tcpdump on eth0 with default 60 seconds or maximum of 100 entries", true)

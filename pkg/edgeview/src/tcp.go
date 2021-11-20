@@ -201,25 +201,22 @@ func setAndStartProxyTCP(opt string) {
 	ipAddrPort = make([]string, mappingCnt)
 
 	var hasProxy bool
+	var proxyDNSIP string
 	if strings.Contains(opt, "/") {
 		params := strings.Split(opt, "/")
 		mappingCnt = len(params)
 		ipAddrPort = make([]string, mappingCnt)
 		for i, ipport := range params {
-			if ipport == "proxy" {
-				hasProxy = true
-			}
-			if !strings.Contains(opt, ":") && ipport != "proxy" {
+			hasProxy, proxyDNSIP = getProxyOpt(ipport)
+			if !strings.Contains(opt, ":") && !hasProxy {
 				fmt.Printf("tcp option needs ipaddress:port format, or is 'proxy'\n")
 				return
 			}
 			ipAddrPort[i] = ipport
 		}
 	} else {
-		if opt == "proxy" {
-			hasProxy = true
-		}
-		if !strings.Contains(opt, ":") && opt != "proxy" {
+		hasProxy, proxyDNSIP = getProxyOpt(opt)
+		if !strings.Contains(opt, ":") && !hasProxy {
 			fmt.Printf("tcp option needs ipaddress:port format, or is 'proxy'\n")
 			return
 		}
@@ -227,7 +224,7 @@ func setAndStartProxyTCP(opt string) {
 	}
 
 	if hasProxy {
-		proxySvr = proxyServer(proxyServerDone)
+		proxySvr = proxyServer(proxyServerDone, proxyDNSIP)
 	}
 
 	// send tcp-setup-ok to client side
@@ -284,15 +281,15 @@ func startTCPServer(idx int, ipAddrPort string, tcpServerDone chan struct{}) {
 	cleanMapTimer := time.NewTicker(3 * time.Minute)
 	tcpDataChn[idx] = make(chan tcpData)
 
-	log.Debugf("tcp server(%d) proxy starts to server %s, waiting for first client packet\n", idx, ipAddrPort)
-	var proxyluanchCnt int
+	log.Debugf("tcp server(%d) starts to server %s, waiting for first client packet\n", idx, ipAddrPort)
+	var tcpluanchCnt int
 	for {
 		select {
 		case wssMsg := <- tcpDataChn[idx]:
-			if int(wssMsg.ChanNum) > proxyluanchCnt {
-				proxyluanchCnt++
+			if int(wssMsg.ChanNum) > tcpluanchCnt {
+				tcpluanchCnt++
 			} else {
-				log.Debugf("tcp proxy re-launch channel(%d): %d\n", idx, wssMsg.ChanNum)
+				log.Debugf("tcp re-launch channel(%d): %d\n", idx, wssMsg.ChanNum)
 			}
 			go tcpTransfer(ipAddrPort, wssMsg, idx)
 		case <- tcpServerDone:
@@ -317,7 +314,7 @@ func tcpTransfer(url string, wssMsg tcpData, idx int) {
 	chNum := int(wssMsg.ChanNum)
 	done := make(chan struct{})
 	d := net.Dialer{Timeout: 30 * time.Second}
-	if url == "proxy" {
+	if strings.Contains(url, "proxy") {
 		conn, err = d.Dial("tcp", proxyServerEndpoint.String())
 		proxyStr = "(proxy)"
 	} else {
@@ -555,4 +552,19 @@ func tcpClientSendDone() {
 	websocketConn.WriteMessage(websocket.TextMessage, []byte(TCPDONEMessage))
 	websocketConn.WriteMessage(websocket.CloseMessage, []byte{})
 	wssWrMutex.Unlock()
+}
+
+func getProxyOpt(opt string) (bool, string) {
+	var proxyDNSIP string
+	var hasProxy bool
+	if strings.HasPrefix(opt, "proxy") {
+		hasProxy = true
+		if strings.Contains(opt, "proxy@") {
+			strs := strings.Split(opt, "proxy@")
+			if len(strs) == 2 {
+				proxyDNSIP = strs[1]
+			}
+		}
+	}
+	return hasProxy, proxyDNSIP
 }

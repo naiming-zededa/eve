@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -47,7 +50,10 @@ func setupWebC(hostname, token string, u url.URL, isServer bool) bool {
 		pIP = proxyIP
 	}
 	for { // wait to be connected to the dispatcher
-		tlsDialer := tlsDial(isServer, pIP, pport)
+		tlsDialer, err := tlsDial(isServer, pIP, pport)
+		if err != nil {
+			return false
+		}
 		c, resp, err := tlsDialer.Dial(u.String(),
 			http.Header{
 				"X-Session-Token": []string{token},
@@ -74,9 +80,27 @@ func setupWebC(hostname, token string, u url.URL, isServer bool) bool {
 }
 
 // TLS Dialer
-func tlsDial(isServer bool, pIP string, pport int) *websocket.Dialer {
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
+func tlsDial(isServer bool, pIP string, pport int) (*websocket.Dialer, error) {
+	tlsConfig := &tls.Config{}
+
+	// if wss dispatcher server certificate file is mounted
+	_, err0 := os.Stat(serverCertFile)
+	if err0 == nil {
+		caCertPool := x509.NewCertPool()
+		caCert, err := ioutil.ReadFile(serverCertFile)
+		if err != nil {
+			log.Errorf("can not read server cert file, %v\n", err)
+			return nil, err
+		}
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			errStr := fmt.Sprintf("append cert failed")
+			log.Errorf("%s\n", errStr)
+			return nil, errors.New(errStr)
+		}
+		tlsConfig.RootCAs = caCertPool
+		fmt.Printf("wss server cert appended to TLS\n")
+	} else {
+		tlsConfig.InsecureSkipVerify = true
 	}
 
 	// attach the client certs if configured so
@@ -100,7 +124,7 @@ func tlsDial(isServer bool, pIP string, pport int) *websocket.Dialer {
 		dialer.Proxy = http.ProxyURL(proxyURL)
 	}
 
-	return dialer
+	return dialer, nil
 }
 
 // hijack the stdout to buffer and later send the content through

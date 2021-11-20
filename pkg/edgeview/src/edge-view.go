@@ -64,8 +64,9 @@ const (
 	TCPDONEMessage    = "+++tcpDone+++"
 	TCPSetupOKMessage = "+++tcpSetupOK+++"
 	FileCopyDir       = "/download/"
-	clientCertFile    = "/client.pem"
-	clientKeyFile     = "/client.key"
+	clientCertFile    = "/certs/client.pem"
+	clientKeyFile     = "/certs/client.key"
+	serverCertFile    = "/certs/wss-server-cert.pem"
 	EdgeViewVersion   = "0.8.0"
 )
 
@@ -306,6 +307,7 @@ func main() {
 			}
 			tcpclientCnt = len(params)
 
+			proxycnt := 0
 			for i, pStr := range params {
 				if strings.Contains(pStr, ":") {
 					pPort := strings.Split(pStr, ":")
@@ -314,8 +316,13 @@ func main() {
 						portNum, _ := strconv.Atoi(portStr)
 						remotePorts[i] = portNum
 					}
-				} else if pStr == "proxy" {
+				} else if strings.HasPrefix(pStr, "proxy") {
+					if proxycnt > 0 {
+						log.Println("can not setup multiple proxies")
+						return
+					}
 					remotePorts[i] = 0
+					proxycnt++
 				}
 			}
 			if len(remotePorts) != tcpclientCnt {
