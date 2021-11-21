@@ -43,10 +43,7 @@ func runNetwork(netw string) {
 		} else if opt == "route" {
 			runRoute()
 		} else if opt == "socket" {
-			printColor(" listening socket ports: ", BLUE)
-			runCmd("ss -tunlp4", true, true)
-			printColor(" socket established: ", BLUE)
-			runCmd("ss -t state established", true, true)
+			showSockets()
 		} else if opt == "nslookup" {
 			getDNS(substring)
 		} else if opt == "arp" {
@@ -58,55 +55,11 @@ func runNetwork(netw string) {
 			printColor(" - Connectivity: ", BLUE)
 			getConnectivity()
 		} else if opt == "if" {
-			fmt.Printf("%s\n", intfStr)
-			printTitle(" ip -br link:", CYAN, false)
-			retStr, err := runCmd("ip -br link", false, false)
-			if err != nil {
-				continue
-			}
-			r := strings.Split(retStr, "\n")
-			n := len(r)
-			for _, intf := range r[:n-1] {
-				if !strings.Contains(intf, substring) {
-					continue
-				}
-				fmt.Printf("%s\n", intf)
-			}
-			getPortCfg(substring, true)
-			printTitle(" proxy:", CYAN, false)
-			getProxy(true)
+			showIntf(substring, intfStr)
 		} else if opt == "app" {
-			retStr, err := runCmd("ls /run/zedrouter/AppNetworkStatus/*.json", false, false)
-			if err != nil {
-				continue
-			}
-			r := strings.Split(retStr, "\n")
-			n := len(r)
-			for _, s := range r[:n-1] {
-				retStr1, err := runCmd("cat "+s, false, false)
-				if err != nil {
-					continue
-				}
-				status := strings.TrimSuffix(retStr1, "\n")
-				doAppNet(status, substring, false)
-			}
+			showAppDetail(substring)
 		} else if opt == "trace" {
-			if substring != "" {
-				cmd := "traceroute -4 -m 10 -q 2 " + substring
-				if timeout != "" {
-					cmd = "timeout " + timeout + " " + cmd
-				}
-				printTitle(" traceroute to "+substring, CYAN, true)
-				retStr, _ := runCmd(cmd, false, false) // timeout will generate error
-				fmt.Printf("%s\n", retStr)
-			} else {
-				printTitle(" traceroute to google", CYAN, true)
-				runCmd("traceroute -4 -m 10 -q 2 www.google.com", false, true)
-				if server != "" {
-					printTitle(" traceroute to "+server, CYAN, true)
-					runCmd("traceroute -4 -m 10 -q 2 "+server, false, true)
-				}
-			}
+			runTrace(substring, server)
 		} else if opt == "ping" {
 			runPing(intfStr, server, substring)
 		} else if opt == "tcpdump" {
@@ -175,8 +128,6 @@ func doAppNet(status, appstr string, isSummary bool) string {
 		if isSummary {
 			continue
 		}
-
-		// XXX ip flow
 
 		ipStr := item.AllocatedIPv4Addr
 		printColor("\n - ping app ip address: "+ipStr, RED)
@@ -617,6 +568,69 @@ func getDNS(domain string) {
 	}
 	printColor(" - nslookup: "+domain, CYAN)
 	runCmd("nslookup "+domain, false, true)
+}
+
+func showSockets() {
+	printColor(" listening socket ports: ", BLUE)
+	runCmd("ss -tunlp4", true, true)
+	printColor(" socket established: ", BLUE)
+	runCmd("ss -t state established", true, true)
+}
+
+func showIntf(substring, intfStr string) {
+	fmt.Printf("%s\n", intfStr)
+	printTitle(" ip -br link:", CYAN, false)
+	retStr, err := runCmd("ip -br link", false, false)
+	if err != nil {
+		return
+	}
+	r := strings.Split(retStr, "\n")
+	n := len(r)
+	for _, intf := range r[:n-1] {
+		if !strings.Contains(intf, substring) {
+			continue
+		}
+		fmt.Printf("%s\n", intf)
+	}
+	getPortCfg(substring, true)
+	printTitle(" proxy:", CYAN, false)
+	getProxy(true)
+}
+
+func showAppDetail(substring string) {
+	retStr, err := runCmd("ls /run/zedrouter/AppNetworkStatus/*.json", false, false)
+	if err != nil {
+		return
+	}
+	r := strings.Split(retStr, "\n")
+	n := len(r)
+	for _, s := range r[:n-1] {
+		retStr1, err := runCmd("cat "+s, false, false)
+		if err != nil {
+			continue
+		}
+		status := strings.TrimSuffix(retStr1, "\n")
+		doAppNet(status, substring, false)
+	}
+}
+
+func runTrace(substring, server string) {
+	if substring != "" {
+		cmd := "traceroute -4 -m 10 -q 2 " + substring
+		if timeout != "" {
+			cmd = "timeout " + timeout + " " + cmd
+		}
+		printTitle(" traceroute to "+substring, CYAN, true)
+		retStr, _ := runCmd(cmd, false, false) // timeout will generate error
+		fmt.Printf("%s\n", retStr)
+	} else {
+		printTitle(" traceroute to google", CYAN, true)
+		runCmd("traceroute -4 -m 10 -q 2 www.google.com", false, true)
+		if server != "" {
+			printTitle(" traceroute to "+server, CYAN, true)
+			runCmd("traceroute -4 -m 10 -q 2 "+server, false, true)
+		}
+	}
 }
 
 func runPing(intfStr, server string, opt string) {

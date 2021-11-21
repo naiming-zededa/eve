@@ -192,9 +192,6 @@ func main() {
 		}
 	}
 
-	if *ptoken != "" && runOnServer {
-		stoken = *ptoken
-	}
 	initOpts()
 
 	var fstatus fileCopyStatus
@@ -227,6 +224,9 @@ func main() {
 				extraopt = numline
 			case "token":
 				*ptoken = word
+				if runOnServer {
+					stoken = *ptoken
+				}
 			default:
 			}
 			skiptype = ""
@@ -261,6 +261,11 @@ func main() {
 
 	if *phopt || *phelpopt {
 		printHelp(pqueryopt)
+		return
+	}
+
+	if *pdevip == "" && *ptoken == "" {
+		fmt.Printf("either -device or -token option is needed\n")
 		return
 	}
 
