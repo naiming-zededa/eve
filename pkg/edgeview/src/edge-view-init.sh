@@ -7,7 +7,7 @@ do
   if [ ! -f /run/edgeview/edge-view-notafter ]; then
     timediff=1
   else
-    now=`date -u '+%Y%m%d%H%M%S'`
+    now=`date -u '+%s'`
     notafter=`cat /run/edgeview/edge-view-notafter`
     timediff=$(( $notafter - $now ))
   fi
