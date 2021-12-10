@@ -63,7 +63,6 @@ services:
             - etc:/etc:ro
             - proc:/host/proc:ro
         network_mode: host
-        #networks:
 
     newlogd:
         image: ${NEWLOGD_TAG}

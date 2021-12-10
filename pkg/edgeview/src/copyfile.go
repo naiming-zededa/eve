@@ -14,6 +14,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	startCopyMessage  = "+++Start-Copy+++"
+	fileCopyDir       = "/download/"
+)
+
+var (
+	isCopy        bool           // client side
+	isSvrCopy     bool           // server side
+	copyMsgChn    chan []byte
+)
+
 type copyFile struct {
 	TokenHash []byte   `json:"tokenHash"`
 	Name      string   `json:"name"`
@@ -122,7 +133,11 @@ func runCopy(opt string) {
 			fmt.Printf("file read error %v\n", err)
 			return
 		}
-		_ = websocketConn.WriteMessage(websocket.BinaryMessage, buffer[:n])
+		err = websocketConn.WriteMessage(websocket.BinaryMessage, buffer[:n])
+		if err != nil {
+			fmt.Printf("file write to wss error %v\n", err)
+			return
+		}
 		totalBytes += n
 		if totalBytes >= int(cfile.Size) {
 			break

@@ -995,6 +995,36 @@ func runWireless() {
 			}
 		}
 	}
+
+	printTitle("\n wwan config", colorCYAN, false)
+	retStr, err = runCmd("cat /run/wwan/config.json", false, false)
+	if err != nil {
+		return
+	}
+	var wwancfg types.WwanConfig
+	err = json.Unmarshal([]byte(retStr), &wwancfg)
+	if err != nil {
+		return
+	}
+	fmt.Printf("%+v\n", wwancfg)
+
+	printTitle("\n wwan metrics", colorCYAN, false)
+	retStr, err = runCmd("cat /run/wwan/metrics.json", false, false)
+	if err == nil {
+		prettyJSON, err := formatJSON([]byte(retStr))
+		if err == nil {
+			fmt.Println(string(prettyJSON))
+		}
+	}
+
+	printTitle("\n wwan status", colorCYAN, false)
+	retStr, err = runCmd("cat /run/wwan/status.json", false, false)
+	if err == nil {
+		prettyJSON, err := formatJSON([]byte(retStr))
+		if err == nil {
+			fmt.Println(string(prettyJSON))
+		}
+	}
 }
 
 func runSpeedTest(intf string) {

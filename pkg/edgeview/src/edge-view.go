@@ -20,13 +20,7 @@ import (
 )
 
 var (
-	netopts       []string
-	pubsubopts    []string
-	pubsubpersist []string
-	pubsublarge   []string
-	sysopts       []string
-	logdirectory  []string
-	device        string     // ip-address or domain name of device
+	evDevice      string     // ip-address or domain name of Edge-View device
 	runOnServer   bool       // container running inside remote linux host
 	directQuery   bool       // container using ssh-mode
 	querytype     string
@@ -35,36 +29,11 @@ var (
 	logjson       bool
 	extralog      int
 	sshprivkey    []byte
-	readP         *os.File
-	writeP        *os.File
-	oldStdout     *os.File
-	socketOpen    bool
-	wsMsgCount    int
-	wsSentBytes   int
-	websocketConn *websocket.Conn
 	intSignal     chan os.Signal
-	isTCPClient   bool
-	tcpRetryWait  bool
-	tcpClientRun  bool
-	isTCPServer   bool
-	isCopy        bool           // client side
-	isSvrCopy     bool           // server side
-	copyMsgChn    chan []byte
-	tcpDataChn    []chan tcpData
-	tcpServerDone chan struct{}
-	policy        policies       // edgeview configured policy
 )
 
 const (
 	closeMessage      = "+++Done+++"
-	startCopyMessage  = "+++Start-Copy+++"
-	tcpDONEMessage    = "+++tcpDone+++"
-	tcpSetupOKMessage = "+++tcpSetupOK+++"
-	fileCopyDir       = "/download/"
-	clientCertFile    = "/certs/edgeview-client.pem"
-	clientKeyFile     = "/certs/edgeview-client.key"
-	serverCertFile    = "/certs/wss-server-cacert.pem"
-	policyFile        = "/run/edgeview/policy.json"
 	edgeViewVersion   = "0.8.0"
 )
 
@@ -449,7 +418,7 @@ func parserAndRun(cmds cmdOpt) {
 	if cmds.Timerange != "" {
 		timeout = cmds.Timerange
 	}
-	device = cmds.DevIPAddr
+	evDevice = cmds.DevIPAddr
 	logjson = cmds.IsJSON
 	if cmds.Logtype != "" {
 		querytype = cmds.Logtype

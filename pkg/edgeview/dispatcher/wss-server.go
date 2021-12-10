@@ -1,11 +1,11 @@
+// Copyright (c) 2021 Zededa, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -17,8 +17,8 @@ import (
 )
 
 type endPoint struct {
-	hostname  string
-	wsConn    *websocket.Conn
+	hostname string
+	wsConn   *websocket.Conn
 }
 
 const (
@@ -28,23 +28,44 @@ const (
 )
 
 var upgrader = websocket.Upgrader{} // use default options
-// reqAddrTokeConn indexed by 'toke' then 'remoteAddr' strings
-var reqAddrTokenEP   map[string]map[string]endPoint
+// reqAddrTokeConn indexed by 'token' then 'remoteAddr' strings
+var reqAddrTokenEP map[string]map[string]endPoint
+
 // mutex for access the maps
 var connMutex sync.Mutex
+
 // connection id, keep inc
 var connID int
+
 // debug set
 var needDebug bool
 
+// There are three entities in the edge-view data operation, the user,
+// the dispatcher and the edge-node.
+// From TCP/TLS/Websocket connection POV, user does not have any
+// relation to the edge-node. The connections are between the
+// user with the wss-server, and the edge-node with the wss-server.
+// Think of this as the Hub-spoke model, with the wss-server as the hub,
+// and user and edge-node are two spokes.
+// The user and the edge-node only have a 'virtual' connection which
+// contains the 'application' layer packets, and the wss-server is switching
+// the packets for user and edge-node based on a 'token'. This is
+// analogous to the hub-spoke in SD-WAN, where the hub installs the
+// routing from each spoke node, and based on the packet destination
+// and VPN-index to do a lookup to forward packets to the right
+// destination spoke. Here the 'token' lookup is similar to lookup
+// for a VPN-ID to find the VPN-table. Since we only allow one user
+// to interact with one edge-node (only two spokes within the same VPN),
+// the hub only needs to find the 'other' spoke for the packet switching.
+// This may change for more complex topology.
 func socketHandler(w http.ResponseWriter, r *http.Request) {
-    // Upgrade our raw HTTP connection to a websocket based one
-    conn, err := upgrader.Upgrade(w, r, nil)
-    if err != nil {
-        fmt.Printf("Error during connection upgradation: %v\n", err)
-        return
-    }
-    defer conn.Close()
+	// Upgrade our raw HTTP connection to a websocket based one
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		fmt.Printf("Error during connection upgradation: %v\n", err)
+		return
+	}
+	defer conn.Close()
 
 	if _, ok := r.Header["X-Session-Token"]; !ok {
 		err := conn.WriteMessage(websocket.TextMessage, []byte(tokenReqMsg))
@@ -100,8 +121,8 @@ func socketHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ep := endPoint{
-		wsConn:    conn,
-		hostname:  hostname,
+		wsConn:   conn,
+		hostname: hostname,
 	}
 	if _, ok := reqAddrTokenEP[token][remoteAddr]; !ok {
 		reqAddrTokenEP[token][remoteAddr] = ep
@@ -119,15 +140,15 @@ func socketHandler(w http.ResponseWriter, r *http.Request) {
 
 	cnt := 0
 	nopeerPkts := 0
-    for {
-        messageType, message, err := conn.ReadMessage()
+	for {
+		messageType, message, err := conn.ReadMessage()
 		now := time.Now()
 		nowStr := now.Format("2006-01-02 15:04:05")
-        if err != nil {
-            fmt.Printf("%s on reading host %s from %s, ID %d: %v\n", nowStr, hostname, remoteAddr, myConnID, err)
+		if err != nil {
+			fmt.Printf("%s on reading host %s from %s, ID %d: %v\n", nowStr, hostname, remoteAddr, myConnID, err)
 			cleanConnMap(token, remoteAddr)
-            break
-        }
+			break
+		}
 
 		connMutex.Lock()
 		tmpMap = reqAddrTokenEP[token]
@@ -179,7 +200,7 @@ func socketHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		cnt++
-    }
+	}
 }
 
 func cleanConnMap(token, remoteAddr string) {
@@ -196,14 +217,28 @@ func cleanConnMap(token, remoteAddr string) {
 
 // Get preferred outbound ip of this machine
 func getOutboundIP() string {
-    conn, err := net.Dial("udp", "8.8.8.8:80")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer conn.Close()
+	retryMax := 10
 
-    localAddr := conn.LocalAddr().(*net.UDPAddr)
-    return localAddr.IP.String()
+	var conn net.Conn
+	var err error
+	var count int
+	for count < retryMax {
+		conn, err = net.Dial("udp", "8.8.8.8:80")
+		if err != nil {
+			fmt.Println(err)
+		} else {
+			defer conn.Close()
+			break
+		}
+		time.Sleep(2 * time.Second)
+		count++
+	}
+	if conn == nil {
+		return ""
+	}
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String()
 }
 
 // the edge-view websocket dispatcher example
@@ -214,7 +249,6 @@ func main() {
 	portPtr := flag.String("port", "", "websocket listen port")
 	certFilePtr := flag.String("cert", "", "server certificate pem file")
 	keyFilePtr := flag.String("key", "", "server key pem file")
-	clientcertFilePtr := flag.String("clientcert", "", "client certificate pem file")
 	flag.Parse()
 
 	if *helpPtr {
@@ -223,7 +257,6 @@ func main() {
 		fmt.Println(" -cert <path>          mandatory, server certificate path in PEM format")
 		fmt.Println(" -key <path>           mandatory, server key file path in PEM format")
 		fmt.Println(" -debug                optional, turn on more debug")
-		fmt.Println(" -clientcert <path>    optional, client certificate path in PEM format")
 		return
 	}
 
@@ -238,28 +271,13 @@ func main() {
 		fmt.Println("server cert and key files need to be specified")
 		return
 	}
-	clientCertPath := *clientcertFilePtr
-	tlsConfig := &tls.Config{
-	}
-	if clientCertPath != "" {
-		caCert, err := ioutil.ReadFile(clientCertPath)
-		if err != nil {
-			fmt.Println("can not read cert file", clientCertPath)
-			return
-		}
-		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
-		tlsConfig.ClientCAs = caCertPool
-		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-	}
 
 	localIP := getOutboundIP()
 	server := &http.Server{
-		Addr:      localIP+":"+*portPtr,
-		TLSConfig: tlsConfig,
+		Addr:      localIP + ":" + *portPtr,
 	}
 
-    http.HandleFunc("/edge-view", socketHandler)
+	http.HandleFunc("/edge-view", socketHandler)
 	fmt.Printf("Listen TLS on: %s:%s\n", localIP, *portPtr)
-    log.Fatal(server.ListenAndServeTLS(*certFilePtr, *keyFilePtr))
+	log.Fatal(server.ListenAndServeTLS(*certFilePtr, *keyFilePtr))
 }

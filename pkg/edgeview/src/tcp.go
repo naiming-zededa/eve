@@ -76,12 +76,26 @@ const (
 	tcpMaxMappingNUM int = 5
 )
 
-var tcpMapMutex sync.Mutex
-var wssWrMutex  sync.Mutex
-var tcpConnM []tcpConnRWMap
+const (
+	tcpDONEMessage    = "+++tcpDone+++"
+	tcpSetupOKMessage = "+++tcpSetupOK+++"
+)
 
-var tcpServerRecvTime time.Time   // updated by all the tcp sessions
-var tcpTimeMutex      sync.Mutex
+var (
+	isTCPClient   bool
+	tcpRetryWait  bool
+	tcpClientRun  bool
+	isTCPServer   bool
+	tcpDataChn    []chan tcpData
+	tcpServerDone chan struct{}
+
+	tcpMapMutex       sync.Mutex
+	wssWrMutex        sync.Mutex
+	tcpConnM          []tcpConnRWMap
+
+	tcpServerRecvTime time.Time   // updated by all the tcp sessions
+	tcpTimeMutex      sync.Mutex
+)
 
 // Virtual TCP Port Mapping service
 

@@ -55,6 +55,8 @@ func runSystem(sysOpt string) {
 			getModel()
 		} else if strings.HasPrefix(opt, "hw") {
 			getHW()
+		} else if strings.HasPrefix(opt, "lastreboot") {
+			getLastReboot()
 		} else {
 			fmt.Printf("opt %s: not supported yet\n", opt)
 		}
@@ -276,7 +278,58 @@ func getModel() {
 
 func getHW() {
 	printTitle("HW:", colorCYAN, false)
+	err := addPackage("lshw", "lshw")
+	if err != nil {
+		fmt.Printf("add package: %v\n", err)
+		return
+	}
 	_, _ = runCmd("lshw -json", false, true)
+}
+
+func getLastReboot() {
+	retStr, err := runCmd("ls -l /persist/log", false, false)
+	if err != nil {
+		fmt.Printf("failed to get to /persist/log\n")
+		return
+	}
+
+	lines := strings.Split(retStr, "\n")
+	for _, l := range lines {
+		var rebootFile string
+		if strings.Contains(l, "reboot-reason.log") {
+			rebootFile = "reboot-reason.log"
+		} else if strings.Contains(l, "reboot-stack.log") {
+			rebootFile = "reboot-stack.log"
+		} else {
+			continue
+		}
+		printTitle(rebootFile, colorBLUE, false)
+		if strings.Contains(rebootFile, "reason") {
+			_, _ = runCmd("tail -5 /persist/log/"+rebootFile, false, true)
+		} else {
+			_, _ = runCmd("cat /persist/log/"+rebootFile, false, true)
+		}
+	}
+
+	retStr, err = runCmd("ls -lt /persist/newlog/panicStacks", false, false)
+	if err != nil {
+		return
+	}
+
+	lines = strings.Split(retStr, "\n")
+	for _, l := range lines {
+		if strings.Contains(l, "pillar-panic-stack.") {
+			fields := strings.Fields(l)
+			n := len(fields)
+			retStr, err = runCmd("cat /persist/newlog/panicStacks/"+fields[n-1], false, false)
+			if err != nil {
+				break
+			}
+			printTitle("newlog pillar panicStack", colorBLUE, false)
+			fmt.Printf("\n%s\n", retStr)
+			break
+		}
+	}
 }
 
 func runUSB() {

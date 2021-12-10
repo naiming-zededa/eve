@@ -25,6 +25,15 @@ const (
 	colorRESET   = "\033[0m"
 )
 
+var (
+	netopts       []string
+	pubsubopts    []string
+	pubsubpersist []string
+	pubsublarge   []string
+	sysopts       []string
+	logdirectory  []string
+)
+
 // all the supported options
 func initOpts() {
 	netopts = []string{
@@ -84,6 +93,7 @@ func initOpts() {
 		"datastore",
 		"download",
 		"hw",
+		"lastreboot",
 		"model",
 		"newlog",
 		"pci",
@@ -229,7 +239,7 @@ func runCmd(cmd string, isEve, isPrint bool) (string, error) {
 			retStr = string(retBytes)
 		}
 	} else {
-		retStr, err = remoteRun("root", device, sshprivkey, cmd)
+		retStr, err = remoteRun("root", evDevice, sshprivkey, cmd)
 	}
 	if err != nil {
 		if !strings.HasSuffix(err.Error(), "status 1") {
@@ -406,6 +416,8 @@ func printHelp(opt string) {
 			helpOn("download", "display the download config and status during downloading operation and url stats since reboot")
 		case "hw":
 			helpOn("hw", "display the hardware from lshw information in json format")
+		case "lastreboot":
+			helpOn("lastreboot", "display the last reboot reasons and stack if the information is saved")
 		case "model":
 			helpOn("model", "display the hardware model information in json format")
 		case "newlog":

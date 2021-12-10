@@ -13,6 +13,7 @@ RUN go build -o edge-view edge-view.go tcp.go proxy.go basics.go \
 RUN strip edge-view
 RUN cp edge-view /out/usr/bin
 RUN cp edge-view-init.sh /out/usr/bin
+RUN cp spec.sh /out/usr/bin
 
 FROM scratch
 COPY --from=build /out/ /

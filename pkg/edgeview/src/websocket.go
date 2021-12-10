@@ -24,6 +24,18 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const serverCertFile = "/certs/wss-server-cacert.pem"
+
+var (
+	readP         *os.File
+	writeP        *os.File
+	oldStdout     *os.File
+	socketOpen    bool
+	wsMsgCount    int
+	wsSentBytes   int
+	websocketConn *websocket.Conn
+)
+
 type replyData struct {
 	SessTokenHash   []byte    `json:"sessTokenHash"`
 	Message         []byte    `json:"message"`
@@ -110,19 +122,6 @@ func tlsDial(isServer bool, pIP string, pport int) (*websocket.Dialer, error) {
 		fmt.Printf("wss server cert appended to TLS\n")
 	} else {
 		tlsConfig.InsecureSkipVerify = true
-	}
-
-	// attach the client certs if configured so
-	_, err1 := os.Stat(clientCertFile)
-	_, err2 := os.Stat(clientKeyFile)
-	if err1 == nil && err2 == nil {
-		cert, err := tls.LoadX509KeyPair(clientCertFile, clientKeyFile)
-		if err == nil {
-			tlsConfig.Certificates = []tls.Certificate{cert}
-			fmt.Printf("client cert set in tlsConfig\n")
-		} else {
-			fmt.Printf("cert error %v\n", err)
-		}
 	}
 
 	dialer := &websocket.Dialer{

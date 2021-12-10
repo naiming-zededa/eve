@@ -31,7 +31,12 @@ type policies struct {
 	}                          `json:"apps"`
 }
 
+const (
+	policyFile        = "/run/edgeview/policy.json"
+)
+
 var devIntfIPs []string
+var policy     policies    // edgeview configured policy
 
 func initPolicy() error {
 	p := policies{}
