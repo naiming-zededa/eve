@@ -33,10 +33,13 @@ type LogContent struct {
 	Time     string    `json:"time,omitempty"`
 }
 
-func runLogSearch(pattern string) {
-	timeline := timeout
-	fmt.Printf("log pattern %s, time %s, json %v, extraline %d, type %s\n",
-		pattern, timeline, logjson, extralog, querytype)
+func runLogSearch(cmds cmdOpt) {
+	pattern := cmds.Logopt
+	timeline := cmds.Timerange
+	extralog := cmds.Extraline
+	var copylogfiles bool
+	log.Tracef("log pattern %s, time %s, json %v, extraline %d, type %s",
+		pattern, timeline, cmds.IsJSON, extralog, querytype)
 
 	if !strings.Contains(timeline, "-") {
 		fmt.Printf("log time needs to have dash between start and end\n")
@@ -46,8 +49,19 @@ func runLogSearch(pattern string) {
 	now := time.Now().Unix()
 	// t1 >= t2 int64
 	t1, t2 := getTimeSec(timeline, now)
+	if pattern == cpLogFileString {
+		if t1 - t2 > 1800 {
+			fmt.Printf("copy-logfiles can only in the range of 30 minutes\n")
+			return
+		}
+		copylogfiles = true
+	}
 
 	gfiles := walkLogDirs(t1, t2, now)
+	if copylogfiles {
+		runCopyLogfiles(gfiles, t1)
+		return
+	}
 
 	op := " | grep -E "
 	if extralog > 0 {
@@ -61,16 +75,16 @@ func runLogSearch(pattern string) {
 			bout := fmt.Sprintf("\n %s, -- %v --\n", gf.filepath, time.Unix(gf.filesec, 0).Format(time.RFC3339))
 			printColor(bout, colorRED)
 
-			colorMatch(olines, pattern, &printIdx)
+			colorMatch(olines, pattern, &printIdx, cmds.IsJSON)
 		}
 	}
 
 	if now - t1 < 10 { // search for collect directory for uncompressed files
 		if querytype != "app" {
-			searchLiveLogs(pattern, now, "dev", &printIdx)
+			searchLiveLogs(pattern, now, "dev", &printIdx, cmds.IsJSON)
 		}
 		if querytype != "dev" {
-			searchLiveLogs(pattern, now, "app", &printIdx)
+			searchLiveLogs(pattern, now, "app", &printIdx, cmds.IsJSON)
 		}
 	}
 	fmt.Println()
@@ -144,7 +158,7 @@ func walkLogDirs(t1, t2, now int64) []logfiletime {
 	return getfiles
 }
 
-func searchLiveLogs(pattern string, now int64, typeStr string, idx *int) {
+func searchLiveLogs(pattern string, now int64, typeStr string, idx *int, logjson bool) {
 	retStr, err := runCmd("ls /persist/newlog/collect/", false, false)
 	if err != nil {
 		return
@@ -158,21 +172,21 @@ func searchLiveLogs(pattern string, now int64, typeStr string, idx *int) {
 			continue
 		}
 		file := "/persist/newlog/collect/" + l
-		searchCurrentLogs(pattern, file, typeStr, now, idx)
+		searchCurrentLogs(pattern, file, typeStr, now, idx, logjson)
 	}
 }
 
-func searchCurrentLogs(pattern, path, typeStr string, now int64, idx *int) {
+func searchCurrentLogs(pattern, path, typeStr string, now int64, idx *int, logjson bool) {
 	retStr, err := runCmd("grep " + pattern + " " + path, false, false)
 	if err == nil && len(retStr) > 0 {
 		bout := fmt.Sprintf("\n current " + typeStr + " log, -- %v --\n", time.Unix(now, 0).Format(time.RFC3339))
 		printColor(bout, colorRED)
 
-		colorMatch(retStr, pattern, idx)
+		colorMatch(retStr, pattern, idx, logjson)
 	}
 }
 
-func colorMatch(olines, pattern string, idx *int) {
+func colorMatch(olines, pattern string, idx *int, logjson bool) {
 	lines := strings.Split(olines, "\n")
 	if strings.Contains(pattern, "|") {
 		pat := strings.Split(pattern, "|")

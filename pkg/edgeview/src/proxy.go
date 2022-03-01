@@ -6,13 +6,10 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"time"
-
-	log "github.com/sirupsen/logrus"
 )
 
 // Virtual forward proxy server for handling the https service on site
@@ -30,14 +27,14 @@ func proxyServer(done chan struct{}, dnsIP string) *http.Server {
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
 
-	fmt.Printf("proxyServer: listenAndServeTLS\n")
+	log.Tracef("proxyServer: listenAndServeTLS")
 	// always accept http from local, no proxy certs involved
 	go func() {
 		defer close(done)
 
 		err := server.ListenAndServe()
 		if err != nil {
-			fmt.Printf("proxy server close. listen error: %v\n", err)
+			log.Errorf("proxy server close. listen error: %v", err)
 		}
 	}()
 
@@ -58,7 +55,7 @@ func handleTunneling(w http.ResponseWriter, r *http.Request, dnsIP string) {
 			},
 		}
 		d := net.Dialer{Resolver: r, Timeout: 10*time.Second}
-		log.Debugf("handleTunneling: custom dialer")
+		log.Tracef("handleTunneling: custom dialer")
 		destConn, err = d.Dial("tcp", remoteHost)
 	} else {
 		destConn, err = net.DialTimeout("tcp", remoteHost, 10*time.Second)
@@ -68,7 +65,7 @@ func handleTunneling(w http.ResponseWriter, r *http.Request, dnsIP string) {
 		return
 	}
 
-	log.Debugf("handleTunneling: %s\n", r.Host)
+	log.Tracef("handleTunneling: %s", r.Host)
 	w.WriteHeader(http.StatusOK)
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -78,7 +75,7 @@ func handleTunneling(w http.ResponseWriter, r *http.Request, dnsIP string) {
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		fmt.Printf("handleTunneling: hijacker error: %v\n", err)
+		log.Errorf("handleTunneling: hijacker error: %v", err)
 	}
 	go transfer(destConn, clientConn, true)
 	go transfer(clientConn, destConn, false)
@@ -87,7 +84,7 @@ func handleTunneling(w http.ResponseWriter, r *http.Request, dnsIP string) {
 func transfer(destination io.WriteCloser, source io.ReadCloser, toremote bool) {
 	defer destination.Close()
 	defer source.Close()
-	log.Debugf("transfer: before io.Copy to-remove %v\n", toremote)
+	log.Tracef("transfer: before io.Copy to-remove %v", toremote)
 	_, _ = io.Copy(destination, source)
 }
 

@@ -5,7 +5,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -13,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
+	"github.com/lf-edge/eve/pkg/pillar/types"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -22,6 +27,7 @@ const (
 	colorCYAN    = "\033[1;36m%s\033[0m"
 	colorGREEN   = "\033[0;32m%s\033[0m"
 	colorYELLOW  = "\033[0;93m%s\033[0m"
+	colorPURPLE  = "\033[1;95m%s\033[0m"
 	colorRESET   = "\033[0m"
 )
 
@@ -33,6 +39,15 @@ var (
 	sysopts       []string
 	logdirectory  []string
 )
+
+var jwtNonce string      // JWT session Nonce for authentication
+const hashBytesNum = 32  // Hmac Sha256 Hash is 32 bytes fixed
+
+// authentication wrapper for messages
+type authenMsg struct {
+	Message         []byte              `json:"message"`
+	HmacSha256Hash  [hashBytesNum]byte  `json:"hmacSha256Hash"`
+}
 
 // all the supported options
 func initOpts() {
@@ -59,6 +74,7 @@ func initOpts() {
 		"baseosmgr",
 		"domainmgr",
 		"downloader",
+		"edgeview",
 		"global",
 		"loguploader",
 		"newlogd",
@@ -101,6 +117,7 @@ func initOpts() {
 		"cipher",
 		"usb",
 		"shell",
+		"techsupport",
 		"volume",
 	}
 
@@ -148,6 +165,119 @@ func isValidOpt(value string, optslice []string) bool {
 	return false
 }
 
+// get url and path from JWT token string
+func getAddrFromJWT(token string, isServer bool, evStatus *types.EdgeviewStatus) (string, string, error) {
+	var addrport, path string
+	tparts := strings.Split(token, ".")
+	if len(tparts) != 3 {
+		return addrport, path, fmt.Errorf("no ip:port or invalid JWT")
+	}
+
+	data, err := base64.RawURLEncoding.DecodeString(tparts[1])
+	if err != nil {
+		return addrport, path, err
+	}
+
+	var jdata types.EvjwtInfo
+	err = json.Unmarshal(data, &jdata)
+	if err != nil {
+		return addrport, path, err
+	}
+
+	var uuidStr string
+	if isServer {
+		retStr, err := runCmd("cat /persist/status/uuid", false, false)
+		if err == nil {
+			uuidStr = strings.TrimSuffix(retStr, "\n")
+		}
+	}
+
+	if jdata.Exp == 0 || jdata.Dep == "" {
+		return addrport, path, fmt.Errorf("read JWT data failed")
+	}
+	if uuidStr != "" && jdata.Sub != uuidStr {
+		return addrport, path, fmt.Errorf("uuid does not match JWT jti")
+	}
+
+	now := time.Now()
+	nowSec := uint64(now.Unix())
+	if nowSec > jdata.Exp {
+		return addrport, path, fmt.Errorf("JWT expired %d sec ago", nowSec - jdata.Exp)
+	}
+
+	if strings.Contains(jdata.Dep, "/") {
+		urls := strings.SplitN(jdata.Dep, "/", 2)
+		addrport = urls[0]
+		path = "/" + urls[1]
+	} else {
+		addrport = jdata.Dep
+	}
+
+	evStatus.ExpireOn = jdata.Exp
+	evStatus.StartedOn = now
+	jwtNonce = jdata.Key
+
+	return addrport, path, nil
+}
+
+// sign with JWT nonce on message data and send through websocket
+func signAuthAndWriteWss(msg []byte, isText bool) error {
+	jdata := signAuthenData(msg)
+	if jdata == nil {
+		err := fmt.Errorf("sign authen message failed")
+		return err
+	}
+
+	var msgType int
+	if isText {
+		msgType = websocket.TextMessage
+	} else {
+		msgType = websocket.BinaryMessage
+	}
+	err := websocketConn.WriteMessage(msgType, jdata)
+	return err
+}
+
+func signAuthenData(msg []byte) []byte {
+	jmsg := authenMsg{
+		Message: msg,
+	}
+
+	h := hmac.New(sha256.New, []byte(jwtNonce))
+	_, _ = h.Write(jmsg.Message)
+	hash := h.Sum(nil)
+	n := copy(jmsg.HmacSha256Hash[:], hash)
+	if len(hash) != hashBytesNum || n != hashBytesNum {
+		log.Errorf("Hash copy bytes not correct: %d", n)
+		return nil
+	}
+
+	jdata, err := json.Marshal(jmsg)
+	if err != nil {
+		log.Errorf("json marshal error: %v", err)
+		return nil
+	}
+	return jdata
+}
+
+// returns isJson, verifyOK and payload data
+func verifyAuthenData(data []byte) (bool, bool, []byte) {
+	var auth authenMsg
+	err := json.Unmarshal(data, &auth)
+	if err != nil {
+		return false, false, nil
+	}
+
+	h := hmac.New(sha256.New, []byte(jwtNonce))
+	_, _ = h.Write(auth.Message)
+	if !bytes.Equal(auth.HmacSha256Hash[:], h.Sum(nil)) {
+		log.Noticef("Verify failed")
+		return true, false, nil
+	}
+
+	return true, true, auth.Message
+}
+
 func getBasics() {
 	if runOnServer {
 		if _, err := os.Stat("/config"); err != nil {
@@ -171,7 +301,7 @@ func getBasics() {
 		}
 		fmt.Printf("Device IPs: %v\n", ips)
 	}
-	retStr, err = runCmd("cat /config/uuid", false, false)
+	retStr, err = runCmd("cat /persist/status/uuid", false, false)
 	if err == nil {
 		fmt.Printf("  UUID: %s", retStr)
 	}
@@ -327,10 +457,17 @@ func getTokenHashString(token string) []byte {
 	if err != nil {
 		fmt.Printf("hash write error: %v\n", err)
 	}
-	return h.Sum(nil)[:16]
+	hash16 := h.Sum(nil)[:16]
+	return []byte(base64.RawURLEncoding.EncodeToString(hash16))
 }
 
-var helpStr =`edge-view [ -ws <ip:port> -token <session-token> | -device <ip-addr> ] [ -debug ] <query string>
+// in the format of yyyyMMDDhhmmss to use as part of the file name
+func getFileTimeStr(t1 time.Time) string {
+	t := t1.UTC()
+	return fmt.Sprintf("%d%02d%02d%02d%02d%02d", t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second())
+}
+
+var helpStr =`edge-view-query [ -token <session-token> | -device <ip-addr> ] [ -debug ] <query string>
  options:
   log/search-pattern [ -time <start_time>-<end_time> -json -type <app|dev> -extra num ]
 `
@@ -435,6 +572,8 @@ func printHelp(opt string) {
 			helpOn("shell/<some command>", "run shell on the command supplied on the device")
 			helpExample("'shell/ls -l /run/nim'", "run 'ls -l /run/nim' command on device", true)
 			helpExample("'shell/cat /config/server'", "run 'cat /config/server' command on device", false)
+		case "techsupport":
+			helpOn("techsupport", "show tech-support, run various edgeview commands with output downloaded in a compressed file")
 		case "volume":
 			helpOn("volume", "display the app volume and content tree information for each app")
 		// log
@@ -444,6 +583,8 @@ func printHelp(opt string) {
 			helpExample("log/Clock -type app", "display previous 30 minutes log contains 'Clock' in app log", false)
 			helpExample("log/certificate -time 2021-08-15T23:15:29Z-2021-08-15T22:45:00Z -json",
 				"display log during the specified time in RFC3339 format which contains 'certificate' in json format", false)
+			helpExample("log/copy-logfiles -time 2022-02-15T22:25:00Z-2022-02-15T22:40:00Z",
+				"download all logfiles in the specified time duration, maximum time frame is 30 minutes", false)
 		default:
 			printHelp("")
 		}

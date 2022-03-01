@@ -18,6 +18,8 @@ func runPubsub(pubStr string) {
 
 	startdir := []string{"/run/", "/persist/status/", "/persist/pubsub-large/"}
 	for _, p := range opts {
+		printTitle("\n === Pub/Sub: <"+p+"> ===\n\n", colorPURPLE, false)
+
 		var pubsubdir, subdir string
 		if strings.Contains(p, "/") {
 			items := strings.Split(p, "/")
@@ -82,7 +84,6 @@ func pubsubSvs(startDir, pubsubDir, subDir string) {
 	n := len(files)
 	printpath := ""
 	for _, f := range files[:n-1] {
-		//fmt.Printf("file: %s\n", f)
 		dir1 := strings.Split(f, "./")
 		paths := strings.Split(dir1[1], "/")
 		path := ""
@@ -97,7 +98,6 @@ func pubsubSvs(startDir, pubsubDir, subDir string) {
 		fmt.Printf("   service: %s\n", paths[len(paths)-1])
 		retData, err := runCmd("cat "+dirfile, false, false)
 		if err != nil {
-			//fmt.Printf("error: %v", err)
 			continue
 		}
 		prettyJSON, err := formatJSON([]byte(retData))

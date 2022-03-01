@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	log "github.com/sirupsen/logrus"
 )
 
 const serverCertFile = "/certs/wss-server-cacert.pem"
@@ -30,16 +29,13 @@ var (
 	readP         *os.File
 	writeP        *os.File
 	oldStdout     *os.File
+	techSuppFile  *os.File
 	socketOpen    bool
 	wsMsgCount    int
 	wsSentBytes   int
 	websocketConn *websocket.Conn
+	isTechSupport bool
 )
-
-type replyData struct {
-	SessTokenHash   []byte    `json:"sessTokenHash"`
-	Message         []byte    `json:"message"`
-}
 
 func setupWebC(hostname, token string, u url.URL, isServer bool) bool {
 	var pport int
@@ -56,7 +52,7 @@ func setupWebC(hostname, token string, u url.URL, isServer bool) bool {
 				for i, pem := range proxyPEM {
 					ff, err := os.Create(dir + "/proxy-cert" + strconv.Itoa(i) + ".pem")
 					if err != nil {
-						log.Printf("file create error %v\n", err)
+						log.Noticef("file create error %v", err)
 						continue
 					}
 					_, _ = ff.WriteString(string(pem))
@@ -66,7 +62,7 @@ func setupWebC(hostname, token string, u url.URL, isServer bool) bool {
 			}
 		}
 		if proxyIP != "" {
-			fmt.Printf("proxyIP %s, port %d\n", proxyIP, proxyPort)
+			log.Noticef("proxyIP %s, port %d", proxyIP, proxyPort)
 		}
 		pport = proxyPort
 		pIP = proxyIP
@@ -83,14 +79,18 @@ func setupWebC(hostname, token string, u url.URL, isServer bool) bool {
 			)
 		if err != nil {
 			if resp == nil {
-				log.Printf("dial: %v, wait for 10 sec\n", err)
+				log.Noticef("dial: %v, wait for 10 sec", err)
 			} else {
-				log.Printf("dial: %v, status code %d, wait for 10 sec\n", err, resp.StatusCode)
+				log.Noticef("dial: %v, status code %d, wait for 10 sec", err, resp.StatusCode)
 			}
 			time.Sleep(10 * time.Second)
 		} else {
 			websocketConn = c
-			log.Printf("connect success to websocket server\n")
+			if isServer {
+				log.Noticef("connect success to websocket server")
+			} else {
+				fmt.Printf("connect success to websocket server\n")
+			}
 			break
 		}
 		retry++
@@ -111,15 +111,15 @@ func tlsDial(isServer bool, pIP string, pport int) (*websocket.Dialer, error) {
 		caCertPool := x509.NewCertPool()
 		caCert, err := ioutil.ReadFile(serverCertFile)
 		if err != nil {
-			log.Errorf("can not read server cert file, %v\n", err)
+			log.Errorf("can not read server cert file, %v", err)
 			return nil, err
 		}
 		if !caCertPool.AppendCertsFromPEM(caCert) {
-			log.Errorf("%s\n", "append cert failed")
+			log.Errorf("%s", "append cert failed")
 			return nil, errors.New("append cert failed")
 		}
 		tlsConfig.RootCAs = caCertPool
-		fmt.Printf("wss server cert appended to TLS\n")
+		log.Noticef("wss server cert appended to TLS")
 	} else {
 		tlsConfig.InsecureSkipVerify = true
 	}
@@ -144,7 +144,7 @@ func openPipe() (*os.File, *os.File, error) {
 	oldStdout = os.Stdout
 	r, w, err := os.Pipe()
 	if err != nil {
-		log.Println("os.Pipe:", err)
+		log.Errorf("os.Pipe: %v", err)
 		return nil, nil, err
 	}
 	os.Stdout = w
@@ -163,38 +163,41 @@ func closePipe(openAfter bool) {
 	_, _ = io.Copy(&buf, readP)
 	socketOpen = false
 
-	if websocketConn != nil && len(buf.String()) > 0 {
-		jmsg := replyData{
-			SessTokenHash: tokenHash16,
-			Message:       buf.Bytes(),
+	if isTechSupport {
+		size := len(buf.String())
+		if size > 0 {
+			_, err := techSuppFile.WriteString(buf.String())
+			if err != nil {
+				log.Errorf("write techsupport string error: %v", err)
+			}
 		}
-		jdata, err := json.Marshal(jmsg)
+	} else if websocketConn != nil && len(buf.String()) > 0 {
+		err := signAuthAndWriteWss(buf.Bytes(), true)
 		if err != nil {
-			log.Println("json marshal error:", err)
-			return
+			log.Errorf("write: %v", err)
+		} else {
+			wsMsgCount++
+			wsSentBytes += len(buf.String())
 		}
-		err = websocketConn.WriteMessage(websocket.TextMessage, jdata)
-		if err != nil {
-			log.Println("write:", err)
-			return
-		}
-		wsMsgCount++
-		wsSentBytes += len(buf.String())
 	}
-	if openAfter {
+	reOpenPipe(openAfter)
+}
+
+func reOpenPipe(doOpen bool) {
+	if doOpen {
 		var err error
 		readP, writeP, err = openPipe()
 		if err != nil {
-			log.Println("open pipe error:", err)
+			log.Errorf("open pipe error: %v", err)
 		}
 	}
 }
 
 func retryWebSocket(hostname, token string, urlWSS url.URL, err error) bool {
-	log.Println("read:", err)
+	log.Tracef("read: %v", err)
 	if errors.Is(err, syscall.ECONNRESET) ||
 		strings.Contains(err.Error(), "i/o timeout") {
-		log.Println("read: timeout or reset, close and resetup websocket")
+		log.Noticef("read: timeout or reset, close and resetup websocket")
 		websocketConn.Close()
 		tcpRetryWait = true
 		time.Sleep(100 * time.Millisecond)
@@ -203,36 +206,23 @@ func retryWebSocket(hostname, token string, urlWSS url.URL, err error) bool {
 		if ok {
 			return true
 		} else {
-			log.Info("retry failed. exit")
+			log.Noticef("retry failed. exit")
 		}
 	}
 	return false
-}
-
-func checkReplyMsgOk(msg []byte) (bool, []byte) {
-	var jmsg replyData
-	err := json.Unmarshal(msg, &jmsg)
-	if err != nil {
-		fmt.Printf("not in json format, len %d, skip\n", len(msg))
-		return false, []byte{}
-	}
-	if !bytes.Equal(tokenHash16, jmsg.SessTokenHash) {
-		fmt.Printf("session token from remote does not match\n")
-		return false, []byte{}
-	}
-	return true, jmsg.Message
 }
 
 func clientSendQuery(cmd cmdOpt) bool {
 	// send the query command to websocket/server
 	jdata, err := json.Marshal(cmd)
 	if err != nil {
-		log.Println("json Marshal queryCmds error", err)
+		fmt.Printf("json Marshal queryCmds error: %v\n", err)
 		return false
 	}
-	err = websocketConn.WriteMessage(websocket.TextMessage, jdata)
+
+	err = signAuthAndWriteWss(jdata, true)
 	if err != nil {
-		log.Println("write:", err)
+		fmt.Printf("write: %v\n", err)
 		return false
 	}
 	return true

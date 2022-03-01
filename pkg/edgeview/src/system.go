@@ -4,6 +4,8 @@
 package main
 
 import (
+	"bufio"
+	"compress/gzip"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -11,13 +13,14 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/lf-edge/eve/pkg/pillar/types"
-	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func runSystem(sysOpt string) {
@@ -27,6 +30,7 @@ func runSystem(sysOpt string) {
 	}
 
 	for _, opt := range opts {
+		printTitle("\n === System: <"+opt+"> ===\n\n", colorPURPLE, false)
 		if opt == "newlog" {
 			getLogStats()
 		} else if opt == "volume" {
@@ -57,6 +61,8 @@ func runSystem(sysOpt string) {
 			getHW()
 		} else if strings.HasPrefix(opt, "lastreboot") {
 			getLastReboot()
+		} else if strings.HasPrefix(opt, "techsupport") {
+			runTechSupport()
 		} else {
 			fmt.Printf("opt %s: not supported yet\n", opt)
 		}
@@ -175,23 +181,6 @@ func getVolume() {
 			var vol1 types.VolumeConfig
 			_ = json.Unmarshal([]byte(retStr), &vol1)
 			fmt.Printf("   name: %s, ID %s, RefCount: %d \n", vol1.DisplayName, vol1.VolumeID.String(), vol1.RefCount)
-			retStr2, err := runCmd("ls -l "+vol1.VolumeDir+"/"+vol1.VolumeID.String()+"*", false, false)
-			if err != nil {
-				continue
-			}
-			if strings.Contains(retStr2, "qcow") {
-				fmt.Println(retStr2)
-			} else {
-				retStr1, err := runCmd("cat "+vol1.VolumeDir+"/"+vol1.VolumeID.String()+"*.container/image-config.json", false, false)
-				if err != nil {
-					continue
-				}
-				var img v1.Image
-				_ = json.Unmarshal([]byte(retStr1), &img)
-				fmt.Printf("    container:\n")
-				fmt.Printf("    os: %s, cmd: %s\n", img.OS, img.Config.Cmd)
-				fmt.Printf("    labels: %v\n", img.Config.Labels)
-			}
 
 			printColor("\n content tree config: "+vol1.ContentID.String(), colorBLUE)
 			retStr, _ = runCmd("cat /run/zedagent/ContentTreeConfig/"+vol1.ContentID.String()+".json", false, false)
@@ -614,7 +603,137 @@ func runShell(opt string) {
 		return
 	}
 	printColor(" - shell cmd: "+shell[1], colorCYAN)
-	_, _ = runCmd(shell[1], false, true)
+	if !runOnServer {
+		_, _ = runCmd(shell[1], false, true)
+	} else {
+		shellcmd := strings.Fields(shell[1])
+		prog := shellcmd[0]
+		args := shellcmd[1:]
+		cmd := exec.Command(prog, args...)
+		stdout, err := cmd.Output()
+		if err != nil {
+			log.Errorf("shell error: %v", err)
+			closePipe(true)
+		} else {
+			// websocket has a limit on the size of packet, cut to multiple
+			// chunks if it's too large
+			for _, buf := range splitBySize(stdout, 8192) {
+				var newline string
+				if len(buf) < 8192 {
+					newline = "\n"
+				}
+				fmt.Printf("%s%s", string(buf), newline)
+				closePipe(true)
+			}
+		}
+	}
+}
+
+func runTechSupport() {
+	var err error
+	tsfileName := "/tmp/techsupport-tmp-" + getFileTimeStr(time.Now())
+	techSuppFile, err = os.Create(tsfileName)
+	if err != nil {
+		log.Errorf("can not create techsupport file")
+		return
+	}
+	defer techSuppFile.Close()
+
+	closePipe(true)
+	isTechSupport = true
+
+	printTitle("\n       - Show Tech-Support -\n\n\n", colorYELLOW, false)
+
+	getBasics()
+
+	printTitle("\n       - network info -\n\n", colorRED, false)
+	runNetwork("route,arp,if,acl,connectivity,url,socket,app,mdns,nslookup/google.com,trace/8.8.8.8,wireless,flow")
+	closePipe(true)
+
+	printTitle("\n       - system info -\n\n", colorRED, false)
+	runSystem("hw,model,pci,usb,lastreboot,newlog,volume,app,datastore,cipher,configitem")
+	closePipe(true)
+
+	printTitle("\n       - pub/sub info -\n\n", colorRED, false)
+	runPubsub("nim,domainmgr,nodeagent,baseosmgr,tpmmgr,global,vaultmgr,volumemgr,zedagent,zedmanager,zedrouter,zedclient,edgeview,watcher")
+
+	printTitle("\n       - Done Tech-Support -\n\n", colorYELLOW, false)
+	closePipe(true)
+
+	isTechSupport = false
+	techSuppFile.Close()
+
+	gzipfileName, err := gzipTechSuppFile(tsfileName)
+	if err == nil {
+		runCopy("cp/" + gzipfileName)
+	}
+
+	_ = os.Remove(tsfileName)
+	if gzipfileName != "" {
+		_ = os.Remove(gzipfileName)
+	}
+}
+
+func gzipTechSuppFile(ifileName string) (string, error) {
+	var ofileName string
+	ifile, err := os.Open(ifileName)
+	if err != nil {
+		log.Errorf("can not open file %v", err)
+		return ofileName, err
+	}
+
+	reader := bufio.NewReader(ifile)
+	content, _ := ioutil.ReadAll(reader)
+
+	tmpfiles := strings.Split(ifileName, "-tmp-")
+	if len(tmpfiles) != 2 {
+		return ofileName, fmt.Errorf("filename format incorrect")
+	}
+
+	ofile, err := os.Create(tmpfiles[0]+"-"+tmpfiles[1]+".gz")
+	if err != nil {
+		log.Errorf("can not create file %v", err)
+		return ofileName, err
+	}
+
+	ofileName = ofile.Name()
+	gw, _ := gzip.NewWriterLevel(ofile, gzip.BestCompression)
+	_, err = gw.Write(content)
+	if err != nil {
+		log.Errorf("gzip write error: %v", err)
+		return ofileName, err
+	}
+	err = gw.Close()
+	if err != nil {
+		log.Errorf("gzip close error: %v", err)
+		return ofileName, err
+	}
+
+	err = ofile.Sync()
+	if err != nil {
+		log.Errorf("file sync error: %v", err)
+		return ofileName, err
+	}
+
+	err = ofile.Close()
+	if err != nil {
+		log.Errorf("file close error: %v", err)
+		return ofileName, err
+	}
+	return ofileName, nil
+}
+
+func splitBySize(buf []byte, size int) [][]byte {
+	var chunk []byte
+	chunks := make([][]byte, 0, len(buf)/size+1)
+	for len(buf) >= size {
+		chunk, buf = buf[:size], buf[size:]
+		chunks = append(chunks, chunk)
+	}
+	if len(buf) > 0 {
+		chunks = append(chunks, buf[:])
+	}
+	return chunks
 }
 
 func isClosed(c chan struct{}) bool {

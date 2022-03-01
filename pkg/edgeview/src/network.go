@@ -31,7 +31,7 @@ func runNetwork(netw string) {
 	}
 
 	for _, opt := range opts {
-		//fmt.Printf("\n network option: %s\n", opt)
+		printTitle("\n === Network: <"+opt+"> ===\n\n", colorPURPLE, false)
 		var substring string
 		if strings.Contains(opt, "/") {
 			items := strings.SplitN(opt, "/", 2)
@@ -82,11 +82,6 @@ func runNetwork(netw string) {
 		} else if opt == "mdns" {
 			runmDNS(substring)
 		} else if opt == "tcp" { // tcp and proxy are special
-			ok := checkTCPPolicy(substring)
-			if !ok {
-				fmt.Printf("TCP option %s, not allowed by policy\n", substring)
-				return
-			}
 			setAndStartProxyTCP(substring)
 		} else {
 			fmt.Printf("\n not supported yet\n")
@@ -127,7 +122,6 @@ func doAppNet(status, appstr string, isSummary bool) string {
 		}
 		var niStatus types.NetworkInstanceStatus
 		_ = json.Unmarshal([]byte(retStr), &niStatus)
-		//fmt.Printf("ni: %+v\n", niStatus)
 		var ifname string
 		var ipaddr net.IP
 		for _, p := range item.ACLDependList {
@@ -438,6 +432,38 @@ func getLocalIPs() []string {
 	return localIPs
 }
 
+// get all app intf ips
+func getAllAppIPs() []string {
+	retStr, err := runCmd("ls /run/zedrouter/AppNetworkStatus/*.json", false, false)
+	if err != nil {
+		return nil
+	}
+
+	var allAppIPs []string
+	r := strings.Split(retStr, "\n")
+	n := len(r)
+	for _, s := range r[:n-1] {
+		retStr1, err := runCmd("cat "+s, false, false)
+		if err != nil {
+			continue
+		}
+		status := strings.TrimSuffix(retStr1, "\n")
+		appIPs := getAppIPs(status)
+		allAppIPs = append(allAppIPs, appIPs...)
+	}
+	return allAppIPs
+}
+
+func getAppIPs(status string) []string {
+	var appStatus types.AppNetworkStatus
+	_ = json.Unmarshal([]byte(status), &appStatus)
+	var appIPs []string
+	for _, item := range appStatus.UnderlayNetworkList {
+		appIPs = append(appIPs, item.AllocatedIPv4Addr)
+	}
+	return appIPs
+}
+
 // getConnectivity
 func getConnectivity() {
 	fmt.Printf("  run diag: \n")
@@ -576,7 +602,6 @@ func getMetricsMap(path string, stats *urlStats, isPrint bool) {
 	printColor(" - "+pathname, colorCYAN)
 	var mmap types.MetricsMap
 	_ = json.Unmarshal([]byte(retStr), &mmap)
-	//fmt.Printf("%v", mmap)
 	for k, m := range mmap {
 		fmt.Printf(" interface: %s\n", k)
 		fmt.Printf(" Success: %d  Last Success: %v\n", m.SuccessCount, m.LastSuccess)
@@ -652,8 +677,8 @@ func showAppDetail(substring string) {
 func runTrace(substring, server string) {
 	if substring != "" {
 		cmd := "traceroute -4 -m 10 -q 2 " + substring
-		if timeout != "" {
-			cmd = "timeout " + timeout + " " + cmd
+		if cmdTimeout != "" {
+			cmd = "timeout " + cmdTimeout + " " + cmd
 		}
 		printTitle(" traceroute to "+substring, colorCYAN, true)
 		retStr, _ := runCmd(cmd, false, false) // timeout will generate error
@@ -883,7 +908,6 @@ func runmDNS(subStr string) {
 	}
 	var ifs []net.Interface
 	for _, intf := range ifaces {
-		//fmt.Printf("interface %+v\n", intf)
 		if intfname == "" {
 			if strings.HasPrefix(intf.Flags.String(), "up|") {
 				ifs = append(ifs, intf)
@@ -946,8 +970,8 @@ func runTCPDump(subStr string) {
 	subs := strings.SplitN(subStr, "/", 2)
 	intf := subs[0]
 	var timeValue string
-	if timeout != "" {
-		timeSec, err := strconv.Atoi(timeout)
+	if cmdTimeout != "" {
+		timeSec, err := strconv.Atoi(cmdTimeout)
 		if err != nil {
 			fmt.Printf("time option has to be seconds: %v\n", err)
 			return
@@ -956,7 +980,7 @@ func runTCPDump(subStr string) {
 			timeValue = "120"
 			fmt.Printf("time value for tcpdump maximum is 120 seconds\n\n")
 		} else {
-			timeValue = timeout
+			timeValue = cmdTimeout
 		}
 	} else {
 		timeValue = "60"

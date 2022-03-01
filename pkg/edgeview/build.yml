@@ -6,6 +6,7 @@ config:
     - /:/hostfs:ro
     - /dev:/dev:ro
     - /run:/run:ro
+    - /run/edgeview:/run/edgeview
     - /persist:/persist:ro
     - /config:/config:ro
     - /etc/resolv.conf:/etc/resolv.conf:ro

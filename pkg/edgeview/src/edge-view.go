@@ -14,9 +14,14 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
-	log "github.com/sirupsen/logrus"
+	"github.com/lf-edge/eve/pkg/pillar/base"
+	"github.com/lf-edge/eve/pkg/pillar/pubsub"
+	"github.com/lf-edge/eve/pkg/pillar/pubsub/socketdriver"
+	"github.com/lf-edge/eve/pkg/pillar/types"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -24,17 +29,16 @@ var (
 	runOnServer   bool       // container running inside remote linux host
 	directQuery   bool       // container using ssh-mode
 	querytype     string
-	tokenHash16   []byte     // 16 bytes of sha256 hashed from session token
-	timeout       string
-	logjson       bool
-	extralog      int
+	cmdTimeout    string
 	sshprivkey    []byte
-	intSignal     chan os.Signal
+	log           *base.LogObject
 )
 
 const (
+	agentName         = "edgeview"
 	closeMessage      = "+++Done+++"
 	edgeViewVersion   = "0.8.0"
+	cpLogFileString   = "copy-logfiles"
 )
 
 type cmdOpt struct {
@@ -48,7 +52,6 @@ type cmdOpt struct {
 	IsJSON        bool       `json:"isJSON"`
 	Extraline     int        `json:"extraline"`
 	Logtype       string     `json:"logtype"`
-	SessTokenHash []byte     `json:"sessTokenHash"`
 }
 
 func main() {
@@ -60,7 +63,9 @@ func main() {
 	ptoken := flag.String("token", "", "session token")
 	pDebug := flag.Bool("debug", false, "log more in debug")
 	flag.Parse()
-	log.SetFormatter(&log.TextFormatter{})
+
+	logger := logrus.New()
+	log = base.NewSourceLogObject(logger, agentName, os.Getpid())
 
 	if *pServer {
 		runOnServer = true
@@ -69,14 +74,28 @@ func main() {
 		directQuery = true
 	}
 
+	var evStatus  types.EdgeviewStatus
+	pathStr := "/edge-view"
 	if directQuery { // ssh-mode
 		var err error
 		sshprivkey, err = ioutil.ReadFile("/ssh-private-key")
 		if err != nil {
-			fmt.Printf("ssh key file error: %v\n", err)
+			fmt.Printf("ssh key file need to be docker mounted in '/ssh-private-key', error: %v\n", err)
 			return
 		}
 	} else {
+		// if wss endpoint is not passed in, try to get it from the JWT
+		if *ptoken != "" && *wsAddr == "" {
+			addrport, path, err := getAddrFromJWT(*ptoken, *pServer, &evStatus)
+			if err != nil {
+				fmt.Printf("%v\n", err)
+				return
+			}
+			if path != "" {
+				pathStr = path
+			}
+			*wsAddr = addrport
+		}
 		if *wsAddr == "" {
 			fmt.Printf("wss address:port needs to be specified when '-token' is used\n")
 			return
@@ -85,6 +104,7 @@ func main() {
 
 	initOpts()
 
+	var intSignal  chan os.Signal
 	var fstatus fileCopyStatus
 	remotePorts := make(map[int]int)
 	var tcpclientCnt int
@@ -143,13 +163,13 @@ func main() {
 		}
 	}
 
-	if *pDebug {
-		log.SetLevel(log.DebugLevel)
-	}
-
 	if *phopt || *phelpopt {
 		printHelp(pqueryopt)
 		return
+	}
+
+	if *pDebug {
+		logger.SetLevel(logrus.DebugLevel)
 	}
 
 	if *pdevip == "" && *ptoken == "" {
@@ -163,16 +183,23 @@ func main() {
 			logs := strings.SplitN(pqueryopt, "log/", 2)
 			logopt = logs[1]
 			if logopt == "" {
-				log.Println("log/ needs search string")
+				fmt.Printf("log/ needs search string\n")
 				printHelp("")
 				return
+			}
+			if logopt == cpLogFileString {
+				if directQuery {
+					fmt.Printf("log/copy-logfiles is not supported in ssh mode\n")
+					return
+				}
+				isCopy = true
 			}
 		} else if strings.HasPrefix(pqueryopt, "pub/") {
 			pubs := strings.SplitN(pqueryopt, "pub/", 2)
 			ppubsubopt = pubs[1]
 			_, err := checkOpts(ppubsubopt, pubsubopts)
 			if err != nil {
-				log.Println("pub/ option error")
+				fmt.Printf("pub/ option error\n")
 				printHelp("")
 				return
 			}
@@ -213,16 +240,23 @@ func main() {
 				printHelp("")
 				return
 			}
+
+			if psysopt == "techsupport" {
+				if directQuery {
+					fmt.Printf("techsupport is not supported in ssh mode\n")
+					return
+				}
+				isCopy = true
+			}
 		}
 	}
 
-	if logopt != "" && timeopt == "" { // default log search is previous half an hour
-		timeopt = "0-0.5"
+	if !runOnServer {
+		// client side can break the session
+		intSignal = make(chan os.Signal, 1)
+		signal.Notify(intSignal, os.Interrupt)
 	}
-
-	intSigStart()
-
-	urlWSS := url.URL{Scheme: "wss", Host: *wsAddr, Path: "/edge-view"}
+	urlWSS := url.URL{Scheme: "wss", Host: *wsAddr, Path: pathStr}
 
 	var done chan struct{}
 	hostname := ""
@@ -232,7 +266,7 @@ func main() {
 		} else {
 			hostname = getHostname()
 		}
-		tokenHash16 = getTokenHashString(*ptoken)
+		tokenHash16 := getTokenHashString(*ptoken)
 		fmt.Printf("%s connecting to %s\n", hostname, urlWSS.String())
 		// on server, the script will retry in some minutes later
 		ok := setupWebC(hostname, string(tokenHash16), urlWSS, runOnServer)
@@ -253,30 +287,43 @@ func main() {
 		Timerange:     timeopt,
 		IsJSON:        jsonopt,
 		Extraline:     extraopt,
-		SessTokenHash: tokenHash16,
 	}
 	if typeopt != "all" {
 		queryCmds.Logtype = typeopt
 	}
+	if logopt != "" && timeopt == "" { // default log search is previous half an hour
+		queryCmds.Timerange = "0-0.5"
+	}
+
+	// for edgeview server side to use
+	var infoPub pubsub.Publication
+	trigPubchan := make(chan bool, 1)
+	pubStatusTimer := time.NewTimer(1 * time.Second)
+	pubStatusTimer.Stop()
 
 	// edgeview container can run in 3 different modes:
-	// 1) ssh-mode, directQuery, send out query and wait for reply from device
-	// 2) non-ssh server mode, runs on device: 'runOnServer' is set
-	// 3) non-ssh client mode, runs on operator side
-	if directQuery { // ssh query mode
+	// 1) ssh-mode, 'directQuery' is set, send out query and wait for reply from device
+	// 2) non-ssh/websocket server mode, runs on device: 'runOnServer' is set
+	// 3) non-ssh/websocket client mode, runs on operator/laptop side
+	if directQuery { // 1) ssh query mode
 		parserAndRun(queryCmds)
 		return
-	} else if runOnServer { // websocket mode on device 'server' side
+	} else if runOnServer { // 2) websocket mode on device 'server' side
 
 		err := initPolicy()
 		if err != nil {
 			return
 		}
 
+		infoPub = initpubInfo(logger)
+		if infoPub == nil {
+			return
+		}
+
 		go func() {
 			defer close(done)
 			for {
-				mtype, message, err := websocketConn.ReadMessage()
+				mtype, msg, err := websocketConn.ReadMessage()
 				if err != nil {
 					if retryWebSocket(hostname, *ptoken, urlWSS, err) {
 						continue
@@ -285,41 +332,56 @@ func main() {
 				}
 
 				var recvCmds cmdOpt
-				var isJSON bool
+				isJSON, verifyOK, message := verifyAuthenData(msg)
+				if !isJSON {
+					if strings.Contains(string(msg), "no device online") {
+						log.Noticef("read: peer not there yet, continue")
+					}
+					continue
+				}
+				if !verifyOK {
+					log.Noticef("authen failed on json msg")
+					continue
+				}
+
 				if mtype == websocket.TextMessage {
+					if strings.Contains(string(message), "no device online") ||
+						strings.Contains(string(message), closeMessage) {
+						log.Noticef("read: no device, continue")
+						continue
+					} else {
+						log.Noticef("recv cmd msg: %s", message)
+						if isTCPServer {
+							close(tcpServerDone)
+							continue
+						}
+					}
+
 					err := json.Unmarshal(message, &recvCmds)
 					if err != nil {
-						log.Printf("recv not json msg: %s\n", message)
+						log.Noticef("unmarshal json msg error: %v", err)
+						continue
 					} else {
-						isJSON = true
-						ok := checkCmdPolicy(recvCmds)
+						// check the query commands against defined policy
+						ok := checkCmdPolicy(recvCmds, &evStatus)
 						if !ok {
 							closePipe(false)
 							continue
 						}
-					}
-					if !isJSON && (strings.Contains(string(message), "no device online") ||
-						strings.Contains(string(message), closeMessage)) {
-						log.Println("read: no device, continue")
-						continue
+						trigPubchan <- true
 					}
 				}
 				if isSvrCopy {
 					copyMsgChn <- message
-					continue
 				} else if isTCPServer {
-					if mtype == websocket.TextMessage {
-						close(tcpServerDone)
-						continue
-					}
 					recvClientData(mtype, message)
-					continue
+				} else {
+					// process client query
+					go goRunQuery(recvCmds)
 				}
-				// process client query
-				go goRunQuery(recvCmds)
 			}
 		}()
-	} else { // query client in websocket mode
+	} else { // 3) websocket mode on client side
 
 		if !clientSendQuery(queryCmds) {
 			return
@@ -327,37 +389,46 @@ func main() {
 		go func() {
 			defer close(done)
 			for {
-				mtype, message, err := websocketConn.ReadMessage()
+				mtype, msg, err := websocketConn.ReadMessage()
 				if err != nil {
 					if retryWebSocket(hostname, *ptoken, urlWSS, err) {
 						continue
 					}
 					return
 				}
+
+				isJSON, verifyOK, message := verifyAuthenData(msg)
+				if !isJSON {
+					fmt.Printf("%s\nreceive message done\n", string(msg))
+					done <- struct{}{}
+					break
+				}
+
+				if !verifyOK {
+					fmt.Printf("\nverify msg failed\n")
+					done <- struct{}{}
+					break
+				}
+
 				if strings.Contains(string(message), closeMessage) {
-					log.Infof("%s\nreceive message done\n", string(message))
 					done <- struct{}{}
 					break
 				} else if isCopy {
-					getCopyFile(message, &fstatus, mtype)
+					recvCopyFile(message, &fstatus, mtype)
 					if mtype == websocket.TextMessage && isCopy && fstatus.f != nil {
 						defer fstatus.f.Close()
 					}
 				} else if isTCPClient {
 					if mtype == websocket.TextMessage {
-						log.Debugf("setup tcp client: %s\n", message)
 						if !tcpClientRun { // got ok message from tcp server side, run client
-							ok, msg := checkReplyMsgOk(message)
-							if ok {
-								if bytes.Contains(msg, []byte(tcpSetupOKMessage)) {
-									tcpClientsLaunch(tcpclientCnt, remotePorts)
-								} else {
-									// this could be the tcp policy disallow the setup message
-									fmt.Printf("%s\n", msg)
-								}
+							if bytes.Contains(message, []byte(tcpSetupOKMessage)) {
+								tcpClientsLaunch(tcpclientCnt, remotePorts)
+							} else {
+								// this could be the tcp policy disallow the setup message
+								fmt.Printf("%s\n", message)
 							}
 						} else {
-							log.Infof(" tcp client running, receiving close probably due to server timed out: %v\n", string(message))
+							fmt.Printf(" tcp client running, receiving close probably due to server timed out: %v\n", string(message))
 							done <- struct{}{}
 							break
 						}
@@ -365,10 +436,7 @@ func main() {
 						recvServerData(mtype, message)
 					}
 				} else {
-					ok, msg := checkReplyMsgOk(message)
-					if ok {
-						fmt.Printf("%s\n", msg)
-					}
+					fmt.Printf("%s", message)
 				}
 			}
 		}()
@@ -378,11 +446,18 @@ func main() {
 	// non-ssh server will be killed when the session is expired with the script
 	for {
 		select {
+		case <- trigPubchan:
+			// not to publish the status too fast
+			pubStatusTimer = time.NewTimer(15 * time.Second)
+		case <-pubStatusTimer.C:
+			err := infoPub.Publish("global", evStatus)
+			if err != nil {
+				log.Noticef("evinfopub: publish error: %v\n", err)
+			}
 		case <-done:
 			tcpClientSendDone()
 			return
 		case <-intSignal:
-			log.Println("interrupt")
 			tcpClientSendDone()
 			return
 		}
@@ -401,25 +476,19 @@ func goRunQuery(cmds cmdOpt) {
 			return
 		}
 		closePipe(false)
-		err = websocketConn.WriteMessage(websocket.TextMessage, []byte(closeMessage))
+		err = signAuthAndWriteWss([]byte(closeMessage), true)
 		if err != nil {
-			log.Println("sent done msg error:", err)
+			log.Noticef("sent done msg error: %v", err)
 		}
-		log.Printf("Sent %d messages, total %d bytes to websocket\n", wsMsgCount, wsSentBytes)
+		log.Noticef("Sent %d messages, total %d bytes to websocket", wsMsgCount, wsSentBytes)
 	}
 }
 
 func parserAndRun(cmds cmdOpt) {
-	if len(tokenHash16) > 0 && !bytes.Equal(tokenHash16, cmds.SessTokenHash) {
-		fmt.Printf("session authentication failed\n")
-		return
-	}
-
 	if cmds.Timerange != "" {
-		timeout = cmds.Timerange
+		cmdTimeout = cmds.Timerange
 	}
 	evDevice = cmds.DevIPAddr
-	logjson = cmds.IsJSON
 	if cmds.Logtype != "" {
 		querytype = cmds.Logtype
 	}
@@ -436,14 +505,29 @@ func parserAndRun(cmds cmdOpt) {
 	} else if cmds.System != "" {
 		runSystem(cmds.System)
 	} else if cmds.Logopt != "" {
-		runLogSearch(cmds.Logopt)
+		runLogSearch(cmds)
 	} else {
-		fmt.Printf("no supported options\n")
+		log.Noticef("no supported options")
 		return
 	}
 }
 
-func intSigStart() {
-	intSignal = make(chan os.Signal, 1)
-	signal.Notify(intSignal, os.Interrupt)
+func initpubInfo(logger *logrus.Logger) pubsub.Publication {
+	ps := *pubsub.New(&socketdriver.SocketDriver{Logger: logger, Log: log}, logger, log)
+	infoPub, err := ps.NewPublication(
+		pubsub.PublicationOptions{
+			AgentName: agentName,
+			TopicType: types.EdgeviewStatus{},
+		})
+	if err != nil {
+		log.Errorf("evinfopub: pubsub create error: %v", err)
+		return nil
+	}
+	err = infoPub.ClearRestarted()
+	if err != nil {
+		log.Errorf("evinfopub: pubsub clear restart error: %v", err)
+		return nil
+	}
+
+	return infoPub
 }

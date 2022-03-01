@@ -4,10 +4,13 @@
 package main
 
 import (
-	"bytes"
+	"archive/tar"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -56,9 +59,8 @@ func runCopy(opt string) {
 		fmt.Printf("os stat error %v\n", err)
 		return
 	}
-	//fmt.Printf("file info %+v\n", info)
+
 	cfile := copyFile{
-		TokenHash: tokenHash16,
 		Name:      info.Name(),
 		Size:      info.Size(),
 		ModTsec:   info.ModTime().Unix(),
@@ -69,12 +71,17 @@ func runCopy(opt string) {
 		fmt.Printf("json marshal error %v\n", err)
 		return
 	}
-	_ = websocketConn.WriteMessage(websocket.BinaryMessage, jbytes)
+
+	// send file information to client side and wait for signal to start copy
+	err = signAuthAndWriteWss(jbytes, false)
+	if err != nil {
+		fmt.Printf("sign and write error: %v\n", err)
+		return
+	}
 
 	// server side set
 	isSvrCopy = true
 	copyMsgChn = make(chan []byte)
-	//websocketConn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	ahead := make(chan struct{})
 	done := make(chan struct{})
 	t := time.NewTimer(30 * time.Second)
@@ -85,8 +92,7 @@ func runCopy(opt string) {
 			select {
 			case message := <-copyMsgChn:
 				if !strings.Contains(string(message), startCopyMessage) {
-					fmt.Printf("webc read message. %s\n", string(message))
-					//websocketConn.SetReadDeadline(time.Time{})
+					log.Noticef("webc read message. %s", string(message))
 					readerRunning = false
 					if !isClosed(ahead) {
 						close(ahead)
@@ -94,7 +100,7 @@ func runCopy(opt string) {
 					isSvrCopy = false
 					return
 				} else {
-					//fmt.Printf("start file transfer\n")
+					// start copy file transfer
 					close(ahead)
 				}
 
@@ -133,7 +139,8 @@ func runCopy(opt string) {
 			fmt.Printf("file read error %v\n", err)
 			return
 		}
-		err = websocketConn.WriteMessage(websocket.BinaryMessage, buffer[:n])
+
+		err = signAuthAndWriteWss(buffer[:n], false)
 		if err != nil {
 			fmt.Printf("file write to wss error %v\n", err)
 			return
@@ -147,19 +154,12 @@ func runCopy(opt string) {
 }
 
 // client side receive copied file
-func getCopyFile(msg []byte, fstatus *fileCopyStatus, mtype int) {
+func recvCopyFile(msg []byte, fstatus *fileCopyStatus, mtype int) {
 	var info copyFile
 	if !fstatus.gotFileInfo {
 		err := json.Unmarshal(msg, &info)
 		if err != nil {
-			//sendCopyErr("json unmarshal info file", err)
-			// print the device info first
 			fmt.Printf("%s\n", []byte(msg))
-			return
-		}
-
-		if !bytes.Equal(tokenHash16, info.TokenHash) {
-			fmt.Printf("copy file token hash not match\n")
 			return
 		}
 
@@ -174,28 +174,32 @@ func getCopyFile(msg []byte, fstatus *fileCopyStatus, mtype int) {
 
 		_, err = os.Stat(fileCopyDir)
 		if err != nil {
-			sendCopyErr("file stat ", err)
+			sendCopyDone("file stat ", err)
 			return
 		}
 		fstatus.f, err = os.Create(fileCopyDir+fstatus.filename)
 		if err != nil {
-			sendCopyErr("file create", err)
+			sendCopyDone("file create", err)
 			return
 		}
-		err = websocketConn.WriteMessage(websocket.TextMessage, []byte(startCopyMessage))
+
+		err = signAuthAndWriteWss([]byte(startCopyMessage), false)
 		if err != nil {
-			sendCopyErr("write start copy failed", err)
+			sendCopyDone("write start copy failed", err)
 		}
 		return
 	}
 	if mtype == websocket.TextMessage {
-		fmt.Printf("recv test msg, exit\n")
+		fmt.Printf("recv text msg, exit\n")
 		isCopy = false
+		fstatus.f.Close()
 		return
 	}
+
 	n, err := fstatus.f.Write(msg)
 	if err != nil {
 		isCopy = false
+		fstatus.f.Close()
 		fmt.Printf("file write error: %v\n", err)
 		return
 	}
@@ -204,22 +208,111 @@ func getCopyFile(msg []byte, fstatus *fileCopyStatus, mtype int) {
 		fstatus.f.Close()
 		shaStr := fmt.Sprintf("%x", getFileSha256(fileCopyDir+fstatus.filename))
 		if shaStr == fstatus.fileHash {
-			fmt.Printf("\n done. file sha256 verified\n")
 			err := os.Chtimes(fileCopyDir+fstatus.filename, fstatus.modTime, fstatus.modTime)
 			if err != nil {
 				fmt.Printf("modify file time: %v\n", err)
 			}
+			untarLogfile(fstatus.filename)
 		} else {
 			fmt.Printf("\n file sha256 different. %s, should be %s\n", shaStr, fstatus.fileHash)
 		}
-		sendCopyErr("done", nil)
+		sendCopyDone("done", nil)
 	}
 }
 
-func sendCopyErr(context string, err error) {
+func sendCopyDone(context string, err error) {
 	if err != nil {
 		fmt.Printf("%s error: %v\n", context, err)
 	}
-	_ = websocketConn.WriteMessage(websocket.TextMessage, []byte(context))
+	err = signAuthAndWriteWss([]byte(context), true)
+	if err != nil {
+		fmt.Printf("sign and write error: %v\n", err)
+	}
 	isCopy = false
+}
+
+func untarLogfile(downloadedFile string) {
+	if !strings.HasPrefix(downloadedFile, "logfiles-") || !strings.HasSuffix(downloadedFile, ".tar") {
+		fmt.Printf("\n file saved at %s\n\n", fileCopyDir + downloadedFile)
+		return
+	}
+
+	cmdStr := "cd " + fileCopyDir + "; tar xvf " + downloadedFile
+	untarCmd := exec.Command("sh", "-c", cmdStr)
+	err := untarCmd.Run()
+	if err != nil {
+		fmt.Printf("untar error: %v\n", err)
+	} else {
+		_ = os.Remove(fileCopyDir+downloadedFile)
+	}
+
+	fileStr := strings.SplitN(downloadedFile, ".tar", 2)
+	if len(fileStr) != 2 {
+		return
+	}
+	logSaveDir := fileCopyDir + fileStr[0]
+	fmt.Printf("\n log files saved at %s\n\n", logSaveDir)
+	cmdStr = "ls -lt " + logSaveDir
+	retBytes, _ := exec.Command("sh", "-c", cmdStr).Output()
+	fmt.Printf("%s\n", retBytes)
+}
+
+func runCopyLogfiles(logfiles []logfiletime, time1 int64) {
+
+	timeStr := getFileTimeStr(time.Unix(time1, 0))
+	destinationfile := "/tmp/logfiles-" + timeStr + ".tar"
+
+	// no need for compression since the logfiles are already in
+	// gzip compressed format
+	tarfile, err := os.Create(destinationfile)
+	if err != nil {
+		log.Errorf("runCopyLogfiles create error %v", err)
+		return
+	}
+	defer tarfile.Close()
+
+	var fileWriter io.WriteCloser = tarfile
+
+	tarfileWriter := tar.NewWriter(fileWriter)
+	defer tarfileWriter.Close()
+
+	for _, logfile := range logfiles {
+		fileInfo, err := os.Stat(logfile.filepath)
+		if err != nil {
+			log.Errorf("runCopyLogfiles can not stat: %v", err)
+			continue
+		}
+		file, err := os.Open(logfile.filepath)
+		if err != nil {
+			log.Errorf("runCopyLogfiles file open error: %v", err)
+			continue
+		}
+		defer file.Close()
+
+		// prepare the tar header
+		header := new(tar.Header)
+		header.Name = "logfiles-" + timeStr + "/" + filepath.Base(file.Name())
+		header.Size = fileInfo.Size()
+		header.Mode = int64(fileInfo.Mode())
+		header.ModTime = fileInfo.ModTime()
+
+		err = tarfileWriter.WriteHeader(header)
+		if err != nil {
+			log.Errorf("runCopyLogfiles write header error: %v", err)
+			continue
+		}
+
+		_, err = io.Copy(tarfileWriter, file)
+		if err != nil {
+			log.Errorf("runCopyLogfiles copy file error: %v", err)
+			continue
+		}
+		file.Close()
+	}
+	tarfileWriter.Close()
+	tarfile.Close()
+
+	// use the normal 'cp' utility to transfer the tar file over
+	runCopy("cp/" + destinationfile)
+	_ = os.Remove(destinationfile)
 }

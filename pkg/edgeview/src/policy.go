@@ -4,113 +4,134 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
-	"strconv"
 	"strings"
 
-	log "github.com/sirupsen/logrus"
+	"github.com/lf-edge/eve/pkg/pillar/types"
 )
 
-type policies struct {
-	DeviceAllow       bool     `json:"deviceAllow"`       // allow device related commands
-	ApplicationAllow  bool     `json:"applicationAllow"`  // allow app instances or external hosts related commands
-	Device struct {
-		NotSSH        bool   `json:"notSSH"`              // not allow ssh into device
-		NotReboot     bool   `json:"notReboot"`           // not allow issuing 'reboot' of device
-		NotAppConsole bool   `json:"notAppConsole"`       // not allow app console access from device
-	}                          `json:"device"`
-	Apps struct {
-		NotProxy   bool      `json:"notProxy"`            // not allow proxy operation
-		OnlyPorts  []int     `json:"onlyPorts"`           // only allow defined tcp ports
-		NotPorts   []int     `json:"notPorts"`            // not allow defined tcp ports
-		OnlyAddrs  []string  `json:"nolyAddrs"`           // only allow defined ip-addresses
-		NotAddrs   []string  `json:"notAddrs"`            // not allow defined ip-addresses
-	}                          `json:"apps"`
-}
-
-const (
-	policyFile        = "/run/edgeview/policy.json"
+var (
+	devIntfIPs []string
+	appIntfIPs []string
+	devPolicy  types.EvDevPolicy
+	appPolicy  types.EvAppPolicy
 )
-
-var devIntfIPs []string
-var policy     policies    // edgeview configured policy
 
 func initPolicy() error {
-	p := policies{}
-	_, err := os.Stat(policyFile)
+	_, err := os.Stat(types.EdgeviewCfgFile)
 	if err == nil {
-		data, err := ioutil.ReadFile(policyFile)
+		data, err := ioutil.ReadFile(types.EdgeviewCfgFile)
 		if err != nil {
-			log.Errorf("can not read policy file: %v\n", err)
+			log.Errorf("can not read policy file: %v", err)
 			return err
 		}
-		err = json.Unmarshal(data, &p)
-		if err != nil {
-			log.Errorf("policy json file unmarshal error: %v\n", err)
-			return err
+		lines := bytes.Split(data, []byte("\n"))
+		for _, line := range lines {
+			if bytes.Contains(line, []byte(types.EdgeViewDevPolicyPrefix)) {
+				data1 := bytes.SplitN(line, []byte(types.EdgeViewDevPolicyPrefix), 2)
+				if len(data1) != 2 {
+					return fmt.Errorf("can not find dev policy in file")
+				}
+				err = json.Unmarshal(data1[1], &devPolicy)
+				if err != nil {
+					return err
+				}
+			} else if bytes.Contains(line, []byte(types.EdgeViewAppPolicyPrefix)) {
+				data1 := bytes.SplitN(line, []byte(types.EdgeViewAppPolicyPrefix), 2)
+				if len(data1) != 2 {
+					return fmt.Errorf("can not find app policy in file")
+				}
+				err = json.Unmarshal(data1[1], &appPolicy)
+				if err != nil {
+					return err
+				}
+			} else {
+				continue
+			}
 		}
 	} else {
-		p.DeviceAllow = true
-		p.ApplicationAllow = true
+		log.Errorf("can not stat edgeview config file: %v", err)
+		return err
 	}
-
-	policy = p
-
-	devIntfIPs = getLocalIPs()
-	devIntfIPs = append(devIntfIPs, "0.0.0.0")
-	devIntfIPs = append(devIntfIPs, "localhost")
 
 	return nil
 }
 
-func checkCmdPolicy(cmds cmdOpt) bool {
+func getAllLocalAddr() []string {
+	var localIPs []string
+	localIPs = getLocalIPs()
+	localIPs = append(localIPs, "0.0.0.0")
+	localIPs = append(localIPs, "localhost")
+	return localIPs
+}
+
+func checkCmdPolicy(cmds cmdOpt, evStatus *types.EdgeviewStatus) bool {
 	// log the incoming edge-view command from client
 	printCmds := cmds
-	printCmds.SessTokenHash = []byte{}
-	log.Printf("recv: %+v", printCmds)
+	log.Noticef("recv: %+v", printCmds)
 
-	if !policy.DeviceAllow {
-		if cmds.Logopt != "" || cmds.Pubsub != "" || cmds.System != "" {
-			fmt.Printf("cmds not allowed by policy\n")
+	if cmds.Logopt != "" || cmds.Pubsub != "" || cmds.System != "" ||
+		(cmds.Network != "" && !strings.HasPrefix(cmds.Network, "tcp/")) {
+		if !devPolicy.Enabled {
+			log.Noticef("device cmds: %v, not allowed by policy", cmds)
 			return false
 		}
-		network := cmds.Network
-		if network != "" && !strings.HasPrefix(network, "tcp/") {
-			fmt.Printf("network cmds not allowed by policy\n")
-			return false
-		}
+		evStatus.CmdCountDev++
 	}
 
-	system := cmds.System
-	if strings.HasPrefix(system, "shell/reboot") && policy.Device.NotReboot {
-		fmt.Printf("reboot cmd not allowed by policy\n")
-		return false
+	if cmds.Network != "" && strings.HasPrefix(cmds.Network, "tcp/") {
+		opts := strings.SplitN(cmds.Network, "tcp/", 2)
+		if len(opts) != 2 {
+			return false
+		}
+		ok := checkTCPPolicy(opts[1], evStatus)
+		if !ok {
+			log.Noticef("TCP option %s, not allowed by policy", opts[1])
+			return false
+		}
 	}
 	return true
 }
 
-func checkTCPPolicy(tcpOpts string) bool {
+func checkTCPPolicy(tcpOpts string, evStatus *types.EdgeviewStatus) bool {
+	devIntfIPs = getAllLocalAddr()
+	appIntfIPs = getAllAppIPs()
 	if strings.Contains(tcpOpts, "/") {
 		params := strings.Split(tcpOpts, "/")
 		for _, ipport := range params {
-			if !checkIPportPolicy(ipport) {
+			if !checkIPportPolicy(ipport, evStatus) {
+				log.Noticef("tcp cmds: %s, not allowed by policy", ipport)
 				return false
 			}
 		}
 	} else {
-		if !checkIPportPolicy(tcpOpts) {
+		if !checkIPportPolicy(tcpOpts, evStatus) {
+			log.Noticef("tcp cmds: %s, not allowed by policy", tcpOpts)
 			return false
 		}
 	}
 	return true
 }
 
-func checkIPportPolicy(tcpOpt string) bool {
-	if strings.HasPrefix(tcpOpt, "proxy") && policy.Apps.NotProxy {
-		return false
+// checkIPportPolicy - check for individual tcp param
+// proxy is count for app
+// if the IP address belongs to the device, count for device
+// otherwise, count for app
+// One TCP cmd with multiple address:port, count for multiple access
+// E.g. tcp/proxy/localhost:22/10.1.0.102:5901 count access for device 1, and app 2
+func checkIPportPolicy(tcpOpt string, evStatus *types.EdgeviewStatus) bool {
+	if strings.HasPrefix(tcpOpt, "proxy") {
+		// 'proxy' count for app only
+		if !appPolicy.Enabled {
+			return false
+		} else {
+			evStatus.CmdCountApp++
+			return true
+		}
 	}
 
 	if strings.Contains(tcpOpt, ":") {
@@ -118,18 +139,29 @@ func checkIPportPolicy(tcpOpt string) bool {
 		if len(opts) != 2 {
 			return false
 		}
-		addr := opts[0]
-		port := opts[1]
-		isAddrDevice := checkAddrLocal(addr)
+
+		isAddrDevice := checkAddrLocal(opts[0])
 		if isAddrDevice {
-			if !checkDevPolicy(port) {
+			if !devPolicy.Enabled {
 				return false
+			} else {
+				evStatus.CmdCountDev++
 			}
 		} else {
-			if !checkAppPolicy(addr, port) {
-				return false
+			isAddrApps := checkAddrApps(opts[0])
+			if isAddrApps {
+				if !appPolicy.Enabled {
+					return false
+				} else {
+					evStatus.CmdCountApp++
+				}
+			} else { // external to the device and app
+				// later
+				log.Tracef("checkIPportPolicy: IP is off device")
 			}
 		}
+	} else {
+		return false
 	}
 
 	return true
@@ -144,65 +176,11 @@ func checkAddrLocal(addr string) bool {
 	return false
 }
 
-func checkDevPolicy(port string) bool {
-	if port == "22" && policy.Device.NotSSH {
-		return false
-	}
-
-	pNumber, _ := strconv.Atoi(port)
-	if pNumber >= 5900 && pNumber <= 5909 && policy.Device.NotAppConsole {
-		return false
-	}
-
-	return true
-}
-
-func checkAppPolicy(addr, portStr string) bool {
-	if !policy.ApplicationAllow {
-		return false
-	}
-
-	if len(policy.Apps.OnlyAddrs) > 0 {
-		var found bool
-		for _, a := range policy.Apps.OnlyAddrs {
-			if addr == a {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
+func checkAddrApps(addr string) bool {
+	for _, a := range appIntfIPs {
+		if a == addr {
+			return true
 		}
 	}
-
-	port, _ := strconv.Atoi(portStr)
-	if len(policy.Apps.OnlyPorts) > 0 {
-		var found bool
-		for _, p := range policy.Apps.OnlyPorts {
-			if port == p {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-
-	if len(policy.Apps.NotAddrs) > 0 {
-		for _, a := range policy.Apps.NotAddrs {
-			if addr == a {
-				return false
-			}
-		}
-	}
-
-	if len(policy.Apps.NotPorts) > 0 {
-		for _, p := range policy.Apps.NotPorts {
-			if port == p {
-				return false
-			}
-		}
-	}
-	return true
+	return false
 }
