@@ -25,6 +25,7 @@ const (
 	noDeviceMsg string = "no device online\n+++Done+++"
 	tokenReqMsg string = "token is required"
 	moretwoMsg  string = "can't have more than 2 peers"
+	clientIPMsg string = "YourEndPointIPAddr:"
 )
 
 var upgrader = websocket.Upgrader{} // use default options
@@ -93,6 +94,11 @@ func socketHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	remoteAddr := r.RemoteAddr
+	if addrStr, ok := r.Header["CF-Connecting-IP"]; ok {
+		if len(addrStr) > 0 {
+			remoteAddr = addrStr[0]
+		}
+	}
 	connMutex.Lock()
 	tmpMap := reqAddrTokenEP[token]
 	if tmpMap == nil {
@@ -137,6 +143,9 @@ func socketHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Printf("%v client %s from %s connected, ID: %d\n",
 		time.Now().Format("2006-01-02 15:04:05"), hostname, remoteAddr, myConnID)
+
+	// send peer's own endpoint IP over first
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(clientIPMsg+remoteAddr))
 
 	cnt := 0
 	nopeerPkts := 0
@@ -241,6 +250,13 @@ func getOutboundIP() string {
 	return localAddr.IP.String()
 }
 
+func pingHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		fmt.Fprintf(w, "pong\n")
+	}
+}
+
 // the edge-view websocket dispatcher example
 func main() {
 	reqAddrTokenEP = make(map[string]map[string]endPoint)
@@ -278,6 +294,7 @@ func main() {
 	}
 
 	http.HandleFunc("/edge-view", socketHandler)
+	http.HandleFunc("/v1/ping", pingHandler)
 	fmt.Printf("Listen TLS on: %s:%s\n", localIP, *portPtr)
 	log.Fatal(server.ListenAndServeTLS(*certFilePtr, *keyFilePtr))
 }

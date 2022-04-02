@@ -101,6 +101,9 @@ var (
 func tcpClientsLaunch(tcpclientCnt int, remotePorts map[int]int) {
 	tcpConnM = make([]tcpConnRWMap, tcpclientCnt)
 	idx := 0
+	if edgeviewInstID > 1 { // in case multiple sessions on the same computer
+		clientTCPEndpoint.Port += (edgeviewInstID - 1) * maxInstNumber
+	}
 	for {
 		rPort := remotePorts[idx]
 		go tcpClientStart(idx, rPort)
@@ -223,7 +226,7 @@ func clientTCPtunnel(here net.Conn, idx, chNum int, rport int) {
 			return
 		}
 		wssWrMutex.Lock()
-		err = signAuthAndWriteWss(jdata, false)
+		err = addEnvelopeAndWriteWss(jdata, false)
 		wssWrMutex.Unlock()
 		if err != nil {
 			close(done)
@@ -304,6 +307,7 @@ func setAndStartProxyTCP(opt string) {
 
 	if hasProxy {
 		log.Tracef("setAndStartProxyTCP: launch proxy server")
+		proxyServerEndpoint.Port += edgeviewInstID
 		proxySvr = proxyServer(proxyServerDone, proxyDNSIP)
 	}
 
@@ -439,7 +443,7 @@ func tcpTransfer(url string, wssMsg tcpData, idx int) {
 				}
 				log.Tracef("tcp session timeout ch(%d)-%d", idx, chNum)
 				wssWrMutex.Lock()
-				_ = signAuthAndWriteWss([]byte("\n"), true) // try send a text msg to other side
+				_ = addEnvelopeAndWriteWss([]byte("\n"), true) // try send a text msg to other side
 				wssWrMutex.Unlock()
 				if !connClosed {
 					conn.Close()
@@ -499,7 +503,7 @@ func tcpTransfer(url string, wssMsg tcpData, idx int) {
 			return
 		}
 		wssWrMutex.Lock()
-		err = signAuthAndWriteWss(jdata, false)
+		err = addEnvelopeAndWriteWss(jdata, false)
 		wssWrMutex.Unlock()
 		if err != nil {
 			log.Errorf("ch(%d)-%d, server wrote error %v", idx, chNum, err)
@@ -643,7 +647,7 @@ func tcpClientSendDone() {
 	}
 	wssWrMutex.Lock()
 	// send to server first, then to dispatcher to close
-	_ = signAuthAndWriteWss([]byte(tcpDONEMessage), true)
+	_ = addEnvelopeAndWriteWss([]byte(tcpDONEMessage), true)
 	sendCloseToWss()
 	wssWrMutex.Unlock()
 }
@@ -711,7 +715,11 @@ func processTCPcmd(opt string, remotePorts map[int]int) (bool, int, map[int]int)
 	isTCPClient = true
 	fmt.Printf("tcp mapping locally listening %d ports to remote: %s\n", len(remotePorts), "\033[0;32m")
 	for i, p := range params {
-		fmt.Printf("  0.0.0.0:%d -> %s\n", 9001 + i, p)
+		var addports int
+		if edgeviewInstID > 1 {
+			addports = (edgeviewInstID - 1) * maxInstNumber
+		}
+		fmt.Printf("  0.0.0.0:%d -> %s\n", 9001 + addports + i, p)
 	}
 	fmt.Printf("%s\n", colorRESET)
 

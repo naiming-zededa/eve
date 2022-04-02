@@ -280,8 +280,8 @@ func handleEdgeviewToken(gcp *types.ConfigItemValueMap) {
 	}
 
 	if edgeviewParam != "" {
-		params := strings.SplitN(edgeviewParam, ".", 3)
-		if len(params) != 3 {
+		params := strings.Split(edgeviewParam, ".")
+		if len(params) != 3 && len(params) != 4 {
 			log.Errorf("edgeview JWT token in wrong format")
 			removeEvFiles()
 		} else {

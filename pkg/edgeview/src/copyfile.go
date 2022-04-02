@@ -73,7 +73,7 @@ func runCopy(opt string) {
 	}
 
 	// send file information to client side and wait for signal to start copy
-	err = signAuthAndWriteWss(jbytes, false)
+	err = addEnvelopeAndWriteWss(jbytes, false)
 	if err != nil {
 		fmt.Printf("sign and write error: %v\n", err)
 		return
@@ -140,7 +140,7 @@ func runCopy(opt string) {
 			return
 		}
 
-		err = signAuthAndWriteWss(buffer[:n], false)
+		err = addEnvelopeAndWriteWss(buffer[:n], false)
 		if err != nil {
 			fmt.Printf("file write to wss error %v\n", err)
 			return
@@ -183,7 +183,7 @@ func recvCopyFile(msg []byte, fstatus *fileCopyStatus, mtype int) {
 			return
 		}
 
-		err = signAuthAndWriteWss([]byte(startCopyMessage), false)
+		err = addEnvelopeAndWriteWss([]byte(startCopyMessage), false)
 		if err != nil {
 			sendCopyDone("write start copy failed", err)
 		}
@@ -224,7 +224,7 @@ func sendCopyDone(context string, err error) {
 	if err != nil {
 		fmt.Printf("%s error: %v\n", context, err)
 	}
-	err = signAuthAndWriteWss([]byte(context), true)
+	err = addEnvelopeAndWriteWss([]byte(context), true)
 	if err != nil {
 		fmt.Printf("sign and write error: %v\n", err)
 	}

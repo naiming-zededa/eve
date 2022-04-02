@@ -219,12 +219,10 @@ func colorMatch(olines, pattern string, idx *int, logjson bool) {
 					content.Source, content.Time, entry.Msgid)
 			}
 			buff := strings.ReplaceAll(bufStr, pattern, "\033[0;93m"+pattern+"\033[0m")
-			fmt.Printf("%s", buff)
+			fmt.Printf("%s\n", buff)
 		}
 		if !directQuery && i%20 == 0 {
 			closePipe(true)
-		} else {
-			fmt.Println()
 		}
 	}
 }

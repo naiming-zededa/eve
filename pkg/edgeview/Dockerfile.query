@@ -8,7 +8,7 @@ COPY go.mod /edge-view/.
 COPY go.sum /edge-view/.
 WORKDIR /edge-view
 
-RUN go build -o edge-view edge-view.go tcp.go proxy.go basics.go \
+RUN go build -o edge-view edge-view.go tcp.go proxy.go basics.go crypto.go \
  websocket.go system.go network.go pubsub.go log-search.go copyfile.go policy.go
 RUN strip edge-view
 RUN cp edge-view /out/usr/bin

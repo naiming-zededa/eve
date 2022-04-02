@@ -6,7 +6,8 @@ replace github.com/lf-edge/eve/api/go => github.com/lf-edge/eve/api/go v0.0.0-20
 
 require (
 	github.com/gorilla/websocket v1.4.2
-	github.com/lf-edge/eve/pkg/pillar v0.0.0-20220212170811-1f774097af31
-	github.com/opencontainers/image-spec v1.0.1
+	//github.com/lf-edge/eve/pkg/pillar v0.0.0-20220212170811-1f774097af31
+	github.com/lf-edge/eve/pkg/pillar v0.0.0-20220401185402-3994f8b25e63
+	github.com/opencontainers/image-spec v1.0.2
 	golang.org/x/crypto v0.0.0-20210711020723-a769d52b0f97
 )

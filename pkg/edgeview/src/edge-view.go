@@ -9,6 +9,8 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -32,6 +34,8 @@ var (
 	cmdTimeout    string
 	sshprivkey    []byte
 	log           *base.LogObject
+	trigPubchan   chan bool
+	myEvEndPoint  string
 )
 
 const (
@@ -39,11 +43,12 @@ const (
 	closeMessage      = "+++Done+++"
 	edgeViewVersion   = "0.8.0"
 	cpLogFileString   = "copy-logfiles"
+	clientIPMsg       = "YourEndPointIPAddr:"
 )
 
 type cmdOpt struct {
 	Version       string     `json:"version"`
-	DevIPAddr     string     `json:"devIPAddr"`
+	ClientEPAddr  string     `json:"clientEPAddr"`
 	Network       string     `json:"network"`
 	System        string     `json:"system"`
 	Pubsub        string     `json:"pubsub"`
@@ -54,7 +59,15 @@ type cmdOpt struct {
 	Logtype       string     `json:"logtype"`
 }
 
+type evLocalStats struct {
+	InstID        int                   `json:"instID"`
+	Stats         types.EdgeviewStatus  `json:"stats"`
+}
+
+var evInstStats [maxInstNumber]evLocalStats   // instances stats
+
 func main() {
+	pInst := flag.Int("inst", 0, "instance ID (1-5)")
 	wsAddr := flag.String("ws", "", "http service address")
 	phelpopt := flag.Bool("help", false, "command-line help")
 	phopt := flag.Bool("h", false, "command-line help")
@@ -64,8 +77,7 @@ func main() {
 	pDebug := flag.Bool("debug", false, "log more in debug")
 	flag.Parse()
 
-	logger := logrus.New()
-	log = base.NewSourceLogObject(logger, agentName, os.Getpid())
+	logger := evLogger(*pDebug)
 
 	if *pServer {
 		runOnServer = true
@@ -86,7 +98,7 @@ func main() {
 	} else {
 		// if wss endpoint is not passed in, try to get it from the JWT
 		if *ptoken != "" && *wsAddr == "" {
-			addrport, path, err := getAddrFromJWT(*ptoken, *pServer, &evStatus)
+			addrport, path, err := getAddrFromJWT(*ptoken, *pServer, &evStatus, *pInst)
 			if err != nil {
 				fmt.Printf("%v\n", err)
 				return
@@ -135,6 +147,7 @@ func main() {
 				extraopt = numline
 			case "token":
 				*ptoken = word
+			case "inst":
 			default:
 			}
 			skiptype = ""
@@ -158,6 +171,8 @@ func main() {
 			skiptype = "extra"
 		} else if strings.HasSuffix(word, "-token") {
 			skiptype = "token"
+		} else if strings.HasSuffix(word, "-inst") {
+			skiptype = "inst"
 		} else {
 			pqueryopt = word
 		}
@@ -166,10 +181,6 @@ func main() {
 	if *phopt || *phelpopt {
 		printHelp(pqueryopt)
 		return
-	}
-
-	if *pDebug {
-		logger.SetLevel(logrus.DebugLevel)
 	}
 
 	if *pdevip == "" && *ptoken == "" {
@@ -266,6 +277,9 @@ func main() {
 		} else {
 			hostname = getHostname()
 		}
+		if edgeviewInstID > 0 {
+			hostname = hostname + "-inst-" + strconv.Itoa(edgeviewInstID)
+		}
 		tokenHash16 := getTokenHashString(*ptoken)
 		fmt.Printf("%s connecting to %s\n", hostname, urlWSS.String())
 		// on server, the script will retry in some minutes later
@@ -275,11 +289,12 @@ func main() {
 		}
 		defer websocketConn.Close()
 		done = make(chan struct{})
+	} else {
+		evDevice = *pdevip
 	}
 
 	queryCmds := cmdOpt{
 		Version:       edgeViewVersion,
-		DevIPAddr:     *pdevip,
 		Network:       pnetopt,
 		System:        psysopt,
 		Pubsub:        ppubsubopt,
@@ -297,7 +312,7 @@ func main() {
 
 	// for edgeview server side to use
 	var infoPub pubsub.Publication
-	trigPubchan := make(chan bool, 1)
+	trigPubchan = make(chan bool, 1)
 	pubStatusTimer := time.NewTimer(1 * time.Second)
 	pubStatusTimer.Stop()
 
@@ -316,7 +331,7 @@ func main() {
 		}
 
 		infoPub = initpubInfo(logger)
-		if infoPub == nil {
+		if infoPub == nil && edgeviewInstID <= 1 {
 			return
 		}
 
@@ -332,10 +347,15 @@ func main() {
 				}
 
 				var recvCmds cmdOpt
-				isJSON, verifyOK, message := verifyAuthenData(msg)
+				isJSON, verifyOK, message := verifyEnvelopeData(msg)
 				if !isJSON {
 					if strings.Contains(string(msg), "no device online") {
 						log.Noticef("read: peer not there yet, continue")
+					} else {
+						ok := checkClientIPMsg(string(msg))
+						if ok {
+							log.Noticef("My endpoint IP: %s\n", myEvEndPoint)
+						}
 					}
 					continue
 				}
@@ -350,7 +370,6 @@ func main() {
 						log.Noticef("read: no device, continue")
 						continue
 					} else {
-						log.Noticef("recv cmd msg: %s", message)
 						if isTCPServer {
 							close(tcpServerDone)
 							continue
@@ -383,6 +402,19 @@ func main() {
 		}()
 	} else { // 3) websocket mode on client side
 
+		// get the client ip address
+		mtype, msg, err := websocketConn.ReadMessage()
+		if err == nil && mtype == websocket.TextMessage {
+			ok := checkClientIPMsg(string(msg))
+			if ok {
+				var instStr string
+				if edgeviewInstID > 1 {
+					instStr = fmt.Sprintf("-inst-%d", edgeviewInstID)
+				}
+				fmt.Printf("Client%s endpoint IP: %s\n", instStr, myEvEndPoint)
+				queryCmds.ClientEPAddr = myEvEndPoint
+			}
+		}
 		if !clientSendQuery(queryCmds) {
 			return
 		}
@@ -397,7 +429,7 @@ func main() {
 					return
 				}
 
-				isJSON, verifyOK, message := verifyAuthenData(msg)
+				isJSON, verifyOK, message := verifyEnvelopeData(msg)
 				if !isJSON {
 					fmt.Printf("%s\nreceive message done\n", string(msg))
 					done <- struct{}{}
@@ -442,6 +474,10 @@ func main() {
 		}()
 	}
 
+	if edgeviewInstID == 1 {
+		go serverEvStats()
+	}
+
 	// ssh or non-ssh client wait for replies and finishes with a 'done' or gets a Ctrl-C
 	// non-ssh server will be killed when the session is expired with the script
 	for {
@@ -450,9 +486,28 @@ func main() {
 			// not to publish the status too fast
 			pubStatusTimer = time.NewTimer(15 * time.Second)
 		case <-pubStatusTimer.C:
-			err := infoPub.Publish("global", evStatus)
-			if err != nil {
-				log.Noticef("evinfopub: publish error: %v\n", err)
+			if infoPub != nil {
+				if edgeviewInstID == 0 {
+					err := infoPub.Publish("global", evStatus)
+					if err != nil {
+						log.Noticef("evinfopub: publish error: %v\n", err)
+					}
+				} else if edgeviewInstID == 1 {
+					evInstStats[0].Stats = evStatus
+					for i, s := range evInstStats {
+						if i == 0 {
+							continue
+						}
+						evInstStats[0].Stats.CmdCountDev += s.Stats.CmdCountDev
+						evInstStats[0].Stats.CmdCountApp += s.Stats.CmdCountApp
+					}
+					err := infoPub.Publish("global", evInstStats[0].Stats)
+					if err != nil {
+						log.Errorf("evinfopub: publish error: %v\n", err)
+					}
+				}
+			} else if edgeviewInstID > 1 {
+				reportInstStats(evStatus)
 			}
 		case <-done:
 			tcpClientSendDone()
@@ -462,6 +517,19 @@ func main() {
 			return
 		}
 	}
+}
+
+func evLogger(deb bool) *logrus.Logger {
+	formatter := logrus.JSONFormatter{
+		TimestampFormat: time.RFC3339Nano,
+	}
+	logger := logrus.New()
+	logger.SetFormatter(&formatter)
+	log = base.NewSourceLogObject(logger, agentName, os.Getpid())
+	if deb {
+		logger.SetLevel(logrus.DebugLevel)
+	}
+	return logger
 }
 
 func goRunQuery(cmds cmdOpt) {
@@ -476,7 +544,7 @@ func goRunQuery(cmds cmdOpt) {
 			return
 		}
 		closePipe(false)
-		err = signAuthAndWriteWss([]byte(closeMessage), true)
+		err = addEnvelopeAndWriteWss([]byte(closeMessage), true)
 		if err != nil {
 			log.Noticef("sent done msg error: %v", err)
 		}
@@ -488,7 +556,6 @@ func parserAndRun(cmds cmdOpt) {
 	if cmds.Timerange != "" {
 		cmdTimeout = cmds.Timerange
 	}
-	evDevice = cmds.DevIPAddr
 	if cmds.Logtype != "" {
 		querytype = cmds.Logtype
 	}
@@ -513,6 +580,9 @@ func parserAndRun(cmds cmdOpt) {
 }
 
 func initpubInfo(logger *logrus.Logger) pubsub.Publication {
+	if edgeviewInstID > 1 {
+		return nil
+	}
 	ps := *pubsub.New(&socketdriver.SocketDriver{Logger: logger, Log: log}, logger, log)
 	infoPub, err := ps.NewPublication(
 		pubsub.PublicationOptions{
@@ -530,4 +600,87 @@ func initpubInfo(logger *logrus.Logger) pubsub.Publication {
 	}
 
 	return infoPub
+}
+
+// XXX temp here
+func serverEvStats() {
+	http.HandleFunc("/evStats", evStatsHandler)
+	err := http.ListenAndServe(instStatsEPString, nil)
+	if err != nil {
+		log.Errorf("serverEvStats: exit with error: %v", err)
+	}
+}
+
+func evStatsHandler(w http.ResponseWriter, r *http.Request) {
+	log.Noticef("InstStats: stats server get message")
+
+	switch r.Method {
+	case "POST":
+		var localStats evLocalStats
+		content, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Errorf("stats server read error: %v", err)
+			return
+		}
+		err = json.Unmarshal(content, &localStats)
+		if err != nil {
+			log.Errorf("stats server unmarshal error: %v", err)
+			return
+		}
+
+		if localStats.InstID < 2 || localStats.InstID > maxInstNumber {
+			log.Errorf("stats server receive incorrect stats: %v", localStats)
+			return
+		}
+		evInstStats[localStats.InstID - 1] = localStats
+		log.Noticef("InstStats: received stats from inst %d ok, %v", localStats.InstID, localStats) // XXX
+
+		trigPubchan <- true
+	default:
+	}
+}
+
+func reportInstStats(evStatus types.EdgeviewStatus) {
+	var localStats evLocalStats
+	localStats.InstID = edgeviewInstID
+	localStats.Stats = evStatus
+
+	jmsg, err := json.Marshal(localStats)
+	if err != nil {
+		log.Errorf("stats client marshal error: %v", err)
+		return
+	}
+
+	_, err = http.Post("http://"+instStatsEPString+"/evStats", "application/json", bytes.NewBuffer(jmsg))
+	if err != nil {
+		log.Errorf("InstStats: stats client http post error: %v", err)
+		return
+	}
+	log.Noticef("InstStats: inst %d, posted ok", edgeviewInstID)
+}
+
+func checkClientIPMsg(msg string) bool {
+	if strings.HasPrefix(msg, clientIPMsg) {
+		msgs := strings.SplitN(msg, clientIPMsg, 2)
+		if len(msgs) == 2 {
+			addrPort := strings.Split(msgs[1], ":")
+			if net.ParseIP(addrPort[0]) == nil {
+				log.Errorf("received invalid IP %v", msg)
+				return false
+			}
+			if len(addrPort) == 2 {
+				num, err := strconv.Atoi(addrPort[1])
+				if err != nil || num < 1024 || num > 65535 {
+					log.Errorf("received invalid IP %v", msg)
+					return false
+				}
+			} else if len(addrPort) > 2 {
+				log.Errorf("received invalid IP %v", msg)
+				return false
+			}
+			myEvEndPoint = msgs[1]
+			return true
+		}
+	}
+	return false
 }

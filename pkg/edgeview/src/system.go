@@ -607,6 +607,10 @@ func runShell(opt string) {
 		_, _ = runCmd(shell[1], false, true)
 	} else {
 		shellcmd := strings.Fields(shell[1])
+		if len(shellcmd) < 1 {
+			fmt.Printf("shell command invalid\n")
+			return
+		}
 		prog := shellcmd[0]
 		args := shellcmd[1:]
 		cmd := exec.Command(prog, args...)

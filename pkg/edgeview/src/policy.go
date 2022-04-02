@@ -69,15 +69,34 @@ func getAllLocalAddr() []string {
 	return localIPs
 }
 
+func getCMDString(cmds cmdOpt) string {
+	if cmds.Network != "" {
+		return cmds.Network
+	} else if cmds.System != "" {
+		return cmds.System
+	} else if cmds.Pubsub != "" {
+		return "pub/" + cmds.Pubsub
+	} else if cmds.Logopt != "" {
+		logopt := "log/" + cmds.Logopt
+		if cmds.Timerange != "" {
+			logopt = logopt + " -time " + cmds.Timerange
+		}
+		return logopt
+	}
+	return ""
+}
+
 func checkCmdPolicy(cmds cmdOpt, evStatus *types.EdgeviewStatus) bool {
 	// log the incoming edge-view command from client
-	printCmds := cmds
-	log.Noticef("recv: %+v", printCmds)
+	var instStr string
+	if edgeviewInstID > 0 {
+		instStr = fmt.Sprintf("-inst-%d", edgeviewInstID)
+	}
 
 	if cmds.Logopt != "" || cmds.Pubsub != "" || cmds.System != "" ||
 		(cmds.Network != "" && !strings.HasPrefix(cmds.Network, "tcp/")) {
 		if !devPolicy.Enabled {
-			log.Noticef("device cmds: %v, not allowed by policy", cmds)
+			log.Noticef("device cmds: %v, not allowed by policy", getCMDString(cmds))
 			return false
 		}
 		evStatus.CmdCountDev++
@@ -94,6 +113,9 @@ func checkCmdPolicy(cmds cmdOpt, evStatus *types.EdgeviewStatus) bool {
 			return false
 		}
 	}
+	logObj := log.CloneAndAddField("obj_type", "newlog-gen-event").
+		AddField("obj_name", "edgeview-cmd")
+	logObj.Noticef("recv[ep%s:%s] cmd: %v", instStr, cmds.ClientEPAddr, getCMDString(cmds))
 	return true
 }
 

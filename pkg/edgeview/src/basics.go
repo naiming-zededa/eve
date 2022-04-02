@@ -5,7 +5,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -13,10 +12,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"golang.org/x/crypto/ssh"
 )
@@ -40,14 +39,10 @@ var (
 	logdirectory  []string
 )
 
-var jwtNonce string      // JWT session Nonce for authentication
-const hashBytesNum = 32  // Hmac Sha256 Hash is 32 bytes fixed
+var edgeviewInstID int   // if set, from 1 to 5
 
-// authentication wrapper for messages
-type authenMsg struct {
-	Message         []byte              `json:"message"`
-	HmacSha256Hash  [hashBytesNum]byte  `json:"hmacSha256Hash"`
-}
+const maxInstNumber = 5  // allow up to five edgeview sessions and instances
+const instStatsEPString = "localhost:8234"
 
 // all the supported options
 func initOpts() {
@@ -166,11 +161,18 @@ func isValidOpt(value string, optslice []string) bool {
 }
 
 // get url and path from JWT token string
-func getAddrFromJWT(token string, isServer bool, evStatus *types.EdgeviewStatus) (string, string, error) {
+func getAddrFromJWT(token string, isServer bool, evStatus *types.EdgeviewStatus, instID int) (string, string, error) {
 	var addrport, path string
 	tparts := strings.Split(token, ".")
 	if len(tparts) != 3 {
 		return addrport, path, fmt.Errorf("no ip:port or invalid JWT")
+	}
+
+	if instID > 0 {
+		if instID > maxInstNumber {
+			return addrport, path, fmt.Errorf("JWT inst number incorrect")
+		}
+		edgeviewInstID = instID
 	}
 
 	data, err := base64.RawURLEncoding.DecodeString(tparts[1])
@@ -205,6 +207,12 @@ func getAddrFromJWT(token string, isServer bool, evStatus *types.EdgeviewStatus)
 		return addrport, path, fmt.Errorf("JWT expired %d sec ago", nowSec - jdata.Exp)
 	}
 
+	if jdata.Num > 1 && instID < 1 {
+		return addrport, path, fmt.Errorf("Edgeview is in multi-instance mode, inst-id(1-%d) needs to be specifed", jdata.Num)
+	} else if jdata.Num == 1 && instID > 0 {
+		return addrport, path, fmt.Errorf("Edgeview is not in multi-instance mode, no need to specify inst-ID")
+	}
+
 	if strings.Contains(jdata.Dep, "/") {
 		urls := strings.SplitN(jdata.Dep, "/", 2)
 		addrport = urls[0]
@@ -215,67 +223,9 @@ func getAddrFromJWT(token string, isServer bool, evStatus *types.EdgeviewStatus)
 
 	evStatus.ExpireOn = jdata.Exp
 	evStatus.StartedOn = now
-	jwtNonce = jdata.Key
+	encryptInit(jdata)
 
 	return addrport, path, nil
-}
-
-// sign with JWT nonce on message data and send through websocket
-func signAuthAndWriteWss(msg []byte, isText bool) error {
-	jdata := signAuthenData(msg)
-	if jdata == nil {
-		err := fmt.Errorf("sign authen message failed")
-		return err
-	}
-
-	var msgType int
-	if isText {
-		msgType = websocket.TextMessage
-	} else {
-		msgType = websocket.BinaryMessage
-	}
-	err := websocketConn.WriteMessage(msgType, jdata)
-	return err
-}
-
-func signAuthenData(msg []byte) []byte {
-	jmsg := authenMsg{
-		Message: msg,
-	}
-
-	h := hmac.New(sha256.New, []byte(jwtNonce))
-	_, _ = h.Write(jmsg.Message)
-	hash := h.Sum(nil)
-	n := copy(jmsg.HmacSha256Hash[:], hash)
-	if len(hash) != hashBytesNum || n != hashBytesNum {
-		log.Errorf("Hash copy bytes not correct: %d", n)
-		return nil
-	}
-
-	jdata, err := json.Marshal(jmsg)
-	if err != nil {
-		log.Errorf("json marshal error: %v", err)
-		return nil
-	}
-	return jdata
-}
-
-// returns isJson, verifyOK and payload data
-func verifyAuthenData(data []byte) (bool, bool, []byte) {
-	var auth authenMsg
-	err := json.Unmarshal(data, &auth)
-	if err != nil {
-		return false, false, nil
-	}
-
-	h := hmac.New(sha256.New, []byte(jwtNonce))
-	_, _ = h.Write(auth.Message)
-	if !bytes.Equal(auth.HmacSha256Hash[:], h.Sum(nil)) {
-		log.Noticef("Verify failed")
-		return true, false, nil
-	}
-
-	return true, true, auth.Message
 }
 
 func getBasics() {
@@ -299,7 +249,11 @@ func getBasics() {
 			ipaddrs := strings.Split(words[n-1], "/")
 			ips = append(ips, ipaddrs[0])
 		}
-		fmt.Printf("Device IPs: %v\n", ips)
+		if myEvEndPoint != "" {
+			fmt.Printf("Device IPs: %v; Endpoint IP %s\n", ips, myEvEndPoint)
+		} else {
+			fmt.Printf("Device IPs: %v\n", ips)
+		}
 	}
 	retStr, err = runCmd("cat /persist/status/uuid", false, false)
 	if err == nil {
@@ -452,6 +406,9 @@ func getJSONFileID(path string) string {
 }
 
 func getTokenHashString(token string) []byte {
+	if edgeviewInstID > 0 {
+		token = token + "." + strconv.Itoa(edgeviewInstID)
+	}
 	h := sha256.New()
 	_, err := h.Write([]byte(token))
 	if err != nil {
@@ -467,7 +424,7 @@ func getFileTimeStr(t1 time.Time) string {
 	return fmt.Sprintf("%d%02d%02d%02d%02d%02d", t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second())
 }
 
-var helpStr =`edge-view-query [ -token <session-token> | -device <ip-addr> ] [ -debug ] <query string>
+var helpStr =`edge-view-query [ -token <session-token> | -device <ip-addr> ] [ -debug ] [ -inst <instance-id> ] <query string>
  options:
   log/search-pattern [ -time <start_time>-<end_time> -json -type <app|dev> -extra num ]
 `

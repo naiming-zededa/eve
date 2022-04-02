@@ -178,6 +178,7 @@ func GetTlsConfig(dns *types.DeviceNetworkStatus, serverName string, clientCert 
 		MinVersion: tls.VersionTLS12,
 		// Session Resumption, zero means using the default, which is 64
 		ClientSessionCache: tls.NewLRUClientSessionCache(0),
+		InsecureSkipVerify: true, // XXX hack for local cluster
 	}
 	tlsConfig.BuildNameToCertificate()
 	return tlsConfig, nil

@@ -172,7 +172,7 @@ func closePipe(openAfter bool) {
 			}
 		}
 	} else if websocketConn != nil && len(buf.String()) > 0 {
-		err := signAuthAndWriteWss(buf.Bytes(), true)
+		err := addEnvelopeAndWriteWss(buf.Bytes(), true)
 		if err != nil {
 			log.Errorf("write: %v", err)
 		} else {
@@ -220,7 +220,7 @@ func clientSendQuery(cmd cmdOpt) bool {
 		return false
 	}
 
-	err = signAuthAndWriteWss(jdata, true)
+	err = addEnvelopeAndWriteWss(jdata, true)
 	if err != nil {
 		fmt.Printf("write: %v\n", err)
 		return false
