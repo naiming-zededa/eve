@@ -57,10 +57,10 @@ type vmiMetaData struct {
 }
 
 type kubevirtContext struct {
-	ctrdContext
 	devicemodel       string
 	capabilities      *types.Capabilities
 	vmiList           map[string]*vmiMetaData
+	PCI               map[string]bool
 	virthandlerIPAddr string
 	prevDomainMetric  map[string]types.DomainMetric
 	kubeConfig        *rest.Config
@@ -88,26 +88,20 @@ var excludedMetrics = map[string]struct{}{
 }
 
 func newKubevirt() Hypervisor {
-	ctrdCtx, err := initContainerd()
-	if err != nil {
-		logrus.Fatalf("couldn't initialize containerd (this should not happen): %v. Exiting.", err)
-		return nil // it really never returns on account of above
-	}
-
 	switch runtime.GOARCH {
 	case "arm64":
 		return kubevirtContext{
-			ctrdContext:      *ctrdCtx,
 			devicemodel:      "virt",
 			vmiList:          make(map[string]*vmiMetaData),
 			prevDomainMetric: make(map[string]types.DomainMetric),
+			PCI:              map[string]bool{},
 		}
 	case "amd64":
 		return kubevirtContext{
-			ctrdContext:      *ctrdCtx,
 			devicemodel:      "pc-q35-3.1",
 			vmiList:          make(map[string]*vmiMetaData),
 			prevDomainMetric: make(map[string]types.DomainMetric),
+			PCI:              map[string]bool{},
 		}
 	}
 	return nil
@@ -149,11 +143,7 @@ func (ctx kubevirtContext) Name() string {
 }
 
 func (ctx kubevirtContext) Task(status *types.DomainStatus) types.Task {
-	if status.VirtualizationMode == types.NOHYPER {
-		return ctx.ctrdContext
-	} else {
-		return ctx
-	}
+	return ctx
 }
 
 // Use eve DomainConfig and DomainStatus and generate k3s VM instance
@@ -591,9 +581,6 @@ func (ctx kubevirtContext) Info(domainName string) (int, types.SwState, error) {
 
 func (ctx kubevirtContext) Cleanup(domainName string) error {
 	logrus.Infof("PRAMOD Cleanup called for Domain: %s", domainName)
-	if err := ctx.ctrdContext.Cleanup(domainName); err != nil {
-		return fmt.Errorf("couldn't cleanup task %s: %v", domainName, err)
-	}
 
 	var err error
 	vmis, ok := ctx.vmiList[domainName]
@@ -830,6 +817,32 @@ func (ctx kubevirtContext) GetDomsCPUMem() (map[string]types.DomainMetric, error
 	}
 	logrus.Infof("GetDomsCPUMem: %d VMs: %+v, podnum %d", len(ctx.vmiList), res, hasEmptyRes)
 	return res, nil
+}
+
+func (ctx kubevirtContext) GetHostCPUMem() (types.HostMemory, error) {
+	return selfDomCPUMem()
+}
+
+func (ctx kubevirtContext) PCIReserve(long string) error {
+	if ctx.PCI[long] {
+		return fmt.Errorf("PCI %s is already reserved", long)
+	} else {
+		ctx.PCI[long] = true
+		return nil
+	}
+}
+
+func (ctx kubevirtContext) PCISameController(id1 string, id2 string) bool {
+	return types.PCISameController(id1, id2)
+}
+
+func (ctx kubevirtContext) PCIRelease(long string) error {
+	if !ctx.PCI[long] {
+		return fmt.Errorf("PCI %s is not reserved", long)
+	} else {
+		ctx.PCI[long] = false
+		return nil
+	}
 }
 
 func getVirtHandlerIPAddr(ctx *kubevirtContext) (string, error) {
