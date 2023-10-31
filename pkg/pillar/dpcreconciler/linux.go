@@ -1840,11 +1840,42 @@ func (r *LinuxDpcReconciler) getIntendedACLs(
 		Description: "Incoming DNS replies (used to allow kubernetes DNS replies from external server)",
 	}
 
+	markK3s := iptables.Rule{
+		RuleLabel:   "K3s mark",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "6443"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", iptables.ControlProtocolMarkingIDMap["in_k3s"]},
+		Description: "Mark K3S API server traffic for kubernetes",
+	}
+
+	markEtcd := iptables.Rule{
+		RuleLabel:   "Etcd mark",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "2379:2381"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", iptables.ControlProtocolMarkingIDMap["in_etcd"]},
+		Description: "Mark K3S HA with embedded etcd traffic for kubernetes",
+	}
+
+	markFlannel := iptables.Rule{
+		RuleLabel:  "Flannel mark",
+		MatchOpts:  []string{"-p", "udp", "--dport", "8472"},
+		Target:     "CONNMARK",
+		TargetOpts: []string{"--set-mark", iptables.ControlProtocolMarkingIDMap["in_flannel"]},
+	}
+
+	markMetrics := iptables.Rule{
+		RuleLabel:   "Metrics mark",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "10250"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", iptables.ControlProtocolMarkingIDMap["in_metrics"]},
+		Description: "Mark K3S metrics traffic for kubernetes",
+	}
+
 	protoMarkV4Rules := []iptables.Rule{
 		markSSHAndGuacamole, markVnc, markIcmpV4, markDhcp,
 	}
 	if r.HVTypeKube {
-		protoMarkV4Rules = append(protoMarkV4Rules, markDNS)
+		protoMarkV4Rules = append(protoMarkV4Rules, markDNS, markK3s, markEtcd, markFlannel, markMetrics)
 	}
 	protoMarkV6Rules := []iptables.Rule{
 		markSSHAndGuacamole, markVnc, markIcmpV6,

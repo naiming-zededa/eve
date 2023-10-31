@@ -56,6 +56,14 @@ var ControlProtocolMarkingIDMap = map[string]string{
 	"app_icmpv6": "12",
 	// for Kubernetes DNS, allowing coreDNS to talk to external DNS servers
 	"in_dns": "13",
+	// for kube api-server
+	"in_k3s": "14",
+	// for kube Etcd
+	"in_etcd": "15",
+	// for flannel VxLan
+	"in_flannel": "16",
+	// for kube Metrics
+	"in_metrics": "17",
 }
 
 // GetConnmark : create connection mark corresponding to the given attributes.

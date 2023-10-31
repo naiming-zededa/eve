@@ -4,16 +4,39 @@
 # SPDX-License-Identifier: Apache-2.0
 
 K3S_VERSION=v1.26.3+k3s1
+#K3S_VERSION=v1.28.2+k3s1
 KUBEVIRT_VERSION=v0.59.0
 LONGHORN_VERSION=v1.4.2
 CDI_VERSION=v1.56.0
 Node_IP=""
-MAX_K3S_RESTARTS=10
+MAX_K3S_RESTARTS=192
 RESTART_COUNT=0
 K3S_LOG_DIR="/var/lib/"
 loglimitSize=$((5*1024*1024))
 
 INSTALL_LOG=/var/lib/install.log
+
+#
+# Temp hack to avoid rebuilding 
+#
+kv_mode=server
+server_ip=""
+server_token=""
+if grep -q eve_kv_mode /proc/cmdline; then
+  kv_mode=$(cat /proc/cmdline | tr ' ' '\n' | grep eve_kv_mode | cut -d '=' -f 2)
+fi
+if [ "$kv_mode" == "client" ]; then
+  server_ip=$(cat /proc/cmdline | tr ' ' '\n' | grep eve_kv_server_ip | cut -d '=' -f 2)
+  server_token=$(cat /proc/cmdline | tr ' ' '\n' | grep eve_kv_server_token | cut -d '=' -f 2)
+fi
+if [ "$kv_mode" == "client" ]; then
+  echo ' log: "/var/lib/rancher/k3s/k3s.log"' > /etc/rancher/k3s/config.yaml
+  echo ' debug: true' >> /etc/rancher/k3s/config.yaml
+  echo ' container-runtime-endpoint: "/run/containerd-user/containerd.sock"' >> /etc/rancher/k3s/config.yaml
+  echo " server: https://${server_ip}:6443" >> /etc/rancher/k3s/config.yaml
+  echo " token: ${server_token}" >> /etc/rancher/k3s/config.yaml
+fi
+
 
 logmsg() {
    local MSG
@@ -203,7 +226,7 @@ check_start_containerd() {
         fi
 
         pgrep -f "containerd --config" > /dev/null 2>&1
-        if [ $? -eq 1 ]; then 
+        if [ $? -eq 1 ]; then
                 mkdir -p /run/containerd-user
                 nohup /var/lib/rancher/k3s/data/current/bin/containerd --config /etc/containerd/config-k3s.toml &
                 containerd_pid=$!
@@ -342,6 +365,69 @@ do
 done
 mount /dev/zvol/persist/etcd-storage /var/lib  ## This is where we persist the cluster components (etcd)
 logmsg "Using ZFS persistent storage"
+mkdir -p /persist/vault/volumes
+
+if [ "$kv_mode" == "client" ]; then
+  while true;
+  do
+  if [ ! -f /var/lib/k3s_initialized ]; then
+          if [ ! -f /var/lib/k3s_initialized ]; then
+                  # cni plugin
+                  copy_cni_plugin_files
+                  #/var/lib is where all kubernetes components get installed.
+                  logmsg "Installing K3S version $K3S_VERSION"
+                  mkdir -p /var/lib/k3s/bin
+                  /usr/bin/curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${K3S_VERSION} INSTALL_K3S_SKIP_ENABLE=true INSTALL_K3S_BIN_DIR=/var/lib/k3s/bin sh -
+                  ln -s /var/lib/k3s/bin/* /usr/bin
+                  sleep 5
+                  logmsg "Initializing K3S version $K3S_VERSION"
+                  trigger_k3s_selfextraction
+                  check_start_containerd
+                  nohup /usr/bin/k3s agent --server https://${server_ip}:6443 --token $server_token --container-runtime-endpoint=/run/containerd-user/containerd.sock &
+                  k3s_pid=$!
+                  logmsg "k3s agent is running on this node, pid:$k3s_pid"
+                  touch /var/lib/k3s_initialized
+          fi
+          if [ ! -f /var/lib/multus_initialized ]; then
+            logmsg "Installing multus cni"
+            apply_multus_cni
+            # launch CNI dhcp service
+            /opt/cni/bin/dhcp daemon &
+          fi
+  else
+          check_start_containerd
+          pgrep -f "k3s agent" > /dev/null 2>&1
+          if [ $? -eq 1 ]; then 
+              if [ $RESTART_COUNT -lt $MAX_K3S_RESTARTS ]; then
+                  ## Must be after reboot, or from k3s restart
+                  let "RESTART_COUNT++"
+                  if [ ! -f /var/lib/cni/bin ]; then
+                    copy_cni_plugin_files
+                  fi
+                  ln -s /var/lib/k3s/bin/* /usr/bin
+                  logmsg "Starting k3s agent, restart count: $RESTART_COUNT"
+                  # for now, always copy to get the latest
+                  nohup /usr/bin/k3s agent --server https://${server_ip}:6443 --token $server_token --container-runtime-endpoint=/run/containerd-user/containerd.sock &
+                  k3s_pid=$!
+                  logmsg "k3s agent is running on this node, pid:$k3s_pid"
+                  # apply multus
+                  if [ ! -f /var/lib/multus_initialized ]; then
+                    apply_multus_cni
+                  fi
+                  # launch CNI dhcp service
+                  /opt/cni/bin/dhcp daemon &
+              else
+                  logmsg "k3s is down and restart count exceeded."
+              fi
+          fi
+  fi
+  check_log_file_size
+  check_and_run_vnc
+  wait_for_item "wait"
+  sleep 30
+  done
+fi
+
 
 #Forever loop every 15 secs
 while true;
@@ -415,9 +501,12 @@ if [ ! -f /var/lib/all_components_initialized ]; then
                 wait_for_item "longhorn"
                 logmsg "Installing longhorn version ${LONGHORN_VERSION}"
                 apply_longhorn_disk_config $HOSTNAME
+                apk add nfs-utils
                 #kubectl apply -f  https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_VERSION}/deploy/longhorn.yaml
                 # Switch back to above once all the longhorn services use the updated go iscsi tools
-                kubectl apply -f /etc/longhorn-config.yaml
+                kubectl apply -f /etc/longhorn-config-latest.yaml
+                # Set longhorn storage class as default
+                kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
                 touch /var/lib/longhorn_initialized
         fi
 
