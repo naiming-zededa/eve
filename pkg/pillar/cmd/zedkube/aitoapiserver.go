@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"io"
-	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -18,7 +17,6 @@ import (
 )
 
 func check_ioAdapter_ethernet(ctx *zedkubeContext, aiConfig *types.AppInstanceConfig) error {
-	updateAppKubeNetStatus(ctx, aiConfig)
 
 	ioAdapter := aiConfig.IoAdapterList
 	for _, io := range ioAdapter {
@@ -57,80 +55,6 @@ func check_del_ioAdpater_ethernet(ctx *zedkubeContext, aiConfig *types.AppInstan
 			log.Noticef("check_del_ioAdpater_ethernet: delete existing nad %v", nadname)
 		}
 	}
-}
-
-func updateAppKubeNetStatus(ctx *zedkubeContext, aiConfig *types.AppInstanceConfig) {
-	aiName := strings.ToLower(aiConfig.DisplayName)
-	if _, ok := ctx.appKubeNetStatus[aiName]; !ok {
-		ctx.appKubeNetStatus[aiName] = &types.AppKubeNetworkStatus{
-			UUIDandVersion: aiConfig.UUIDandVersion,
-			DisplayName:    aiName,
-		}
-		ulcount := len(aiConfig.UnderlayNetworkList)
-		ctx.appKubeNetStatus[aiName].ULNetworkStatusList = make([]types.UnderlayNetworkStatus, ulcount)
-		for i := range aiConfig.UnderlayNetworkList {
-			ctx.appKubeNetStatus[aiName].ULNetworkStatusList[i].UnderlayNetworkConfig =
-				aiConfig.UnderlayNetworkList[i]
-			log.Noticef("updateAppKubeNetStatus: (%d)", i)
-		}
-		log.Functionf("updateAppKubeNetStatus: ulcount %d, for %s, appKubeNetStatus %+v", ulcount, aiName, ctx.appKubeNetStatus[aiName])
-	}
-}
-
-func publishAppKubeNetStatus(ctx *zedkubeContext, ebStatus *EveClusterInstStatus) {
-	status := lookupNIStatusFromName(ctx, ebStatus.BridgeConfig)
-	if status == nil {
-		log.Errorf("publishAppKubeNetStatus: can't find NI status for %s", ebStatus.BridgeConfig)
-		return
-	}
-
-	log.Noticef("publishAppKubeNetStatus: for eve-bridge %v, ni-status %v, nistatus uuid %v, appnet len %d",
-		ebStatus, status, status.UUIDandVersion.UUID, len(ctx.appKubeNetStatus))
-	for ainame, akStatus := range ctx.appKubeNetStatus {
-		log.Noticef("publishAppKubeNetStatus:(%s) akStatus size %d", ainame, len(akStatus.ULNetworkStatusList))
-		for i, ulstatus := range akStatus.ULNetworkStatusList {
-			log.Noticef("publishAppKubeNetStatus:(%d) ulcfg network %v", i, ulstatus.Network)
-			if ulstatus.Network.String() == status.UUIDandVersion.UUID.String() {
-				var err error
-				ulx := ulstatus
-				ulx.Vif = ebStatus.VifName
-				ulx.Mac, err = net.ParseMAC(ebStatus.VifMAC)
-				if err != nil {
-					log.Errorf("publishAppKubeNetStatus: parseMac %s, error %v", ebStatus.VifMAC, err)
-				}
-				ulx.Bridge = ebStatus.BridgeName
-				ulx.AllocatedIPv4Addr = ebStatus.PodIntfPrefix.IP
-				ulx.IPv4Assigned = true
-				ulx.HostName = ebStatus.PodName
-
-				akStatus.ULNetworkStatusList[i] = ulx
-
-				// got all the NI items. publish
-				key := akStatus.UUIDandVersion.UUID.String()
-				log.Noticef("publishAppKubeNetStatus: update ul key %s, status %+v", key, ulx)
-				ctx.pubAppKubeNetworkStatus.Publish(key, *akStatus)
-				akStatus.ContainerID = ebStatus.ContainerID
-				ctx.appKubeNetStatus[ainame] = akStatus
-
-				break
-			}
-		}
-	}
-}
-
-func unpublishAppKubeNetStatus(ctx *zedkubeContext, filename string) {
-	pub := ctx.pubAppKubeNetworkStatus
-	items := pub.GetAll()
-	for _, item := range items {
-		akStatus := item.(types.AppKubeNetworkStatus)
-		if strings.Contains(filename, akStatus.ContainerID) {
-			key := akStatus.Key()
-			log.Noticef("unpublishAppKubeNetStatus: key %s, filename %s", key, filename)
-			pub.Unpublish(key)
-			return
-		}
-	}
-	log.Noticef("unpublishAppKubeNetStatus: not found %s", filename)
 }
 
 func collectAppLogs(ctx *zedkubeContext) {
