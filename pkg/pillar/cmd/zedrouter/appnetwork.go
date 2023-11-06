@@ -85,56 +85,19 @@ func (z *zedrouter) prepareConfigForVIFs(config types.AppNetworkConfig,
 			z.addAppNetworkError(status, "doActivateAppNetwork", err)
 			return nil, err
 		}
-
-		// kube mode
-		var kubeulstatus *types.UnderlayNetworkStatus
-		if z.hvTypeKube {
-			subk := z.subAppKubeNetStatus
-			items := subk.GetAll()
-			for _, item := range items {
-				st := item.(types.AppKubeNetworkStatus)
-				if st.UUIDandVersion.UUID.String() != config.UUIDandVersion.UUID.String() {
-					continue
-				}
-				for _, u := range st.ULNetworkStatusList {
-					if u.Network.String() == ulStatus.Network.String() {
-						kubeulstatus = &u
-						break
-					}
-				}
-				if kubeulstatus != nil {
-					break
-				}
-			}
-			//if kubeulstatus == nil {
-			//	err := fmt.Errorf("kube ul status not found")
-			//	z.log.Errorf("appNetworkDoActivateUnderlayNetwork: %v", err)
-			//	continue
-			//}
-			z.log.Functionf("appNetworkDoActivateUnderlayNetwork: kubeulstatus %+v", kubeulstatus)
-		}
-
 		ulStatus.Bridge = netInstStatus.BridgeName
 		ulStatus.BridgeMac = netInstStatus.BridgeMac
 		ulStatus.BridgeIPAddr = netInstStatus.BridgeIPAddr
-		ulStatus.HostName = config.Key()
-		if z.hvTypeKube && kubeulstatus != nil {
-			ulStatus.Name = kubeulstatus.Name
-			ulStatus.Vif = kubeulstatus.Vif
-			ulStatus.Mac = kubeulstatus.Mac
-			ulStatus.AllocatedIPv4Addr = kubeulstatus.AllocatedIPv4Addr
-			ulStatus.IPv4Assigned = true
+		if ulStatus.AppMacAddr != nil {
+			// User-configured static MAC address.
+			ulStatus.Mac = ulStatus.AppMacAddr
 		} else {
-			if ulStatus.AppMacAddr != nil {
-				// User-configured static MAC address.
-				ulStatus.Mac = ulStatus.AppMacAddr
-			} else {
-				ulStatus.Mac = z.generateAppMac(config.UUIDandVersion.UUID, ulNum,
-					status.AppNum, netInstStatus)
-			}
+			ulStatus.Mac = z.generateAppMac(config.UUIDandVersion.UUID, ulNum,
+				status.AppNum, netInstStatus)
 		}
+		ulStatus.HostName = config.Key()
 		guestIP, err := z.lookupOrAllocateIPv4ForVIF(
-			netInstStatus, *ulStatus, status.UUIDandVersion.UUID, kubeulstatus)
+			netInstStatus, *ulStatus, status.UUIDandVersion.UUID)
 		if err != nil {
 			z.log.Errorf("doActivateAppNetwork(%v/%v): %v",
 				config.UUIDandVersion.UUID, config.DisplayName, err)
@@ -148,10 +111,7 @@ func (z *zedrouter) prepareConfigForVIFs(config types.AppNetworkConfig,
 			VIFNum:         ulNum,
 			GuestIfMAC:     ulStatus.Mac,
 			GuestIP:        guestIP,
-			VifIfName:      ulStatus.Vif,
 		})
-		status.UnderlayNetworkList[i] = *ulStatus
-		z.log.Functionf("appNetworkDoActivateUnderlayNetwork: vifs %+v, ulStats %+v", vifs, ulStatus)
 	}
 	return vifs, nil
 }
@@ -160,7 +120,6 @@ func (z *zedrouter) doActivateAppNetwork(config types.AppNetworkConfig,
 	status *types.AppNetworkStatus) {
 	vifs, err := z.prepareConfigForVIFs(config, status)
 	if err != nil {
-		z.log.Errorf("doActivateAppNetwork: find vif err %v", err) // XXX
 		// Error already logged and added to status.
 		return
 	}
@@ -168,20 +127,16 @@ func (z *zedrouter) doActivateAppNetwork(config types.AppNetworkConfig,
 	// Use NIReconciler to configure connection between the app and the network instance(s)
 	// inside the network stack.
 	appConnRecStatus, err := z.niReconciler.ConnectApp(
-		z.runCtx, config, status.AppNum, vifs, z.hvTypeKube)
+		z.runCtx, config, status.AppNum, vifs)
 	if err != nil {
 		err = fmt.Errorf("failed to activate application network: %v", err)
 		z.log.Errorf("doActivateAppNetwork(%v/%v): %v",
 			config.UUIDandVersion.UUID, config.DisplayName, err)
-		if !z.hvTypeKube {
-			// XXX temp hack until zedrouter changes
-			// to avoid after restart, getting NI Reconciler: App a2d92010-5dbc-40f2-a5d1-baeeeae8be4c is already connected
-			z.addAppNetworkError(status, "doActivateAppNetwork", err)
-		}
+		z.addAppNetworkError(status, "doActivateAppNetwork", err)
 		return
 	}
-	z.log.Functionf("Activated application network %s (%s), status %+v", status.UUIDandVersion.UUID,
-		status.DisplayName, status)
+	z.log.Functionf("Activated application network %s (%s)", status.UUIDandVersion.UUID,
+		status.DisplayName)
 	z.processAppConnReconcileStatus(appConnRecStatus, status)
 
 	// Update AppNetwork and NetworkInstance status.
@@ -315,26 +270,21 @@ func (z *zedrouter) checkAndRecreateAppNetworks(niID uuid.UUID) {
 }
 
 func (z *zedrouter) doUpdateActivatedAppNetwork(oldConfig, newConfig types.AppNetworkConfig,
-	status *types.AppNetworkStatus, akStatus *types.AppKubeNetworkStatus) {
+	status *types.AppNetworkStatus) {
 	// To update status of connected network instances we can pretend
 	// that application network was deactivated and then re-activated.
 	// This approach simplifies the implementation quite a bit.
-	if !z.hvTypeKube && akStatus == nil {
-		z.updateNIStatusAfterAppNetworkInactivate(status)
-		// Reloaded below, see reloadStatusOfAssignedIPs.
-		z.removeAssignedIPsFromAppNetStatus(status)
+	z.updateNIStatusAfterAppNetworkInactivate(status)
+	// Reloaded below, see reloadStatusOfAssignedIPs.
+	z.removeAssignedIPsFromAppNetStatus(status)
 
-		// Re-build config for application VIFs.
-		z.doCopyAppNetworkConfigToStatus(newConfig, status)
-	} else {
-		z.insertAppNetVif(*akStatus)
-	}
+	// Re-build config for application VIFs.
+	z.doCopyAppNetworkConfigToStatus(newConfig, status)
 	vifs, err := z.prepareConfigForVIFs(newConfig, status)
 	if err != nil {
 		// Error already logged and added to status.
 		return
 	}
-	z.log.Noticef("doUpdateActivatedAppNetwork: vifs %+v", vifs)
 
 	// Update configuration inside the network stack.
 	appConnRecStatus, err := z.niReconciler.ReconnectApp(
