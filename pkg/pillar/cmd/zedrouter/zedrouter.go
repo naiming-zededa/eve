@@ -246,6 +246,10 @@ func (z *zedrouter) run(ctx context.Context) (err error) {
 	}
 	z.log.Noticef("Starting %s", agentName)
 
+	if err = z.runRPCServer(); err != nil {
+		return err
+	}
+
 	// Wait for initial GlobalConfig.
 	if err = z.subGlobalConfig.Activate(); err != nil {
 		return err

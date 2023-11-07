@@ -31,6 +31,8 @@ github.com/networkplumbing/go-nft/nft/schema
 # github.com/safchain/ethtool v0.3.0
 ## explicit; go 1.16
 github.com/safchain/ethtool
+# github.com/stretchr/testify v1.8.2
+## explicit; go 1.13
 # github.com/vishvananda/netlink v1.2.1-beta.2
 ## explicit; go 1.12
 github.com/vishvananda/netlink
@@ -38,9 +40,12 @@ github.com/vishvananda/netlink/nl
 # github.com/vishvananda/netns v0.0.4
 ## explicit; go 1.17
 github.com/vishvananda/netns
-# golang.org/x/sys v0.7.0
+# golang.org/x/net v0.17.0
+## explicit; go 1.17
+# golang.org/x/sys v0.13.0
 ## explicit; go 1.17
 golang.org/x/sys/unix
 # gopkg.in/natefinch/lumberjack.v2 v2.2.1
 ## explicit; go 1.13
 gopkg.in/natefinch/lumberjack.v2
+# github.com/lf-edge/eve/pkg/pillar => ../pillar

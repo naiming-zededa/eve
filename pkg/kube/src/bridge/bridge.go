@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/rpc/jsonrpc"
 	"os"
 	"runtime"
 	"sort"
@@ -50,12 +51,23 @@ const (
 	logMaxAge     = 30  // days to retain old log files
 )
 
+const (
+	eveKubeNamespace = "eve-kube-app"
+)
+
+const (
+	zedrouterRPCSocketPath = "/run/zedrouter/rpc.sock"
+)
+
 var logFile *lumberjack.Logger
 
 // For testcases to force an error after IPAM has been performed
 var debugPostIPAMError error
 
-const defaultBrName = "cni0"
+const (
+	primaryIfName = "eth0"
+	defaultBrName = "cni0"
+)
 
 type NetConf struct {
 	types.NetConf
@@ -98,6 +110,22 @@ type BridgeArgs struct {
 type MacEnvArgs struct {
 	types.CommonArgs
 	MAC types.UnmarshallableString `json:"mac,omitempty"`
+}
+
+type K8sArgs struct {
+	types.CommonArgs
+	K8S_POD_NAME      types.UnmarshallableString
+	K8S_POD_NAMESPACE types.UnmarshallableString
+}
+
+type GetHostIfNameArgs struct {
+	PodName      string
+	PodNamespace string
+	InterfaceMAC string
+}
+
+type GetHostIfNameRetval struct {
+	HostIfName string
 }
 
 type gwInfo struct {
@@ -407,7 +435,7 @@ func ensureVlanInterface(br *netlink.Bridge, vlanID int, preserveDefaultVlan boo
 			return nil, fmt.Errorf("faild to find host namespace: %v", err)
 		}
 
-		_, brGatewayIface, err := setupVeth(hostNS, br, name, br.MTU, false, vlanID, nil, preserveDefaultVlan, "")
+		_, brGatewayIface, err := setupVeth(hostNS, br, name, "", br.MTU, false, vlanID, nil, preserveDefaultVlan, "")
 		if err != nil {
 			return nil, fmt.Errorf("faild to create vlan gateway %q: %v", name, err)
 		}
@@ -426,13 +454,13 @@ func ensureVlanInterface(br *netlink.Bridge, vlanID int, preserveDefaultVlan boo
 	return brGatewayVeth, nil
 }
 
-func setupVeth(netns ns.NetNS, br *netlink.Bridge, ifName string, mtu int, hairpinMode bool, vlanID int, vlans []int, preserveDefaultVlan bool, mac string) (*current.Interface, *current.Interface, error) {
+func setupVeth(netns ns.NetNS, br *netlink.Bridge, ifName, hostIfName string, mtu int, hairpinMode bool, vlanID int, vlans []int, preserveDefaultVlan bool, mac string) (*current.Interface, *current.Interface, error) {
 	contIface := &current.Interface{}
 	hostIface := &current.Interface{}
 
 	err := netns.Do(func(hostNS ns.NetNS) error {
 		// create the veth pair in the container and move host end into host netns
-		hostVeth, containerVeth, err := ip.SetupVeth(ifName, mtu, mac, hostNS)
+		hostVeth, containerVeth, err := ip.SetupVethWithName(ifName, hostIfName, mtu, mac, hostNS)
 		if err != nil {
 			return err
 		}
@@ -536,6 +564,12 @@ func enableIPForward(family int) error {
 	return ip.EnableIP6Forward()
 }
 
+func getPodName(envArgs string) (name, ns string, err error) {
+	k8sArgs := K8sArgs{}
+	err = types.LoadArgs(envArgs, &k8sArgs)
+	return string(k8sArgs.K8S_POD_NAME), string(k8sArgs.K8S_POD_NAMESPACE), err
+}
+
 func cmdAdd(args *skel.CmdArgs) error {
 	logStr := fmt.Sprintf("cmdAdd: stddata: %s, env: %v", string(args.StdinData), os.Environ())
 	printLog(logStr)
@@ -567,8 +601,39 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	defer netns.Close()
 
-	hostInterface, containerInterface, err := setupVeth(netns, br, args.IfName, n.MTU, n.HairpinMode, n.Vlan, n.vlans, n.PreserveDefaultVlan, n.mac)
+	// Get interface name for the host-side.
+	podName, podNs, err := getPodName(args.Args)
 	if err != nil {
+		return err
+	}
+	var hostIfName string
+	if podNs == eveKubeNamespace && args.IfName != primaryIfName {
+		conn, err := net.Dial("unix", zedrouterRPCSocketPath)
+		if err != nil {
+			printLog(fmt.Sprintf("Failed to dial zedrouter RPC socket: %v", err))
+			return err
+		}
+		defer conn.Close()
+		rpcClient := jsonrpc.NewClient(conn)
+		rpcArgs := GetHostIfNameArgs{
+			PodName:      podName,
+			PodNamespace: podNs,
+			InterfaceMAC: n.mac,
+		}
+		rpcRetval := &GetHostIfNameRetval{}
+		err = rpcClient.Call("ZedrouterRPCHandler.GetHostIfName", rpcArgs, rpcRetval)
+		if err != nil {
+			printLog(fmt.Sprintf("RPC call failed: %v", err))
+			return err
+		}
+		hostIfName = rpcRetval.HostIfName
+		printLog(fmt.Sprintf("Received host if name: %v", rpcRetval.HostIfName))
+	}
+
+	hostInterface, containerInterface, err := setupVeth(netns, br, args.IfName, hostIfName, n.MTU,
+		n.HairpinMode, n.Vlan, n.vlans, n.PreserveDefaultVlan, n.mac)
+	if err != nil {
+		printLog(fmt.Sprintf("Failed to setup VETH: %v", err))
 		return err
 	}
 
@@ -598,8 +663,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	if isLayer3 {
 		// run the IPAM plugin and get back the config to apply
+		printLog(fmt.Sprintf("Running IPAM %s with args: %s",
+			n.IPAM.Type, string(args.StdinData)))
+
 		r, err := ipam.ExecAdd(n.IPAM.Type, args.StdinData)
 		if err != nil {
+			printLog(fmt.Sprintf("IPAM plugin failed: %v", err))
 			return err
 		}
 
@@ -613,6 +682,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		// Convert whatever the IPAM result was into the current Result type
 		ipamResult, err := current.NewResultFromResult(r)
 		if err != nil {
+			printLog(fmt.Sprintf("IPAM results failed: %v", err))
 			return err
 		}
 
@@ -621,14 +691,22 @@ func cmdAdd(args *skel.CmdArgs) error {
 		result.DNS = ipamResult.DNS
 
 		if len(result.IPs) == 0 {
-			return errors.New("IPAM plugin returned missing IP config")
+			err := errors.New("IPAM plugin returned missing IP config")
+			printLog(fmt.Sprintf("IPAM results/IP failed: %v", err))
+			return err
 		}
+
+		printLog(fmt.Sprintf("IPAM results: %+v", ipamResult))
 
 		// Gather gateway information for each IP family
 		gwsV4, gwsV6, err := calcGateways(result, n)
 		if err != nil {
+			printLog(fmt.Sprintf("Calc gateway failed: %v", err))
 			return err
 		}
+
+		printLog(fmt.Sprintf("result after calcGateways (%v, %v): %+v",
+			gwsV4, gwsV6, result))
 
 		// Configure the container hardware address and IP address(es)
 		if err := netns.Do(func(_ ns.NetNS) error {
@@ -643,6 +721,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			// Add the IP to the interface
 			return ipam.ConfigureIface(args.IfName, result)
 		}); err != nil {
+			printLog(fmt.Sprintf("sysctl failed: %v", err))
 			return err
 		}
 
@@ -710,6 +789,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			}
 			return nil
 		}); err != nil {
+			printLog(fmt.Sprintf("Link set up failed: %v", err))
 			return err
 		}
 	}
@@ -723,6 +803,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 		hostVeth, err = netlink.LinkByName(hostInterface.Name)
 		if err != nil {
+			printLog(fmt.Sprintf("Host VETH failed: %v", err))
 			return err
 		}
 		if hostVeth.Attrs().OperState == netlink.OperUp {
@@ -741,6 +822,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	// veth is added or after its IP address is set
 	br, err = bridgeByName(n.BrName)
 	if err != nil {
+		printLog(fmt.Sprintf("Bridge by name failed: %v", err))
 		return err
 	}
 	brInterface.Mac = br.Attrs().HardwareAddr.String()
@@ -842,13 +924,11 @@ func cmdDel(args *skel.CmdArgs) error {
 }
 
 func main() {
-
 	if _, err := os.Stat(logfileDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(logfileDir, 0755); err != nil {
 			return
 		}
 	}
-
 	logFile = &lumberjack.Logger{
 		Filename:   logfile,       // Path to the log file.
 		MaxSize:    logMaxSize,    // Maximum size in megabytes before rotation.
@@ -858,12 +938,13 @@ func main() {
 		LocalTime:  true,          // Use the local time zone for file names.
 	}
 	log.SetOutput(logFile)
+	defer logFile.Close()
+
 	logStr := "bridge main() Start"
 	printLog(logStr)
 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("bridge"))
 	logStr = "bridge main() exit"
 	printLog(logStr)
-	logFile.Close()
 }
 
 type cniBridgeIf struct {
