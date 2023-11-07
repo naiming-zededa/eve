@@ -10,6 +10,9 @@ require (
 )
 
 require (
+	github.com/coreos/go-iptables v0.6.0 // indirect
+	github.com/networkplumbing/go-nft v0.3.0 // indirect
+	github.com/safchain/ethtool v0.3.0 // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	golang.org/x/sys v0.7.0 // indirect
 )

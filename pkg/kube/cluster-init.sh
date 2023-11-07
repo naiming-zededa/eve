@@ -117,6 +117,8 @@ copy_cni_plugin_files() {
   cp /usr/libexec/cni/* /opt/cni/bin
   cp /usr/bin/eve-bridge /var/lib/cni/bin
   cp /usr/bin/eve-bridge /opt/cni/bin
+  cp /usr/bin/bridge /var/lib/cni/bin
+  cp /usr/bin/bridge /opt/cni/bin
   logmsg "cni-plugins install"
 }
 

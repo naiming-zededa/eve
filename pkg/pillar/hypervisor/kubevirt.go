@@ -946,6 +946,7 @@ func (ctx kubevirtContext) CreatePodConfig(domainName string, config types.Domai
 				Name:       adapter.NAD,
 				MacRequest: adapter.Mac.String(),
 				// TODO: use CNIArgs for now? (what about kubevirt?)
+				// TODO: We do not specify InterfaceRequest, how does Multus selects name?
 			}
 		}
 		annotations = map[string]string{
