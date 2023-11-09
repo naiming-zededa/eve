@@ -169,6 +169,7 @@ type zedrouter struct {
 	// Kubernetes networking
 	withKubeNetworking bool
 	netInstNADs        map[string]*NAD // Key: NI UUID
+	cniRequests        chan *rpcRequest
 }
 
 // NAD is Network Attachment Definition (Kubernetes resource) created for every
@@ -218,6 +219,7 @@ func (z *zedrouter) init() (err error) {
 
 	z.withKubeNetworking = base.IsHVTypeKube()
 	z.netInstNADs = make(map[string]*NAD)
+	z.cniRequests = make(chan *rpcRequest)
 
 	gcp := *types.DefaultConfigItemValueMap()
 	z.appContainerStatsInterval = gcp.GlobalValueInt(types.AppContainerStatsInterval)
@@ -512,6 +514,12 @@ func (z *zedrouter) run(ctx context.Context) (err error) {
 				z.doUpdateNIUplink(probeUpdate.SelectedUplinkLL, status, *config)
 			}
 			z.pubSub.CheckMaxTimeTopic(agentName, "probeUpdates", start,
+				warningTime, errorTime)
+
+		case req := <-z.cniRequests:
+			start := time.Now()
+			z.handleRPC(req)
+			z.pubSub.CheckMaxTimeTopic(agentName, "handleRPC", start,
 				warningTime, errorTime)
 
 		case <-z.retryTimer.C:

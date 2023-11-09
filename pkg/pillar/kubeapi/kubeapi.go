@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	netclientset "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
@@ -18,12 +19,34 @@ import (
 
 const (
 	// EVENamespace : Kubernetes namespace used for all resources created by and for EVE.
-	EVENamespace        = "eve-kube-app"
-	kubeConfigFile      = "/run/.kube/k3s/k3s.yaml"
+	EVENamespace   = "eve-kube-app"
+	kubeConfigFile = "/run/.kube/k3s/k3s.yaml"
+	// VMIPodNamePrefix : prefix added to name of every pod created to run VM.
+	VMIPodNamePrefix    = "virt-launcher-"
 	errorTime           = 3 * time.Minute
 	warningTime         = 40 * time.Second
 	stillRunningInerval = 25 * time.Second
 )
+
+// GetAppNameFromPodName : get application display name and also prefix of the UUID
+// from the pod name.
+func GetAppNameFromPodName(podName string) (displayName, uuidPrefix string, err error) {
+	if strings.HasPrefix(podName, VMIPodNamePrefix) {
+		suffix := strings.TrimPrefix(podName, VMIPodNamePrefix)
+		lastSep := strings.LastIndex(suffix, "-")
+		if lastSep == -1 {
+			err = fmt.Errorf("unexpected pod name generated for VMI: %s", podName)
+			return "", "", err
+		}
+		podName = suffix[:lastSep]
+	}
+	lastSep := strings.LastIndex(podName, "-")
+	if lastSep == -1 {
+		err = fmt.Errorf("pod name without dash separator: %s", podName)
+		return "", "", err
+	}
+	return podName[:lastSep], podName[lastSep+1:], nil
+}
 
 func GetKubeConfig() (error, *rest.Config) {
 	// Build the configuration from the kubeconfig file

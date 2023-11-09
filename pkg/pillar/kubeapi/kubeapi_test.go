@@ -1,12 +1,12 @@
-// Copyright (c) 2020 Zededa, Inc.
+// Copyright (c) 2023 Zededa, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-package zedrouter_test
+package kubeapi_test
 
 import (
 	"testing"
 
-	"github.com/lf-edge/eve/pkg/pillar/cmd/zedrouter"
+	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 )
 
 func TestGetAppNameFromPodName(t *testing.T) {
@@ -25,9 +25,8 @@ func TestGetAppNameFromPodName(t *testing.T) {
 		{"notevepod", "", "",
 			"pod name without dash separator: notevepod"},
 	}
-	handler := zedrouter.ZedrouterRPCHandler{}
 	for _, test := range tests {
-		name, uuidPrefix, err := handler.GetAppNameFromPodName(test.podName)
+		name, uuidPrefix, err := kubeapi.GetAppNameFromPodName(test.podName)
 		if test.expectedError != "" {
 			if err == nil || err.Error() != test.expectedError {
 				t.Errorf("want error %s, but got %v", test.expectedError, err)

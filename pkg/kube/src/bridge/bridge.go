@@ -621,7 +621,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 			InterfaceMAC: n.mac,
 		}
 		rpcRetval := &GetHostIfNameRetval{}
-		err = rpcClient.Call("ZedrouterRPCHandler.GetHostIfName", rpcArgs, rpcRetval)
+		err = rpcClient.Call("RPCServer.GetHostIfName", rpcArgs, rpcRetval)
 		if err != nil {
 			printLog(fmt.Sprintf("RPC call failed: %v", err))
 			return err
