@@ -40,6 +40,7 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/cipher"
 	"github.com/lf-edge/eve/pkg/pillar/devicenetwork"
 	"github.com/lf-edge/eve/pkg/pillar/flextimer"
+	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/netmonitor"
 	"github.com/lf-edge/eve/pkg/pillar/nireconciler"
 	"github.com/lf-edge/eve/pkg/pillar/nistate"
@@ -50,6 +51,7 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/uplinkprober"
 	"github.com/lf-edge/eve/pkg/pillar/utils"
 	"github.com/lf-edge/eve/pkg/pillar/zedcloud"
+	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -163,6 +165,18 @@ type zedrouter struct {
 
 	// Retry NI or app network config that zedrouter failed to apply
 	retryTimer *time.Timer
+
+	// Kubernetes networking
+	withKubeNetworking bool
+	netInstNADs        map[string]*NAD // Key: NI UUID
+}
+
+// NAD is Network Attachment Definition (Kubernetes resource) created for every
+// network instance (in Kubernetes mode).
+type NAD struct {
+	NI       uuid.UUID
+	jsonSpec string
+	created  bool
 }
 
 // AddAgentSpecificCLIFlags adds CLI options
@@ -201,6 +215,9 @@ func (z *zedrouter) init() (err error) {
 
 	z.zedcloudMetrics = zedcloud.NewAgentMetrics()
 	z.cipherMetrics = cipher.NewAgentMetrics(agentName)
+
+	z.withKubeNetworking = base.IsHVTypeKube()
+	z.netInstNADs = make(map[string]*NAD)
 
 	gcp := *types.DefaultConfigItemValueMap()
 	z.appContainerStatsInterval = gcp.GlobalValueInt(types.AppContainerStatsInterval)
@@ -250,6 +267,10 @@ func (z *zedrouter) run(ctx context.Context) (err error) {
 		return err
 	}
 
+	// Run a periodic timer so we always update StillRunning
+	stillRunning := time.NewTicker(25 * time.Second)
+	z.pubSub.StillRunning(agentName, warningTime, errorTime)
+
 	// Wait for initial GlobalConfig.
 	if err = z.subGlobalConfig.Activate(); err != nil {
 		return err
@@ -259,9 +280,21 @@ func (z *zedrouter) run(ctx context.Context) (err error) {
 		select {
 		case change := <-z.subGlobalConfig.MsgChan():
 			z.subGlobalConfig.ProcessChange(change)
+		case <-stillRunning.C:
 		}
+		z.pubSub.StillRunning(agentName, warningTime, errorTime)
 	}
 	z.log.Noticef("Processed GlobalConfig")
+
+	// Wait for kubernetes, but continue even if this fails.
+	// TODO: this will have to go away if zedrouter will handle non-EVE VETHs as well
+	if z.withKubeNetworking {
+		z.log.Noticef("Waiting for Kubernetes")
+		_, err := kubeapi.WaitKubernetes(agentName, z.pubSub, stillRunning)
+		if err != nil {
+			z.log.Errorf("Kubernetes is not running: %v", err)
+		}
+	}
 
 	// Wait until we have been onboarded aka know our own UUID
 	// (even though zedrouter does not use the UUID).
@@ -270,10 +303,6 @@ func (z *zedrouter) run(ctx context.Context) (err error) {
 		return err
 	}
 	z.log.Noticef("Received device UUID")
-
-	// Run a periodic timer so we always update StillRunning
-	stillRunning := time.NewTicker(25 * time.Second)
-	z.pubSub.StillRunning(agentName, warningTime, errorTime)
 
 	// Timer used to retry failed configuration
 	z.retryTimer = time.NewTimer(1 * time.Second)

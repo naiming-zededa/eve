@@ -3,15 +3,16 @@ package zedkube
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/sirupsen/logrus"
-
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/types"
+	"github.com/sirupsen/logrus"
+	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -57,6 +58,42 @@ func check_del_ioAdpater_ethernet(ctx *zedkubeContext, aiConfig *types.AppInstan
 	}
 }
 
+func ioEtherCreate(ctx *zedkubeContext, ioAdapt *types.IoAdapter) error {
+	name := ioAdapt.Name
+	spec := fmt.Sprintf(
+		`{
+	"cniVersion": "0.3.1",
+    "plugins": [
+      {
+        "type": "host-device",
+        "device": "%s"
+      }
+    ]
+}`, name)
+
+	err := kubeapi.CreateNAD(log, "host-"+name, spec)
+	if err != nil {
+		log.Errorf("ioEtherCreate: spec, CreateNAD, error %v", err)
+	} else {
+		log.Noticef("ioEtherCreate: spec, CreateNAD, done")
+	}
+	return err
+}
+
+func bringupInterface(intfName string) {
+	link, err := netlink.LinkByName(intfName)
+	if err != nil {
+		log.Errorf("bringupInterface: %v", err)
+		return
+	}
+
+	// Set the IFF_UP flag to bring up the interface
+	if err := netlink.LinkSetUp(link); err != nil {
+		log.Errorf("bringupInterface: %v", err)
+		return
+	}
+}
+
 func collectAppLogs(ctx *zedkubeContext) {
 	sub := ctx.subAppInstanceConfig
 	items := sub.GetAll()
@@ -89,7 +126,7 @@ func collectAppLogs(ctx *zedkubeContext) {
 		} else {
 			ctx.appLogStarted = true
 		}
-		req := clientset.CoreV1().Pods(eveNamespace).GetLogs(aiDispName, opt)
+		req := clientset.CoreV1().Pods(kubeapi.EVENamespace).GetLogs(aiDispName, opt)
 		podLogs, err := req.Stream(context.Background())
 		if err != nil {
 			log.Errorf("collectAppLogs: pod %s, log error %v", aiDispName, err)

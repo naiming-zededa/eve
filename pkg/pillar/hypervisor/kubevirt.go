@@ -41,7 +41,6 @@ import (
 const (
 	KubevirtHypervisorName = "kubevirt"
 	kubevirtStateDir       = "/run/hypervisor/kubevirt/"
-	eveNameSpace           = "eve-kube-app"
 	eveLableKey            = "App-Domain-Name"
 )
 
@@ -204,7 +203,7 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 
 	dispName := config.GetKubeDispName()
 	// Get a VirtualMachineInstance object and populate the values from DomainConfig
-	vmi := v1.NewVMIReferenceFromNameWithNS(eveNameSpace, dispName)
+	vmi := v1.NewVMIReferenceFromNameWithNS(kubeapi.EVENamespace, dispName)
 
 	// Set CPUs
 	cpus := v1.CPU{}
@@ -426,7 +425,7 @@ func (ctx kubevirtContext) Start(domainName string) error {
 	// Create the VM
 	i := 5
 	for {
-		_, err = virtClient.VirtualMachineInstance(eveNameSpace).Create(context.Background(), vmi)
+		_, err = virtClient.VirtualMachineInstance(kubeapi.EVENamespace).Create(context.Background(), vmi)
 		if err != nil {
 			if strings.Contains(err.Error(), "dial tcp 127.0.0.1:6443") && i <= 0 {
 				logrus.Infof("Start VM failed %v\n", err)
@@ -482,7 +481,7 @@ func (ctx kubevirtContext) Stop(domainName string, force bool) error {
 		}
 
 		// Stop the VM
-		err = virtClient.VirtualMachineInstance(eveNameSpace).Delete(context.Background(), vmis.name, &metav1.DeleteOptions{})
+		err = virtClient.VirtualMachineInstance(kubeapi.EVENamespace).Delete(context.Background(), vmis.name, &metav1.DeleteOptions{})
 		if err != nil {
 			fmt.Printf("Stop error %v\n", err)
 			return err
@@ -524,7 +523,7 @@ func (ctx kubevirtContext) Delete(domainName string) (result error) {
 		}
 
 		// Stop the VM
-		err = virtClient.VirtualMachineInstance(eveNameSpace).Delete(context.Background(), vmis.name, &metav1.DeleteOptions{})
+		err = virtClient.VirtualMachineInstance(kubeapi.EVENamespace).Delete(context.Background(), vmis.name, &metav1.DeleteOptions{})
 
 		// May be already deleted during Stop action, so its not an error if does not exist
 		if errors.IsNotFound(err) {
@@ -636,7 +635,7 @@ func getVMIStatus(vmiName string) (string, error) {
 	}
 
 	// Get the VMI info
-	vmi, err := virtClient.VirtualMachineInstance(eveNameSpace).Get(context.Background(), vmiName, &metav1.GetOptions{})
+	vmi, err := virtClient.VirtualMachineInstance(kubeapi.EVENamespace).Get(context.Background(), vmiName, &metav1.GetOptions{})
 
 	if err != nil {
 		return "", logError("domain %s failed to get VMI info %s", vmiName, err)
@@ -737,7 +736,7 @@ func (ctx kubevirtContext) GetDomsCPUMem() (map[string]types.DomainMetric, error
 		line := scanner.Text()
 		if (strings.HasPrefix(line, "kubevirt_vmi_cpu") ||
 			strings.HasPrefix(line, "kubevirt_vmi_memory")) &&
-			strings.Contains(line, eveNameSpace) {
+			strings.Contains(line, kubeapi.EVENamespace) {
 
 			parts := strings.SplitN(line, " ", 2)
 			if len(parts) != 2 {
@@ -966,7 +965,7 @@ func (ctx kubevirtContext) CreatePodConfig(domainName string, config types.Domai
 	pod := &k8sv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        dispName,
-			Namespace:   eveNameSpace,
+			Namespace:   kubeapi.EVENamespace,
 			Annotations: annotations,
 		},
 		Spec: k8sv1.PodSpec{
@@ -1039,7 +1038,7 @@ func StartPodContiner(kubeconfig *rest.Config, pod *k8sv1.Pod) error {
 	}
 
 	opStr := "created"
-	_, err = clientset.CoreV1().Pods(eveNameSpace).Create(context.TODO(), pod, metav1.CreateOptions{})
+	_, err = clientset.CoreV1().Pods(kubeapi.EVENamespace).Create(context.TODO(), pod, metav1.CreateOptions{})
 	if err != nil {
 		if !errors.IsAlreadyExists(err) {
 			logrus.Errorf("StartPodContiner: pod create filed: %v", err)
@@ -1095,7 +1094,7 @@ func StopPodContainer(kubeconfig *rest.Config, podName string) error {
 		return err
 	}
 
-	err = clientset.CoreV1().Pods(eveNameSpace).Delete(context.TODO(), podName, metav1.DeleteOptions{})
+	err = clientset.CoreV1().Pods(kubeapi.EVENamespace).Delete(context.TODO(), podName, metav1.DeleteOptions{})
 	if err != nil {
 		// Handle error
 		logrus.Errorf("StopPodContainer: deleting pod: %v", err)
@@ -1113,7 +1112,7 @@ func InfoPodContainer(kubeconfig *rest.Config, podName string) (string, error) {
 		return "", logError("InfoPodContainer: couldn't get the pod Config: %v", err)
 	}
 
-	pod, err := podclientset.CoreV1().Pods(eveNameSpace).Get(context.TODO(), podName, metav1.GetOptions{})
+	pod, err := podclientset.CoreV1().Pods(kubeapi.EVENamespace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
 		return "", logError("InfoPodContainer: couldn't get the pod: %v", err)
 	}
@@ -1165,14 +1164,14 @@ func checkPodMetrics(ctx kubevirtContext, res map[string]types.DomainMetric, emp
 		}
 		count++
 		podName := vmis.name
-		pod, err := podclientset.CoreV1().Pods(eveNameSpace).Get(context.TODO(), podName, metav1.GetOptions{})
+		pod, err := podclientset.CoreV1().Pods(kubeapi.EVENamespace).Get(context.TODO(), podName, metav1.GetOptions{})
 		if err != nil {
 			logrus.Errorf("checkPodMetrics: can't get pod %v", err)
 			continue
 		}
 		memoryLimits := pod.Spec.Containers[0].Resources.Limits.Memory()
 
-		metrics, err := clientset.MetricsV1beta1().PodMetricses(eveNameSpace).Get(context.TODO(), podName, metav1.GetOptions{})
+		metrics, err := clientset.MetricsV1beta1().PodMetricses(kubeapi.EVENamespace).Get(context.TODO(), podName, metav1.GetOptions{})
 		if err != nil {
 			logrus.Errorf("checkPodMetrics: get pod metrics error %v", err)
 			continue
@@ -1324,14 +1323,14 @@ func CleanupStaleVMI() (int, error) {
 	}
 
 	// Get the VMI list
-	vmiList, err := virtClient.VirtualMachineInstance(eveNameSpace).List(context.Background(), &metav1.ListOptions{})
+	vmiList, err := virtClient.VirtualMachineInstance(kubeapi.EVENamespace).List(context.Background(), &metav1.ListOptions{})
 	if err != nil {
 		return 0, logError("list the Kubevirt VMIs: %v", err)
 	}
 
 	var count int
 	for _, vmi := range vmiList.Items {
-		err = virtClient.VirtualMachineInstance(eveNameSpace).Delete(context.Background(), vmi.ObjectMeta.Name, &metav1.DeleteOptions{})
+		err = virtClient.VirtualMachineInstance(kubeapi.EVENamespace).Delete(context.Background(), vmi.ObjectMeta.Name, &metav1.DeleteOptions{})
 		if err != nil {
 			return count, logError("delete vmi error: %v", err)
 		}

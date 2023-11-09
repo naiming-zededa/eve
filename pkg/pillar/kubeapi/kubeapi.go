@@ -17,11 +17,12 @@ import (
 )
 
 const (
+	// EVENamespace : Kubernetes namespace used for all resources created by and for EVE.
+	EVENamespace        = "eve-kube-app"
 	kubeConfigFile      = "/run/.kube/k3s/k3s.yaml"
 	errorTime           = 3 * time.Minute
 	warningTime         = 40 * time.Second
 	stillRunningInerval = 25 * time.Second
-	eveNameSpace        = "eve-kube-app"
 )
 
 func GetKubeConfig() (error, *rest.Config) {

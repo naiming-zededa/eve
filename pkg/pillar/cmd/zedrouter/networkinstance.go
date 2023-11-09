@@ -163,6 +163,19 @@ func (z *zedrouter) doUpdateNIUplink(uplinkLogicalLabel string,
 
 func (z *zedrouter) doActivateNetworkInstance(config types.NetworkInstanceConfig,
 	status *types.NetworkInstanceStatus) {
+	// In Kubernetes mode create NAD to represent this network instance.
+	if z.withKubeNetworking {
+		err := z.createOrUpdateNADForNI(status)
+		if err != nil {
+			err := fmt.Errorf("failed to create NAD for network instance %v: %w",
+				status.UUID, err)
+			z.log.Error(err)
+			status.SetErrorNow(err.Error())
+			status.ChangeInProgress = types.ChangeInProgressTypeNone
+			z.publishNetworkInstanceStatus(status)
+			return
+		}
+	}
 	// Create network instance inside the network stack.
 	niRecStatus, err := z.niReconciler.AddNI(
 		z.runCtx, config, z.getNIBridgeConfig(status))
@@ -193,6 +206,13 @@ func (z *zedrouter) doInactivateNetworkInstance(status *types.NetworkInstanceSta
 	if err != nil {
 		z.log.Error(err)
 	}
+	if z.withKubeNetworking {
+		err = z.deleteNADForNI(status)
+		if err != nil {
+			z.log.Errorf("failed to delete NAD for network instance %v: %v",
+				status.UUID, err)
+		}
+	}
 	niRecStatus, err := z.niReconciler.DelNI(z.runCtx, status.UUID)
 	if err != nil {
 		z.log.Errorf("Failed to deactivate network instance %s: %v", status.UUID, err)
@@ -209,6 +229,17 @@ func (z *zedrouter) doInactivateNetworkInstance(status *types.NetworkInstanceSta
 
 func (z *zedrouter) doUpdateActivatedNetworkInstance(config types.NetworkInstanceConfig,
 	status *types.NetworkInstanceStatus) {
+	if z.withKubeNetworking {
+		err := z.createOrUpdateNADForNI(status)
+		if err != nil {
+			err = fmt.Errorf("failed to update NAD for network instance %v: %w",
+				status.UUID, err)
+			z.log.Error(err)
+			status.SetErrorNow(err.Error())
+			z.publishNetworkInstanceStatus(status)
+			return
+		}
+	}
 	niRecStatus, err := z.niReconciler.UpdateNI(
 		z.runCtx, config, z.getNIBridgeConfig(status))
 	if err != nil {

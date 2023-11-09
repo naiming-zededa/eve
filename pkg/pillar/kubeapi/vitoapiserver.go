@@ -234,7 +234,7 @@ func RolloutImgToPVC(ctx context.Context, log *base.LogObject, exists bool, disk
 	// 84ed078f3f0e1671d591d15409883a24bd30763eb10a9dec01a2fb38cf06cf6d --insecure --uploadproxy-url https://10.43.31.180:8443
 	// Write API to get proxy url
 
-	args := []string{"image-upload", "-n", "eve-kube-app", "pvc", pvcName, "--storage-class", "longhorn", "--image-path", diskfile, "--insecure", "--uploadproxy-url", uploadproxyURL, "--kubeconfig", kubeConfigFile}
+	args := []string{"image-upload", "-n", EVENamespace, "pvc", pvcName, "--storage-class", "longhorn", "--image-path", diskfile, "--insecure", "--uploadproxy-url", uploadproxyURL, "--kubeconfig", kubeConfigFile}
 
 	// We create PVC of filesystem mode if its appimage volume. longhorn PVC FS mode does not support ReadWriteMany mode.
 	if isAppImage {
@@ -277,7 +277,7 @@ func waitForPVCReady(ctx context.Context, log *base.LogObject, pvcName string) e
 	var count int
 	var err2 error
 	for {
-		pvcs, err := clientset.CoreV1().PersistentVolumeClaims(eveNameSpace).List(context.Background(), metav1.ListOptions{})
+		pvcs, err := clientset.CoreV1().PersistentVolumeClaims(EVENamespace).List(context.Background(), metav1.ListOptions{})
 		if err != nil {
 			log.Errorf("GetPVCInfo failed to list pvc info err %v", err)
 			err2 = err
