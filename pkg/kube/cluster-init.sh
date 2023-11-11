@@ -101,12 +101,12 @@ apply_multus_cni() {
   sleep 10
   # get default ip intf ip address to be node-ip
   get_default_intf_IP_prefix
+  kubectl create namespace eve-kube-app
   logmsg "Apply Multus, Node-IP: $NODE_IP"
   kubectl apply -f /tmp/multus-daemonset.yaml
   logmsg "done applying multus"
   ln -s /var/lib/cni/bin/multus /var/lib/rancher/k3s/data/current/bin/multus
   # need to only do this once
-  kubectl create namespace eve-kube-app
   touch /var/lib/multus_initialized
 }
 
