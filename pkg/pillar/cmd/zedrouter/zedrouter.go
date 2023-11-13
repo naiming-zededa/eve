@@ -289,7 +289,7 @@ func (z *zedrouter) run(ctx context.Context) (err error) {
 	z.log.Noticef("Processed GlobalConfig")
 
 	// Wait for kubernetes, but continue even if this fails.
-	// TODO: this will have to go away if zedrouter will handle non-EVE VETHs as well
+	// TODO: this will go away once we remove NI-specific NADs (and things will get easier).
 	if z.withKubeNetworking {
 		z.log.Noticef("Waiting for Kubernetes")
 		_, err := kubeapi.WaitKubernetes(agentName, z.pubSub, stillRunning)

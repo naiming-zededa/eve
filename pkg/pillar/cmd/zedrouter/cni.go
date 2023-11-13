@@ -233,7 +233,7 @@ func (z *zedrouter) getNADSpecForLocalNI(niStatus *types.NetworkInstanceStatus) 
         "type": "eve-bridge"
       }
     ]
-`, pluginName, pluginBridge, port)
+}`, pluginName, pluginBridge, port)
 }
 
 func (z *zedrouter) deleteNADForNI(niStatus *types.NetworkInstanceStatus) error {

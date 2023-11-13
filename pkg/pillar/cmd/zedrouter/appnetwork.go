@@ -5,8 +5,6 @@ package zedrouter
 
 import (
 	"fmt"
-	"strings"
-
 	"github.com/lf-edge/eve/pkg/pillar/nireconciler"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/lf-edge/eve/pkg/pillar/utils/generics"
@@ -96,8 +94,7 @@ func (z *zedrouter) prepareConfigForVIFs(config types.AppNetworkConfig,
 			ulStatus.Mac = z.generateAppMac(config.UUIDandVersion.UUID, ulNum,
 				status.AppNum, netInstStatus)
 		}
-		// TODO: add method to get NAD name for NI to pkg/kubeapi
-		ulStatus.NAD = strings.ToLower(netInstStatus.DisplayName)
+		ulStatus.NAD = nadNameForNI(netInstStatus)
 		ulStatus.HostName = config.Key()
 		guestIP, err := z.lookupOrAllocateIPv4ForVIF(
 			netInstStatus, *ulStatus, status.UUIDandVersion.UUID)
