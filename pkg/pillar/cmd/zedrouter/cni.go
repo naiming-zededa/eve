@@ -156,23 +156,13 @@ func (z *zedrouter) createOrUpdateNADForNI(niStatus *types.NetworkInstanceStatus
 	default:
 		return fmt.Errorf("createOrUpdateNADForNI: NI type %v is not supported", niStatus.Type)
 	}
-
 	niUUID := niStatus.UUID
 	name := nadNameForNI(niStatus)
-	var update bool
-	if nad, exists := z.netInstNADs[niUUID.String()]; exists {
-		update = nad.created
-	}
-	var err error
-	if update {
-		err = kubeapi.UpdateNAD(z.log, name, spec)
-	} else {
-		err = kubeapi.CreateNAD(z.log, name, spec)
-	}
+	err := kubeapi.CreateOrUpdateNAD(z.log, name, spec)
 	z.netInstNADs[niUUID.String()] = &NAD{
 		NI:       niUUID,
 		jsonSpec: spec,
-		created:  update || err == nil,
+		created:  err == nil,
 	}
 	if err == nil {
 		z.log.Noticef("createOrUpdateNADForNI succeeded for NI %v/%v",
