@@ -136,9 +136,8 @@ data:
             {
               "type": "flannel",
               "delegate": {
-                "hairpinMode": true,
-                "forceAddress": true,
-                "isDefaultGateway": false
+                "type": "eve-bridge",
+                "nodeIP": "IPAddressReplaceMe"
               }
             },
             {
@@ -146,10 +145,6 @@ data:
               "capabilities": {
                 "portMappings": true
               }
-            },
-            {
-              "type": "eve-bridge",
-              "nodeip": "IPAddressReplaceMe"
             }
           ]
         }

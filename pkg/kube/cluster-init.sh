@@ -99,7 +99,7 @@ wait_for_device_uuid() {
 apply_multus_cni() {
   # apply multus
   sleep 10
-  # get default ip intf ip address to be node-ip
+  # get IP of the interface with the first default route, which will be used as node IP
   get_default_intf_IP_prefix
   kubectl create namespace eve-kube-app
   logmsg "Apply Multus, Node-IP: $NODE_IP"
@@ -117,8 +117,6 @@ copy_cni_plugin_files() {
   cp /usr/libexec/cni/* /opt/cni/bin
   cp /usr/bin/eve-bridge /var/lib/cni/bin
   cp /usr/bin/eve-bridge /opt/cni/bin
-  cp /usr/bin/bridge /var/lib/cni/bin
-  cp /usr/bin/bridge /opt/cni/bin
   logmsg "cni-plugins install"
 }
 
@@ -452,9 +450,9 @@ else
             if [ $RESTART_COUNT -lt $MAX_K3S_RESTARTS ]; then
                 ## Must be after reboot, or from k3s restart
                 let "RESTART_COUNT++"
-                if [ ! -f /var/lib/cni/bin ]; then
+                #if [ ! -f /var/lib/cni/bin ]; then
                   copy_cni_plugin_files
-                fi
+                #fi
                 ln -s /var/lib/k3s/bin/* /usr/bin
                 logmsg "Starting k3s server, restart count: $RESTART_COUNT"
                 # for now, always copy to get the latest
@@ -470,9 +468,9 @@ else
                 cp /etc/rancher/k3s/k3s.yaml /run/.kube/k3s/k3s.yaml
 
                 # apply multus
-                if [ ! -f /var/lib/multus_initialized ]; then
+                #if [ ! -f /var/lib/multus_initialized ]; then
                   apply_multus_cni
-                fi
+                #fi
                 # launch CNI dhcp service
                 /opt/cni/bin/dhcp daemon &
 

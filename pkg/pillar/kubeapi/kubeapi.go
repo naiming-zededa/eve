@@ -19,8 +19,11 @@ import (
 
 const (
 	// EVENamespace : Kubernetes namespace used for all resources created by and for EVE.
-	EVENamespace   = "eve-kube-app"
-	kubeConfigFile = "/run/.kube/k3s/k3s.yaml"
+	EVENamespace = "eve-kube-app"
+	// NetworkInstanceNAD : name of (singleton) NAD used to define connection between
+	// pod and (any) network instance.
+	NetworkInstanceNAD = "network-instance-attachment"
+	kubeConfigFile     = "/run/.kube/k3s/k3s.yaml"
 	// VMIPodNamePrefix : prefix added to name of every pod created to run VM.
 	VMIPodNamePrefix    = "virt-launcher-"
 	errorTime           = 3 * time.Minute

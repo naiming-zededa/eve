@@ -220,45 +220,49 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 	mem.Guest = &m
 	vmi.Spec.Domain.Memory = &mem
 
-	netAdapters := append([]types.VifConfig{}, config.VifList...)
+	var netSelections []netattdefv1.NetworkSelectionElement
+	for _, vif := range config.VifList {
+		netSelections = append(netSelections, netattdefv1.NetworkSelectionElement{
+			Name:       kubeapi.NetworkInstanceNAD,
+			MacRequest: vif.Mac.String(),
+		})
+	}
 
 	// Add Direct Attach Ethernet Port
 	for _, io := range config.IoAdapterList {
 		if io.Type == types.IoNetEth {
 			// even if ioAdapter does not exist, kubernetes will retry
-			netAdapters = append(netAdapters, types.VifConfig{
+			netSelections = append(netSelections, netattdefv1.NetworkSelectionElement{
 				// TODO: Add method for generating NAD name of direct attach to pkg/kubeapi
-				NAD: "host-" + io.Name,
+				Name: "host-" + io.Name,
 			})
 		}
 	}
 
 	// Set Network
-	intfs := make([]v1.Interface, len(netAdapters)+1)
-	nads := make([]v1.Network, len(netAdapters)+1)
+	intfs := make([]v1.Interface, len(netSelections)+1)
+	nads := make([]v1.Network, len(netSelections)+1)
 	intfs[0] = v1.Interface{
 		Name:                   "default",
 		InterfaceBindingMethod: v1.InterfaceBindingMethod{Bridge: &v1.InterfaceBridge{}},
 	}
 	nads[0] = *v1.DefaultPodNetwork()
 
-	if len(netAdapters) > 0 {
-		for i, nad := range netAdapters {
-			intfname := "net" + strconv.Itoa(i+1)
-			intfs[i+1] = v1.Interface{
-				Name:                   intfname,
-				MacAddress:             nad.Mac.String(),
-				InterfaceBindingMethod: v1.InterfaceBindingMethod{Bridge: &v1.InterfaceBridge{}},
-			}
+	for i, netSelection := range netSelections {
+		intfname := "net" + strconv.Itoa(i+1)
+		intfs[i+1] = v1.Interface{
+			Name:                   intfname,
+			MacAddress:             netSelection.MacRequest,
+			InterfaceBindingMethod: v1.InterfaceBindingMethod{Bridge: &v1.InterfaceBridge{}},
+		}
 
-			nads[i+1] = v1.Network{
-				Name: intfname,
-				NetworkSource: v1.NetworkSource{
-					Multus: &v1.MultusNetwork{
-						NetworkName: nad.NAD,
-					},
+		nads[i+1] = v1.Network{
+			Name: intfname,
+			NetworkSource: v1.NetworkSource{
+				Multus: &v1.MultusNetwork{
+					NetworkName: kubeapi.NetworkInstanceNAD,
 				},
-			}
+			},
 		}
 	}
 
@@ -426,6 +430,7 @@ func (ctx kubevirtContext) Start(domainName string) error {
 	i := 5
 	for {
 		_, err = virtClient.VirtualMachineInstance(kubeapi.EVENamespace).Create(context.Background(), vmi)
+		// TODO: update if exists
 		if err != nil {
 			if strings.Contains(err.Error(), "dial tcp 127.0.0.1:6443") && i <= 0 {
 				logrus.Infof("Start VM failed %v\n", err)
@@ -924,36 +929,33 @@ func (ctx kubevirtContext) CreatePodConfig(domainName string, config types.Domai
 	}
 	ociName := config.KubeImageName
 
-	netAdapters := append([]types.VifConfig{}, config.VifList...)
+	var netSelections []netattdefv1.NetworkSelectionElement
+	for _, vif := range config.VifList {
+		netSelections = append(netSelections, netattdefv1.NetworkSelectionElement{
+			Name:       kubeapi.NetworkInstanceNAD,
+			MacRequest: vif.Mac.String(),
+		})
+	}
 
 	// Add Direct Attach Ethernet Port
 	for _, io := range config.IoAdapterList {
 		if io.Type == types.IoNetEth {
 			// even if ioAdapter does not exist, kubernetes will retry
-			netAdapters = append(netAdapters, types.VifConfig{
+			netSelections = append(netSelections, netattdefv1.NetworkSelectionElement{
 				// TODO: Add method for generating NAD name of direct attach to pkg/kubeapi
-				NAD: "host-" + io.Name,
+				Name: "host-" + io.Name,
 			})
 		}
 	}
 
 	var annotations map[string]string
-	if len(netAdapters) > 0 {
-		selections := make([]netattdefv1.NetworkSelectionElement, len(netAdapters))
-		for i, adapter := range netAdapters {
-			selections[i] = netattdefv1.NetworkSelectionElement{
-				Name:       adapter.NAD,
-				MacRequest: adapter.Mac.String(),
-				// TODO: use CNIArgs for now? (what about kubevirt?)
-				// TODO: We do not specify InterfaceRequest, how does Multus selects name?
-			}
-		}
+	if len(netSelections) > 0 {
 		annotations = map[string]string{
-			"k8s.v1.cni.cncf.io/networks": encodeSelections(selections),
+			"k8s.v1.cni.cncf.io/networks": encodeSelections(netSelections),
 		}
 		logrus.Infof("CreatePodConfig: annotations %+v", annotations)
 	} else {
-		err := fmt.Errorf("CreatePodConfig: no nadname, exit")
+		err := fmt.Errorf("CreatePodConfig: no network selections, exit")
 		return err
 	}
 
@@ -1041,6 +1043,7 @@ func StartPodContiner(kubeconfig *rest.Config, pod *k8sv1.Pod) error {
 	_, err = clientset.CoreV1().Pods(kubeapi.EVENamespace).Create(context.TODO(), pod, metav1.CreateOptions{})
 	if err != nil {
 		if !errors.IsAlreadyExists(err) {
+			// TODO: update
 			logrus.Errorf("StartPodContiner: pod create filed: %v", err)
 			return err
 		} else {

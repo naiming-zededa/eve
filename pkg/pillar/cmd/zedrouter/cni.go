@@ -5,6 +5,7 @@ package zedrouter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/rpc"
@@ -17,14 +18,9 @@ import (
 )
 
 const (
-	rpcSocketPath = runDirname + "/rpc.sock"
+	rpcSocketPath     = runDirname + "/rpc.sock"
+	defaultRPCTimeout = 10 * time.Second
 )
-
-func nadNameForNI(niStatus *types.NetworkInstanceStatus) string {
-	// FC 1123 subdomain must consist of lower case alphanumeric characters
-	name := strings.ToLower(niStatus.UUID.String())
-	return name
-}
 
 type rpcRequest struct {
 	signalDone chan error
@@ -53,37 +49,31 @@ func (r *rpcRequest) markDone(err error) {
 	close(r.signalDone)
 }
 
-type GetHostIfNameRequest struct {
-	Args   GetHostIfNameArgs
-	Retval *GetHostIfNameRetval
-}
-
-type GetHostIfNameArgs struct {
-	PodName      string
-	PodNamespace string
-	InterfaceMAC string
-}
-
-type GetHostIfNameRetval struct {
-	HostIfName string
+// Handle RPC request from the zedrouter main event loop.
+func (z *zedrouter) handleRPC(rpc *rpcRequest) {
+	var err error
+	switch request := rpc.request.(type) {
+	case ConnectPodRequest:
+		err = z.handleConnectPodRequest(request.Args, request.Retval)
+	case ConfigurePodIPRequest:
+		err = z.handleConfigurePodIPRequest(request.Args, request.Retval)
+	case DisconnectPodRequest:
+		err = z.handleDisconnectPodRequest(request.Args, request.Retval)
+	case CheckPodConnectionRequest:
+		err = z.handleCheckPodConnectionRequest(request.Args, request.Retval)
+	default:
+		err = fmt.Errorf("unhandled RPC request %T: %v", request, request)
+	}
+	if err != nil {
+		z.log.Error(err)
+	}
+	rpc.markDone(err)
 }
 
 // RPCServer receives RPC calls from eve-bridge CNI and dispatches them to the main
 // event loop of zedrouter.
 type RPCServer struct {
 	zedrouter *zedrouter
-}
-
-func (h *RPCServer) GetHostIfName(args GetHostIfNameArgs, retval *GetHostIfNameRetval) error {
-	h.zedrouter.log.Noticef("RPC call: GetHostIfName (%+v)", args)
-	req := &rpcRequest{request: GetHostIfNameRequest{Args: args, Retval: retval}}
-	err := req.submitAndWait(h.zedrouter, 10*time.Second)
-	if err == nil {
-		h.zedrouter.log.Noticef("RPC call: GetHostIfName (%+v) returned: %v", args, retval)
-	} else {
-		h.zedrouter.log.Noticef("RPC call: GetHostIfName (%+v) failed: %v", args, err)
-	}
-	return err
 }
 
 func (z *zedrouter) runRPCServer() error {
@@ -112,38 +102,215 @@ func (z *zedrouter) runRPCServer() error {
 	return nil
 }
 
-// Handle RPC request from the zedrouter main event loop.
-func (z *zedrouter) handleRPC(rpc *rpcRequest) {
-	switch request := rpc.request.(type) {
-	case GetHostIfNameRequest:
-		err := z.handleGetHostIfName(request.Args, request.Retval)
-		rpc.markDone(err)
-	default:
-		z.log.Errorf("Unhandled RPC request %T: %v", request, request)
-	}
+// CommonRPCArgs : arguments used for every RPC served by zedrouter.
+type CommonRPCArgs struct {
+	PodName          string
+	PodNetNsPath     string
+	PodInterfaceName string
+	PodInterfaceMAC  net.HardwareAddr
 }
 
-func (z *zedrouter) handleGetHostIfName(
-	args GetHostIfNameArgs, retval *GetHostIfNameRetval) error {
-	appName, appUUIDPrefix, err := kubeapi.GetAppNameFromPodName(args.PodName)
-	if err != nil {
-		return err
+// ConnectPodRequest encapsulates args and retval for ConnectPod RPC method.
+type ConnectPodRequest struct {
+	Args   ConnectPodArgs
+	Retval *ConnectPodRetval
+}
+
+// ConnectPodArgs : arguments for the ConnectPod RPC method.
+type ConnectPodArgs struct {
+	CommonRPCArgs
+}
+
+// ConnectPodRetval : type of the value returned by the ConnectPod RPC method.
+type ConnectPodRetval struct {
+	UseDHCP    bool
+	Interfaces []NetworkInterface
+}
+
+// NetworkInterface : single network interface (configured by zedrouter).
+type NetworkInterface struct {
+	Name   string
+	MAC    net.HardwareAddr
+	NsPath string
+}
+
+// ConnectPod : establish L2 connection between pod and network instance.
+func (h *RPCServer) ConnectPod(args ConnectPodArgs, retval *ConnectPodRetval) error {
+	h.zedrouter.log.Noticef("RPC call: ConnectPod (%+v)", args)
+	req := &rpcRequest{request: ConnectPodRequest{Args: args, Retval: retval}}
+	err := req.submitAndWait(h.zedrouter, defaultRPCTimeout)
+	if err == nil {
+		h.zedrouter.log.Noticef("RPC call: ConnectPod (%+v) returned: %v", args, retval)
+	} else {
+		h.zedrouter.log.Errorf("RPC call: ConnectPod (%+v) failed: %v", args, err)
 	}
-	for _, item := range z.pubAppNetworkStatus.GetAll() {
-		status := item.(types.AppNetworkStatus)
-		if status.DisplayName != appName ||
-			!strings.HasPrefix(status.UUIDandVersion.UUID.String(), appUUIDPrefix) {
-			continue
+	return err
+}
+
+func (z *zedrouter) handleConnectPodRequest(
+	args ConnectPodArgs, retval *ConnectPodRetval) error {
+	/*
+		appName, appUUIDPrefix, err := kubeapi.GetAppNameFromPodName(args.PodName)
+		if err != nil {
+			return err
 		}
-		for _, ulStatus := range status.UnderlayNetworkList {
-			if args.InterfaceMAC == ulStatus.Mac.String() {
-				retval.HostIfName = ulStatus.Vif
-				return nil
+		for _, item := range z.pubAppNetworkStatus.GetAll() {
+			status := item.(types.AppNetworkStatus)
+			if status.DisplayName != appName ||
+				!strings.HasPrefix(status.UUIDandVersion.UUID.String(), appUUIDPrefix) {
+				continue
+			}
+			for _, ulStatus := range status.UnderlayNetworkList {
+				if bytes.Equal(args.PodInterfaceMAC, ulStatus.Mac) {
+					retval.HostIfName = ulStatus.Vif
+					return nil
+				}
 			}
 		}
+		return fmt.Errorf("failed to find app network status for %s/%s/%s",
+			args.PodNamespace, args.PodName, args.InterfaceMAC)
+	*/
+	// TODO
+	return errors.New("not implemented")
+}
+
+// ConfigurePodIPRequest encapsulates args and retval for ConfigurePodIP RPC method.
+type ConfigurePodIPRequest struct {
+	Args   ConfigurePodIPArgs
+	Retval *ConfigurePodIPRetval
+}
+
+// ConfigurePodIPArgs : arguments for the ConfigurePodIP RPC method.
+type ConfigurePodIPArgs struct {
+	CommonRPCArgs
+	IPs    []PodIPAddress
+	Routes []PodRoute
+	DNS    PodDNS
+}
+
+// ConfigurePodIPRetval : type of the value returned by the ConfigurePodIP RPC method.
+type ConfigurePodIPRetval struct{}
+
+// PodIPAddress : ip address assigned to pod network interface.
+type PodIPAddress struct {
+	Address net.IPNet
+	Gateway net.IP
+}
+
+// PodRoute : network IP route configured for pod network interface.
+type PodRoute struct {
+	Dst net.IPNet
+	GW  net.IP
+}
+
+// PodDNS : settings for DNS resolver inside pod.
+type PodDNS struct {
+	Nameservers []string
+	Domain      string
+	Search      []string
+	Options     []string
+}
+
+// ConfigurePodIP : elevate a given L2 connection between pod and network instance
+// into L3 by applying the submitted IP settings.
+func (h *RPCServer) ConfigurePodIP(
+	args ConfigurePodIPArgs, retval *ConfigurePodIPRetval) error {
+	h.zedrouter.log.Noticef("RPC call: ConfigurePodIP (%+v)", args)
+	req := &rpcRequest{request: ConfigurePodIPRequest{Args: args, Retval: retval}}
+	err := req.submitAndWait(h.zedrouter, defaultRPCTimeout)
+	if err == nil {
+		h.zedrouter.log.Noticef("RPC call: ConfigurePodIP (%+v) returned: %v", args, retval)
+	} else {
+		h.zedrouter.log.Errorf("RPC call: ConfigurePodIP (%+v) failed: %v", args, err)
 	}
-	return fmt.Errorf("failed to find app network status for %s/%s/%s",
-		args.PodNamespace, args.PodName, args.InterfaceMAC)
+	return err
+}
+
+func (z *zedrouter) handleConfigurePodIPRequest(
+	args ConfigurePodIPArgs, retval *ConfigurePodIPRetval) error {
+	// TODO
+	return errors.New("not implemented")
+}
+
+// DisconnectPodRequest encapsulates args and retval for DisconnectPod RPC method.
+type DisconnectPodRequest struct {
+	Args   DisconnectPodArgs
+	Retval *DisconnectPodRetval
+}
+
+// DisconnectPodArgs : arguments for the DisconnectPod RPC method.
+type DisconnectPodArgs struct {
+	CommonRPCArgs
+}
+
+// DisconnectPodRetval : type of the value returned by the DisconnectPod RPC method.
+type DisconnectPodRetval struct {
+	UsedDHCP bool
+}
+
+// DisconnectPod : un-configure the given connection between pod and network instance.
+func (h *RPCServer) DisconnectPod(
+	args DisconnectPodArgs, retval *DisconnectPodRetval) error {
+	h.zedrouter.log.Noticef("RPC call: DisconnectPod (%+v)", args)
+	req := &rpcRequest{request: DisconnectPodRequest{Args: args, Retval: retval}}
+	err := req.submitAndWait(h.zedrouter, defaultRPCTimeout)
+	if err == nil {
+		h.zedrouter.log.Noticef("RPC call: DisconnectPod (%+v) returned: %v", args, retval)
+	} else {
+		h.zedrouter.log.Errorf("RPC call: DisconnectPod (%+v) failed: %v", args, err)
+	}
+	return err
+}
+
+func (z *zedrouter) handleDisconnectPodRequest(
+	args DisconnectPodArgs, retval *DisconnectPodRetval) error {
+	// TODO
+	return errors.New("not implemented")
+}
+
+// CheckPodConnectionRequest encapsulates args and retval for CheckPodConnection RPC method.
+type CheckPodConnectionRequest struct {
+	Args   CheckPodConnectionArgs
+	Retval *CheckPodConnectionRetval
+}
+
+// CheckPodConnectionArgs : arguments for the CheckPodConnection RPC method.
+type CheckPodConnectionArgs struct {
+	CommonRPCArgs
+}
+
+// CheckPodConnectionRetval : type of the value returned by the CheckPodConnection RPC method.
+type CheckPodConnectionRetval struct {
+	UsesDHCP bool
+}
+
+// CheckPodConnection : check if the given connection between pod and network instance
+// is configured successfully.
+func (h *RPCServer) CheckPodConnection(
+	args CheckPodConnectionArgs, retval *CheckPodConnectionRetval) error {
+	h.zedrouter.log.Noticef("RPC call: CheckPodConnection (%+v)", args)
+	req := &rpcRequest{request: CheckPodConnectionRequest{Args: args, Retval: retval}}
+	err := req.submitAndWait(h.zedrouter, defaultRPCTimeout)
+	if err == nil {
+		h.zedrouter.log.Noticef("RPC call: CheckPodConnection (%+v) returned: %v", args, retval)
+	} else {
+		h.zedrouter.log.Errorf("RPC call: CheckPodConnection (%+v) failed: %v", args, err)
+	}
+	return err
+}
+
+func (z *zedrouter) handleCheckPodConnectionRequest(
+	args CheckPodConnectionArgs, retval *CheckPodConnectionRetval) error {
+	// TODO
+	return errors.New("not implemented")
+}
+
+//////////////////////////// TODO: Remove all below:
+
+func nadNameForNI(niStatus *types.NetworkInstanceStatus) string {
+	// FC 1123 subdomain must consist of lower case alphanumeric characters
+	name := strings.ToLower(niStatus.UUID.String())
+	return name
 }
 
 func (z *zedrouter) createOrUpdateNADForNI(niStatus *types.NetworkInstanceStatus) error {

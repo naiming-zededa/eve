@@ -384,9 +384,6 @@ type VifConfig struct {
 	Bridge string
 	Vif    string
 	Mac    net.HardwareAddr
-	// NAD: Network Attachment Definition.
-	// Used in Kubevirt mode only.
-	NAD string
 }
 
 // VifInfo store info about vif
