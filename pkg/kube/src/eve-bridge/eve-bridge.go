@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/rpc/jsonrpc"
 	"os"
-	"runtime"
 	"strings"
 
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -24,6 +23,7 @@ import (
 	"github.com/containernetworking/cni/pkg/version"
 	"github.com/containernetworking/plugins/pkg/ipam"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
+	evetypes "github.com/lf-edge/eve/pkg/pillar/types"
 )
 
 const (
@@ -50,90 +50,6 @@ type EnvArgs struct {
 	MAC               types.UnmarshallableString
 	K8S_POD_NAME      types.UnmarshallableString
 	K8S_POD_NAMESPACE types.UnmarshallableString
-}
-
-// CommonRPCArgs : arguments used for every RPC.
-type CommonRPCArgs struct {
-	PodName          string
-	PodNetNsPath     string
-	PodInterfaceName string
-	PodInterfaceMAC  net.HardwareAddr
-}
-
-// ConnectPodArgs : arguments for the ConnectPod RPC method handled by zedrouter.
-type ConnectPodArgs struct {
-	CommonRPCArgs
-}
-
-// ConnectPodRetval : type of the value returned by the ConnectPod RPC method.
-type ConnectPodRetval struct {
-	UseDHCP    bool
-	Interfaces []NetworkInterface
-}
-
-// ConfigurePodIPArgs : arguments for the ConfigurePodIP RPC method handled by zedrouter.
-type ConfigurePodIPArgs struct {
-	CommonRPCArgs
-	IPs    []PodIPAddress
-	Routes []PodRoute
-	DNS    PodDNS
-}
-
-// ConfigurePodIPRetval : type of the value returned by the ConfigurePodIP RPC method.
-type ConfigurePodIPRetval struct{}
-
-// DisconnectPodArgs : arguments for the DisconnectPod RPC method handled by zedrouter.
-type DisconnectPodArgs struct {
-	CommonRPCArgs
-}
-
-// DisconnectPodRetval : type of the value returned by the DisconnectPod RPC method.
-type DisconnectPodRetval struct {
-	UsedDHCP bool
-}
-
-// CheckPodConnectionArgs : arguments for the CheckPodConnection RPC method handled by zedrouter.
-type CheckPodConnectionArgs struct {
-	CommonRPCArgs
-}
-
-// CheckPodConnectionRetval : type of the value returned by the CheckPodConnection RPC method.
-type CheckPodConnectionRetval struct {
-	UsesDHCP bool
-}
-
-// NetworkInterface : single network interface (configured by zedrouter).
-type NetworkInterface struct {
-	Name   string
-	MAC    net.HardwareAddr
-	NsPath string
-}
-
-// PodIPAddress : ip address assigned to pod network interface.
-type PodIPAddress struct {
-	Address net.IPNet
-	Gateway net.IP
-}
-
-// PodRoute : network IP route configured for pod network interface.
-type PodRoute struct {
-	Dst net.IPNet
-	GW  net.IP
-}
-
-// PodDNS : settings for DNS resolver inside pod.
-type PodDNS struct {
-	Nameservers []string
-	Domain      string
-	Search      []string
-	Options     []string
-}
-
-func init() {
-	// this ensures that main runs only on main thread (thread group leader).
-	// since namespace ops (unshare, setns) are done for a single thread, we
-	// must ensure that the goroutine does not jump from OS thread to thread.
-	runtime.LockOSThread()
 }
 
 type rawJSONStruct = map[string]interface{}
@@ -262,7 +178,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	// Continue here to create netX interface with the help from zedrouter microservice.
 
-	// Ask zedrouter to connect Pod.
+	// Ask zedrouter to connect Pod at the Layer 2 first.
 	// For now the interface will be without IP address, but in the case of a local NI
 	// the DHCP server will be prepared.
 	conn, err := net.Dial("unix", zedrouterRPCSocketPath)
@@ -273,29 +189,35 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	defer conn.Close()
 	rpcClient := jsonrpc.NewClient(conn)
-	commonRPCArgs := CommonRPCArgs{
-		PodName:          podName,
-		PodNetNsPath:     args.Netns,
-		PodInterfaceName: args.IfName,
-		PodInterfaceMAC:  mac,
+	commonRPCArgs := evetypes.CommonCNIRPCArgs{
+		Pod: evetypes.AppPod{
+			Name:      podName,
+			NetNsPath: args.Netns,
+		},
+		PodInterface: evetypes.NetInterfaceWithNs{
+			Name:      args.IfName,
+			MAC:       mac,
+			NetNsPath: args.Netns,
+		},
 	}
-	connectPodArgs := ConnectPodArgs{CommonRPCArgs: commonRPCArgs}
-	connectPodRetval := &ConnectPodRetval{}
-	err = rpcClient.Call("RPCServer.ConnectPod", connectPodArgs, connectPodRetval)
+	connectPodAtL2Args := evetypes.ConnectPodAtL2Args{CommonCNIRPCArgs: commonRPCArgs}
+	connectPodAtL2Retval := &evetypes.ConnectPodAtL2Retval{}
+	err = rpcClient.Call("RPCServer.ConnectPodAtL2",
+		connectPodAtL2Args, connectPodAtL2Retval)
 	if err != nil {
-		err = fmt.Errorf("RPC call ConnectPod(%+v) failed: %v", connectPodArgs, err)
+		err = fmt.Errorf("RPC call ConnectPodAtL2(%+v) failed: %v", connectPodAtL2Args, err)
 		log.Print(err)
 		return err
 	}
-	log.Printf("ConnectPod returned: %+v", connectPodRetval)
+	log.Printf("ConnectPodAtL2 returned: %+v", connectPodAtL2Retval)
 
 	podIntfIndex := -1
 	result := &v1.Result{CNIVersion: v1.ImplementedSpecVersion}
-	for i, netIntf := range connectPodRetval.Interfaces {
+	for i, netIntf := range connectPodAtL2Retval.Interfaces {
 		result.Interfaces = append(result.Interfaces, &v1.Interface{
 			Name:    netIntf.Name,
 			Mac:     netIntf.MAC.String(),
-			Sandbox: netIntf.NsPath,
+			Sandbox: netIntf.NetNsPath,
 		})
 		if netIntf.Name == args.IfName {
 			podIntfIndex = i
@@ -303,12 +225,12 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	if podIntfIndex == -1 {
 		err = fmt.Errorf("missing interface %s in the list %v", args.IfName,
-			connectPodRetval.Interfaces)
+			connectPodAtL2Retval.Interfaces)
 		log.Print(err)
 		return err
 	}
 
-	l2Only := !connectPodRetval.UseDHCP || isVMI
+	l2Only := !connectPodAtL2Retval.UseDHCP || isVMI
 	if l2Only {
 		// We are done with L2-only connectivity.
 		log.Printf("Returning result: %+v", result)
@@ -346,10 +268,9 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 	log.Printf("IPAM result: %+v", ipamResult)
 
-	// Ask zedrouter to apply received IP config.
-	configurePodIPArgs := ConfigurePodIPArgs{
-		CommonRPCArgs: commonRPCArgs,
-		DNS: PodDNS{
+	// Ask zedrouter to apply the received IP config.
+	ipamConfig := evetypes.PodIPAMConfig{
+		DNS: evetypes.PodDNS{
 			Nameservers: ipamResult.DNS.Nameservers,
 			Domain:      ipamResult.DNS.Domain,
 			Search:      ipamResult.DNS.Search,
@@ -357,21 +278,27 @@ func cmdAdd(args *skel.CmdArgs) error {
 		},
 	}
 	for _, ip := range ipamResult.IPs {
-		configurePodIPArgs.IPs = append(configurePodIPArgs.IPs,
-			PodIPAddress{Address: ip.Address, Gateway: ip.Gateway})
+		ipamConfig.IPs = append(ipamConfig.IPs,
+			evetypes.PodIPAddress{Address: &ip.Address, Gateway: ip.Gateway})
 	}
 	for _, route := range ipamResult.Routes {
-		configurePodIPArgs.Routes = append(configurePodIPArgs.Routes,
-			PodRoute{Dst: route.Dst, GW: route.GW})
+		ipamConfig.Routes = append(ipamConfig.Routes,
+			evetypes.PodRoute{Dst: &route.Dst, GW: route.GW})
 	}
-	configurePodIPRetval := &ConfigurePodIPRetval{}
-	err = rpcClient.Call("RPCServer.ConfigurePodIP",
-		configurePodIPArgs, configurePodIPRetval)
+	connectPodAtL3Args := evetypes.ConnectPodAtL3Args{
+		CommonCNIRPCArgs: commonRPCArgs,
+		PodIPAMConfig:    ipamConfig,
+	}
+	connectPodAtL3Retval := &evetypes.ConnectPodAtL3Retval{}
+	err = rpcClient.Call("RPCServer.ConnectPodAtL3",
+		connectPodAtL3Args, connectPodAtL3Retval)
 	if err != nil {
-		log.Printf("RPC call ConfigurePodIP(%+v) failed: %v", configurePodIPArgs, err)
+		err = fmt.Errorf("RPC call ConnectPodAtL3(%+v) failed: %v",
+			connectPodAtL3Args, err)
+		log.Print(err)
 		return err
 	}
-	log.Printf("RPC call ConfigurePodIP(%+v) succeeded", configurePodIPArgs)
+	log.Printf("RPC call ConnectPodAtL3(%+v) succeeded", connectPodAtL3Args)
 
 	result.IPs = ipamResult.IPs
 	result.Routes = ipamResult.Routes
@@ -383,7 +310,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 func cmdDel(args *skel.CmdArgs) error {
 	log.Printf("cmdDel: stdinData: %s, env: %v",
 		string(args.StdinData), os.Environ())
-	stdinArgs, _, podName, mac, isVMI, isEveApp, err := parseArgs(args)
+	stdinArgs, _, podName, _, isVMI, isEveApp, err := parseArgs(args)
 	if err != nil {
 		// Error is already logged.
 		return err
@@ -418,14 +345,19 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 	defer conn.Close()
 	rpcClient := jsonrpc.NewClient(conn)
-	commonRPCArgs := CommonRPCArgs{
-		PodName:          podName,
-		PodNetNsPath:     args.Netns,
-		PodInterfaceName: args.IfName,
-		PodInterfaceMAC:  mac,
+	commonRPCArgs := evetypes.CommonCNIRPCArgs{
+		Pod: evetypes.AppPod{
+			Name:      podName,
+			NetNsPath: args.Netns,
+		},
+		PodInterface: evetypes.NetInterfaceWithNs{
+			Name:      args.IfName,
+			NetNsPath: args.Netns,
+			// MAC is not passed to cmdDel
+		},
 	}
-	disconnectPodArgs := DisconnectPodArgs{CommonRPCArgs: commonRPCArgs}
-	disconnectPodRetval := &DisconnectPodRetval{}
+	disconnectPodArgs := evetypes.DisconnectPodArgs{CommonCNIRPCArgs: commonRPCArgs}
+	disconnectPodRetval := &evetypes.DisconnectPodRetval{}
 	err = rpcClient.Call("RPCServer.DisconnectPod", disconnectPodArgs, disconnectPodRetval)
 	if err != nil {
 		err = fmt.Errorf("RPC call DisconnectPod(%+v) failed: %v", disconnectPodArgs, err)
@@ -459,7 +391,7 @@ func cmdDel(args *skel.CmdArgs) error {
 func cmdCheck(args *skel.CmdArgs) error {
 	log.Printf("cmdCheck: stdinData: %s, env: %v",
 		string(args.StdinData), os.Environ())
-	stdinArgs, _, podName, mac, isVMI, isEveApp, err := parseArgs(args)
+	stdinArgs, _, podName, _, isVMI, isEveApp, err := parseArgs(args)
 	if err != nil {
 		// Error is already logged.
 		return err
@@ -494,14 +426,19 @@ func cmdCheck(args *skel.CmdArgs) error {
 	}
 	defer conn.Close()
 	rpcClient := jsonrpc.NewClient(conn)
-	commonRPCArgs := CommonRPCArgs{
-		PodName:          podName,
-		PodNetNsPath:     args.Netns,
-		PodInterfaceName: args.IfName,
-		PodInterfaceMAC:  mac,
+	commonRPCArgs := evetypes.CommonCNIRPCArgs{
+		Pod: evetypes.AppPod{
+			Name:      podName,
+			NetNsPath: args.Netns,
+		},
+		PodInterface: evetypes.NetInterfaceWithNs{
+			Name:      args.IfName,
+			NetNsPath: args.Netns,
+			// MAC is not passed to cmdDel
+		},
 	}
-	checkPodConnectionArgs := CheckPodConnectionArgs{CommonRPCArgs: commonRPCArgs}
-	checkPodConnectionRetval := &CheckPodConnectionRetval{}
+	checkPodConnectionArgs := evetypes.CheckPodConnectionArgs{CommonCNIRPCArgs: commonRPCArgs}
+	checkPodConnectionRetval := &evetypes.CheckPodConnectionRetval{}
 	err = rpcClient.Call("RPCServer.CheckPodConnection", checkPodConnectionArgs,
 		checkPodConnectionRetval)
 	if err != nil {

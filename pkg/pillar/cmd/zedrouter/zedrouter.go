@@ -40,7 +40,6 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/cipher"
 	"github.com/lf-edge/eve/pkg/pillar/devicenetwork"
 	"github.com/lf-edge/eve/pkg/pillar/flextimer"
-	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/netmonitor"
 	"github.com/lf-edge/eve/pkg/pillar/nireconciler"
 	"github.com/lf-edge/eve/pkg/pillar/nistate"
@@ -51,7 +50,6 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/uplinkprober"
 	"github.com/lf-edge/eve/pkg/pillar/utils"
 	"github.com/lf-edge/eve/pkg/pillar/zedcloud"
-	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -168,16 +166,7 @@ type zedrouter struct {
 
 	// Kubernetes networking
 	withKubeNetworking bool
-	netInstNADs        map[string]*NAD // Key: NI UUID
 	cniRequests        chan *rpcRequest
-}
-
-// NAD is Network Attachment Definition (Kubernetes resource) created for every
-// network instance (in Kubernetes mode).
-type NAD struct {
-	NI       uuid.UUID
-	jsonSpec string
-	created  bool
 }
 
 // AddAgentSpecificCLIFlags adds CLI options
@@ -218,7 +207,6 @@ func (z *zedrouter) init() (err error) {
 	z.cipherMetrics = cipher.NewAgentMetrics(agentName)
 
 	z.withKubeNetworking = base.IsHVTypeKube()
-	z.netInstNADs = make(map[string]*NAD)
 	z.cniRequests = make(chan *rpcRequest)
 
 	gcp := *types.DefaultConfigItemValueMap()
@@ -252,7 +240,8 @@ func (z *zedrouter) init() (err error) {
 		z.log, agentName, z.zedcloudMetrics)
 	z.reachProber = controllerReachProber
 	z.niReconciler = nireconciler.NewLinuxNIReconciler(z.log, z.logger, z.networkMonitor,
-		z.makeMetadataHandler(), true, true)
+		z.makeMetadataHandler(), true, true,
+		z.withKubeNetworking)
 
 	z.initNumberAllocators()
 	return nil
@@ -287,16 +276,6 @@ func (z *zedrouter) run(ctx context.Context) (err error) {
 		z.pubSub.StillRunning(agentName, warningTime, errorTime)
 	}
 	z.log.Noticef("Processed GlobalConfig")
-
-	// Wait for kubernetes, but continue even if this fails.
-	// TODO: this will go away once we remove NI-specific NADs (and things will get easier).
-	if z.withKubeNetworking {
-		z.log.Noticef("Waiting for Kubernetes")
-		_, err := kubeapi.WaitKubernetes(agentName, z.pubSub, stillRunning)
-		if err != nil {
-			z.log.Errorf("Kubernetes is not running: %v", err)
-		}
-	}
 
 	// Wait until we have been onboarded aka know our own UUID
 	// (even though zedrouter does not use the UUID).

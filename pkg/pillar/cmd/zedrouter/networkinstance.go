@@ -173,26 +173,9 @@ func (z *zedrouter) doActivateNetworkInstance(config types.NetworkInstanceConfig
 		return
 	}
 	z.processNIReconcileStatus(niRecStatus, status)
-	// In Kubernetes mode create NAD to represent this network instance.
-	if z.withKubeNetworking {
-		err := z.createOrUpdateNADForNI(status)
-		if err != nil {
-			// Try to revert...
-			if _, err2 := z.niReconciler.DelNI(z.runCtx, status.UUID); err2 != nil {
-				z.log.Errorf("Failed to revert NI %s: %v", status.UUID, err2)
-			}
-			err := fmt.Errorf("failed to create NAD for network instance %v: %w",
-				status.UUID, err)
-			z.log.Error(err)
-			status.SetErrorNow(err.Error())
-			status.ChangeInProgress = types.ChangeInProgressTypeNone
-			z.publishNetworkInstanceStatus(status)
-			return
-		}
-	}
-	status.Activated = true
 	z.log.Functionf("Activated network instance %s (%s)", status.UUID,
 		status.DisplayName)
+	status.Activated = true
 	z.publishNetworkInstanceStatus(status)
 	// Start collecting state data and metrics for this network instance.
 	br, vifs, err := z.getArgsForNIStateCollecting(config.UUID)
@@ -209,13 +192,6 @@ func (z *zedrouter) doInactivateNetworkInstance(status *types.NetworkInstanceSta
 	err := z.niStateCollector.StopCollectingForNI(status.UUID)
 	if err != nil {
 		z.log.Error(err)
-	}
-	if z.withKubeNetworking {
-		err = z.deleteNADForNI(status)
-		if err != nil {
-			z.log.Errorf("failed to delete NAD for network instance %v: %v",
-				status.UUID, err)
-		}
 	}
 	niRecStatus, err := z.niReconciler.DelNI(z.runCtx, status.UUID)
 	if err != nil {
@@ -245,17 +221,6 @@ func (z *zedrouter) doUpdateActivatedNetworkInstance(config types.NetworkInstanc
 	z.log.Functionf("Updated activated network instance %s (%s)", status.UUID,
 		status.DisplayName)
 	z.processNIReconcileStatus(niRecStatus, status)
-	if z.withKubeNetworking {
-		err := z.createOrUpdateNADForNI(status)
-		if err != nil {
-			err = fmt.Errorf("failed to update NAD for network instance %v: %w",
-				status.UUID, err)
-			z.log.Error(err)
-			status.SetErrorNow(err.Error())
-			z.publishNetworkInstanceStatus(status)
-			return
-		}
-	}
 	_, vifs, err := z.getArgsForNIStateCollecting(config.UUID)
 	if err == nil {
 		err = z.niStateCollector.UpdateCollectingForNI(config, vifs)
