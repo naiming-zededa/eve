@@ -15,6 +15,7 @@ import (
 
 	dg "github.com/lf-edge/eve-libs/depgraph"
 	"github.com/lf-edge/eve-libs/reconciler"
+	"github.com/lf-edge/eve/pkg/kube/cnirpc"
 	"github.com/lf-edge/eve/pkg/pillar/base"
 	"github.com/lf-edge/eve/pkg/pillar/conntrack"
 	"github.com/lf-edge/eve/pkg/pillar/iptables"
@@ -132,7 +133,7 @@ type appPod struct {
 	netNsName string
 }
 
-func (ai *appInfo) setKubePod(kubePod types.AppPod) error {
+func (ai *appInfo) setKubePod(kubePod cnirpc.AppPod) error {
 	ai.kubePod.name = kubePod.Name
 	if kubePod.NetNsPath != "" {
 		if path.Dir(kubePod.NetNsPath) != namedNsDir {
@@ -918,7 +919,7 @@ func (r *LinuxNIReconciler) DelNI(ctx context.Context,
 // domainmgr starts the VM, or when UpdateAppConn is called from within Kubernetes CNI
 // plugin.
 func (r *LinuxNIReconciler) AddAppConn(ctx context.Context,
-	appNetConfig types.AppNetworkConfig, appNum int, kubePod types.AppPod,
+	appNetConfig types.AppNetworkConfig, appNum int, kubePod cnirpc.AppPod,
 	vifs []AppVIF) (AppConnReconcileStatus, error) {
 	contWatcher := r.pauseWatcher()
 	defer contWatcher()
@@ -961,7 +962,7 @@ func (r *LinuxNIReconciler) AddAppConn(ctx context.Context,
 
 // UpdateAppConn : update application connectivity to reflect config changes.
 func (r *LinuxNIReconciler) UpdateAppConn(ctx context.Context,
-	appNetConfig types.AppNetworkConfig, kubePod types.AppPod,
+	appNetConfig types.AppNetworkConfig, kubePod cnirpc.AppPod,
 	vifs []AppVIF) (AppConnReconcileStatus, error) {
 	contWatcher := r.pauseWatcher()
 	defer contWatcher()

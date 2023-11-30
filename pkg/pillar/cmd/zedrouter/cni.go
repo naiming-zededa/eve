@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lf-edge/eve/pkg/kube/cnirpc"
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/nireconciler"
 	"github.com/lf-edge/eve/pkg/pillar/types"
@@ -30,26 +31,26 @@ type rpcRequest struct {
 
 // connectPodAtL2Request encapsulates args and retval for ConnectPodAtL2 RPC method.
 type connectPodAtL2Request struct {
-	args   types.ConnectPodAtL2Args
-	retval *types.ConnectPodAtL2Retval
+	args   cnirpc.ConnectPodAtL2Args
+	retval *cnirpc.ConnectPodAtL2Retval
 }
 
 // connectPodAtL3Request encapsulates args and retval for ConnectPodAtL3 RPC method.
 type connectPodAtL3Request struct {
-	args   types.ConnectPodAtL3Args
-	retval *types.ConnectPodAtL3Retval
+	args   cnirpc.ConnectPodAtL3Args
+	retval *cnirpc.ConnectPodAtL3Retval
 }
 
 // disconnectPodRequest encapsulates args and retval for DisconnectPod RPC method.
 type disconnectPodRequest struct {
-	args   types.DisconnectPodArgs
-	retval *types.DisconnectPodRetval
+	args   cnirpc.DisconnectPodArgs
+	retval *cnirpc.DisconnectPodRetval
 }
 
 // checkPodConnectionRequest encapsulates args and retval for CheckPodConnection RPC method.
 type checkPodConnectionRequest struct {
-	args   types.CheckPodConnectionArgs
-	retval *types.CheckPodConnectionRetval
+	args   cnirpc.CheckPodConnectionArgs
+	retval *cnirpc.CheckPodConnectionRetval
 }
 
 func (r *rpcRequest) submitAndWait(z *zedrouter, timeout time.Duration) error {
@@ -79,7 +80,7 @@ func (z *zedrouter) handleRPC(rpc *rpcRequest) {
 	var err error
 	switch request := rpc.request.(type) {
 	case connectPodAtL2Request:
-		l2Only := types.PodIPAMConfig{}
+		l2Only := cnirpc.PodIPAMConfig{}
 		request.retval.UseDHCP, request.retval.Interfaces, err =
 			z.handleConnectPodRequest(request.args.Pod, request.args.PodInterface, l2Only)
 	case connectPodAtL3Request:
@@ -100,9 +101,9 @@ func (z *zedrouter) handleRPC(rpc *rpcRequest) {
 
 // Used for both connectPodAtL2Request and connectPodAtL3Request.
 // Will setup L3 connectivity if ipamConfig is defined, L2-only otherwise.
-func (z *zedrouter) handleConnectPodRequest(pod types.AppPod,
-	podInterface types.NetInterfaceWithNs, ipamConfig types.PodIPAMConfig) (
-	niWithDHCP bool, interfaces []types.NetInterfaceWithNs, err error) {
+func (z *zedrouter) handleConnectPodRequest(pod cnirpc.AppPod,
+	podInterface cnirpc.NetInterfaceWithNs, ipamConfig cnirpc.PodIPAMConfig) (
+	niWithDHCP bool, interfaces []cnirpc.NetInterfaceWithNs, err error) {
 	appConfig, appStatus, err := z.getAppByPodName(pod.Name)
 	if err != nil {
 		z.log.Error(err)
@@ -176,11 +177,11 @@ func (z *zedrouter) handleConnectPodRequest(pod types.AppPod,
 		z.log.Error(err)
 		return false, nil, err
 	}
-	interfaces = append(interfaces, types.NetInterfaceWithNs{
+	interfaces = append(interfaces, cnirpc.NetInterfaceWithNs{
 		Name: netInstStatus.BridgeName,
 		MAC:  netInstStatus.BridgeMac,
 	})
-	interfaces = append(interfaces, types.NetInterfaceWithNs{
+	interfaces = append(interfaces, cnirpc.NetInterfaceWithNs{
 		Name: vifStatus.HostIfName,
 		// MAC on the host side is not published by NI Reconciler.
 		// Most likely it is not needed anyway.
@@ -190,7 +191,7 @@ func (z *zedrouter) handleConnectPodRequest(pod types.AppPod,
 }
 
 func (z *zedrouter) handleDisconnectPodRequest(
-	args types.DisconnectPodArgs, retval *types.DisconnectPodRetval) error {
+	args cnirpc.DisconnectPodArgs, retval *cnirpc.DisconnectPodRetval) error {
 	appConfig, appStatus, err := z.getAppByPodName(args.Pod.Name)
 	if err != nil {
 		// App is already removed.
@@ -244,7 +245,7 @@ func (z *zedrouter) handleDisconnectPodRequest(
 }
 
 func (z *zedrouter) handleCheckPodConnectionRequest(
-	args types.CheckPodConnectionArgs, retval *types.CheckPodConnectionRetval) error {
+	args cnirpc.CheckPodConnectionArgs, retval *cnirpc.CheckPodConnectionRetval) error {
 	_, appStatus, err := z.getAppByPodName(args.Pod.Name)
 	if err != nil {
 		z.log.Error(err)
@@ -372,7 +373,7 @@ type RPCServer struct {
 
 // ConnectPodAtL2 : establish L2 connection between pod and network instance.
 func (h *RPCServer) ConnectPodAtL2(
-	args types.ConnectPodAtL2Args, retval *types.ConnectPodAtL2Retval) error {
+	args cnirpc.ConnectPodAtL2Args, retval *cnirpc.ConnectPodAtL2Retval) error {
 	h.zedrouter.log.Noticef("RPC call: ConnectPodAtL2 (%+v)", args)
 	req := &rpcRequest{request: connectPodAtL2Request{args: args, retval: retval}}
 	err := req.submitAndWait(h.zedrouter, defaultRPCTimeout)
@@ -388,7 +389,7 @@ func (h *RPCServer) ConnectPodAtL2(
 // Typically, it is used after ConnectPodAtL2 to elevate existing L2 connection
 // into L3 by applying the submitted IP settings.
 func (h *RPCServer) ConnectPodAtL3(
-	args types.ConnectPodAtL3Args, retval *types.ConnectPodAtL3Retval) error {
+	args cnirpc.ConnectPodAtL3Args, retval *cnirpc.ConnectPodAtL3Retval) error {
 	h.zedrouter.log.Noticef("RPC call: ConnectPodAtL3 (%+v)", args)
 	req := &rpcRequest{request: connectPodAtL3Request{args: args, retval: retval}}
 	err := req.submitAndWait(h.zedrouter, defaultRPCTimeout)
@@ -402,7 +403,7 @@ func (h *RPCServer) ConnectPodAtL3(
 
 // DisconnectPod : un-configure the given connection between pod and network instance.
 func (h *RPCServer) DisconnectPod(
-	args types.DisconnectPodArgs, retval *types.DisconnectPodRetval) error {
+	args cnirpc.DisconnectPodArgs, retval *cnirpc.DisconnectPodRetval) error {
 	h.zedrouter.log.Noticef("RPC call: DisconnectPod (%+v)", args)
 	req := &rpcRequest{request: disconnectPodRequest{args: args, retval: retval}}
 	err := req.submitAndWait(h.zedrouter, defaultRPCTimeout)
@@ -417,7 +418,7 @@ func (h *RPCServer) DisconnectPod(
 // CheckPodConnection : check if the given connection between pod and network instance
 // is configured successfully.
 func (h *RPCServer) CheckPodConnection(
-	args types.CheckPodConnectionArgs, retval *types.CheckPodConnectionRetval) error {
+	args cnirpc.CheckPodConnectionArgs, retval *cnirpc.CheckPodConnectionRetval) error {
 	h.zedrouter.log.Noticef("RPC call: CheckPodConnection (%+v)", args)
 	req := &rpcRequest{request: checkPodConnectionRequest{args: args, retval: retval}}
 	err := req.submitAndWait(h.zedrouter, defaultRPCTimeout)

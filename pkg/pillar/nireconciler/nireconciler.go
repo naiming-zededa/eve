@@ -16,6 +16,7 @@ import (
 	"sort"
 
 	dg "github.com/lf-edge/eve-libs/depgraph"
+	"github.com/lf-edge/eve/pkg/kube/cnirpc"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/lf-edge/eve/pkg/pillar/utils/generics"
 	"github.com/lf-edge/eve/pkg/pillar/utils/netutils"
@@ -65,10 +66,10 @@ type NIReconciler interface {
 	// kubePod.Name should only be defined in Kubernetes mode, where applications
 	// run inside pods.
 	AddAppConn(ctx context.Context, appNetConfig types.AppNetworkConfig, appNum int,
-		kubePod types.AppPod, vifs []AppVIF) (AppConnReconcileStatus, error)
+		kubePod cnirpc.AppPod, vifs []AppVIF) (AppConnReconcileStatus, error)
 	// UpdateAppConn : update application connectivity to reflect config changes.
 	UpdateAppConn(ctx context.Context, appNetConfig types.AppNetworkConfig,
-		kubePod types.AppPod, vifs []AppVIF) (AppConnReconcileStatus, error)
+		kubePod cnirpc.AppPod, vifs []AppVIF) (AppConnReconcileStatus, error)
 	// DelAppConn : disconnect (removed) application from network instance(s).
 	DelAppConn(ctx context.Context, app uuid.UUID) (AppConnReconcileStatus, error)
 	// GetAppConnStatus : get current status of app connectivity.

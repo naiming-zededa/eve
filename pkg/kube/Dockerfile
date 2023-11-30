@@ -7,9 +7,9 @@ ENV PKGS alpine-baselayout musl-utils iproute2 iptables curl openrc \
          jq findutils nfs-utils
 RUN eve-alpine-deploy.sh
 
-COPY ./  /plugins/.
-WORKDIR /plugins
-RUN GO111MODULE=on CGO_ENABLED=0 go build -ldflags "-s -w" -mod=vendor -o /out/eve-bridge ./src/eve-bridge
+COPY eve-bridge /plugins/eve-bridge
+WORKDIR /plugins/eve-bridge
+RUN GO111MODULE=on CGO_ENABLED=0 go build -v -ldflags "-s -w" -mod=vendor -o /out/eve-bridge .
 
 FROM scratch
 COPY --from=build /out/ /

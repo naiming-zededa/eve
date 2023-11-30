@@ -16,6 +16,7 @@ import (
 
 	"github.com/eriknordmark/ipinfo"
 	"github.com/google/go-cmp/cmp"
+	"github.com/lf-edge/eve/pkg/kube/cnirpc"
 	"github.com/lf-edge/eve/pkg/pillar/base"
 	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
@@ -161,7 +162,7 @@ type AppNetworkStatus struct {
 	ConfigInSync   bool
 	DisplayName    string
 	// AppPod is only valid in Kubernetes mode.
-	AppPod AppPod
+	AppPod cnirpc.AppPod
 	// Copy from the AppNetworkConfig; used to delete when config is gone.
 	GetStatsIPAddr       net.IP
 	UnderlayNetworkList  []UnderlayNetworkStatus

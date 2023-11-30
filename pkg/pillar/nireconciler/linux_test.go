@@ -15,6 +15,7 @@ import (
 
 	dg "github.com/lf-edge/eve-libs/depgraph"
 	"github.com/lf-edge/eve-libs/reconciler"
+	"github.com/lf-edge/eve/pkg/kube/cnirpc"
 	"github.com/lf-edge/eve/pkg/pillar/base"
 	"github.com/lf-edge/eve/pkg/pillar/iptables"
 	"github.com/lf-edge/eve/pkg/pillar/netmonitor"
@@ -1028,7 +1029,7 @@ func TestSingleLocalNI(test *testing.T) {
 	}, eth0Routes...))
 
 	// Connect application into the network instance.
-	appStatus, err := niReconciler.AddAppConn(ctx, app1NetConfig, app1Num, types.AppPod{}, app1VIFs)
+	appStatus, err := niReconciler.AddAppConn(ctx, app1NetConfig, app1Num, cnirpc.AppPod{}, app1VIFs)
 	t.Expect(err).ToNot(HaveOccurred())
 	t.Expect(appStatus.App).To(Equal(app1UUID.UUID))
 	t.Expect(appStatus.Deleted).To(BeFalse())
@@ -1259,7 +1260,7 @@ func TestIPv4LocalAndSwitchNIs(test *testing.T) {
 
 	// Connect application into network instances.
 	// VIFs on the switch NI will receive IPs later.
-	appStatus, err := niReconciler.AddAppConn(ctx, app2NetConfig, app2Num, types.AppPod{}, app2VIFs)
+	appStatus, err := niReconciler.AddAppConn(ctx, app2NetConfig, app2Num, cnirpc.AppPod{}, app2VIFs)
 	t.Expect(err).ToNot(HaveOccurred())
 	t.Expect(appStatus.App).To(Equal(app2UUID.UUID))
 	t.Expect(appStatus.Deleted).To(BeFalse())
@@ -1363,7 +1364,7 @@ func TestIPv4LocalAndSwitchNIs(test *testing.T) {
 	// Simulate VIF2 and VIF3 getting IP addresses from an external DHCP server.
 	app2VIFs[1].GuestIP = ipAddress("172.20.0.101")
 	app2VIFs[2].GuestIP = ipAddress("172.20.0.102")
-	appStatus, err = niReconciler.UpdateAppConn(ctx, app2NetConfig, types.AppPod{}, app2VIFs)
+	appStatus, err = niReconciler.UpdateAppConn(ctx, app2NetConfig, cnirpc.AppPod{}, app2VIFs)
 	t.Expect(err).ToNot(HaveOccurred())
 	t.Expect(appStatus.App).To(Equal(app2UUID.UUID))
 	t.Expect(appStatus.Deleted).To(BeFalse())
@@ -1462,7 +1463,7 @@ func TestUplinkFailover(test *testing.T) {
 	networkMonitor.AddOrUpdateInterface(ni1BridgeIf)
 
 	// Connect application into the network instance.
-	_, err = niReconciler.AddAppConn(ctx, app1NetConfig, app1Num, types.AppPod{}, app1VIFs)
+	_, err = niReconciler.AddAppConn(ctx, app1NetConfig, app1Num, cnirpc.AppPod{}, app1VIFs)
 	t.Expect(err).ToNot(HaveOccurred())
 	t.Eventually(updatesCh).Should(Receive(&recUpdate))
 	t.Expect(recUpdate.UpdateType).To(Equal(nirec.AppConnReconcileStatusChanged))
@@ -1650,7 +1651,7 @@ func TestIPv6LocalAndSwitchNIs(test *testing.T) {
 
 	// Connect application into network instances.
 	// VIF on the switch NI will receive IPv6 address later.
-	appStatus, err := niReconciler.AddAppConn(ctx, app3NetConfig, app3Num, types.AppPod{}, app3VIFs)
+	appStatus, err := niReconciler.AddAppConn(ctx, app3NetConfig, app3Num, cnirpc.AppPod{}, app3VIFs)
 	t.Expect(err).ToNot(HaveOccurred())
 	t.Expect(appStatus.App).To(Equal(app3UUID.UUID))
 	t.Expect(appStatus.Deleted).To(BeFalse())
@@ -1693,7 +1694,7 @@ func TestIPv6LocalAndSwitchNIs(test *testing.T) {
 
 	// Simulate VIF2 obtaining an IPv6 address.
 	app3VIFs[1].GuestIP = ipAddress("2001::101")
-	_, err = niReconciler.UpdateAppConn(ctx, app3NetConfig, types.AppPod{}, app3VIFs)
+	_, err = niReconciler.UpdateAppConn(ctx, app3NetConfig, cnirpc.AppPod{}, app3VIFs)
 	t.Expect(err).ToNot(HaveOccurred())
 
 	// Check items created in the scope of NI3.
@@ -1891,7 +1892,7 @@ func TestAirGappedLocalAndSwitchNIs(test *testing.T) {
 		}))).To(BeFalse())
 
 	// Connect application into network instances.
-	appStatus, err := niReconciler.AddAppConn(ctx, app2NetConfig, app2Num, types.AppPod{}, app2VIFs)
+	appStatus, err := niReconciler.AddAppConn(ctx, app2NetConfig, app2Num, cnirpc.AppPod{}, app2VIFs)
 	t.Expect(err).ToNot(HaveOccurred())
 	t.Expect(appStatus.App).To(Equal(app2UUID.UUID))
 	t.Expect(appStatus.Deleted).To(BeFalse())
@@ -1967,7 +1968,7 @@ func TestAirGappedLocalAndSwitchNIs(test *testing.T) {
 	// Simulate that app2 is running DHCP server and gave VIF2 and VIF3 IP addresses.
 	app2VIFs[1].GuestIP = ipAddress("192.168.1.1")
 	app2VIFs[2].GuestIP = ipAddress("192.168.1.2")
-	appStatus, err = niReconciler.UpdateAppConn(ctx, app2NetConfig, types.AppPod{}, app2VIFs)
+	appStatus, err = niReconciler.UpdateAppConn(ctx, app2NetConfig, cnirpc.AppPod{}, app2VIFs)
 	t.Expect(err).ToNot(HaveOccurred())
 	t.Expect(appStatus.App).To(Equal(app2UUID.UUID))
 	t.Expect(appStatus.Deleted).To(BeFalse())
