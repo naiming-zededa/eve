@@ -403,7 +403,7 @@ func CreateZvolVault(log *base.LogObject, datasetName string, zfsKeyFile string,
 		return fmt.Errorf("Vault zvol dev path missing: %v", err)
 	}
 
-	if err = formatZvol(log, devPath, vaultFsType, 0); err != nil {
+	if err = formatZvol(log, devPath, vaultFsType, uint64(zfs.VolBlockSize)); err != nil {
 		return fmt.Errorf("Vault zvol format error: %v", err)
 	}
 
