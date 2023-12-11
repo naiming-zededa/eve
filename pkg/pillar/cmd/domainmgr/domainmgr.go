@@ -1484,13 +1484,17 @@ func doActivate(ctx *domainContext, config types.DomainConfig,
 		case zconfig.Format_FmtUnknown:
 			// do nothing
 		case zconfig.Format_CONTAINER:
-			snapshotID := containerd.GetSnapshotID(ds.FileLocation)
-			if err := ctx.casClient.MountSnapshot(snapshotID, cas.GetRoofFsPath(ds.FileLocation)); err != nil {
-				err := fmt.Errorf("doActivate: Failed mount snapshot: %s for %s. Error %s",
-					snapshotID, config.UUIDandVersion.UUID, err)
-				log.Error(err.Error())
-				status.SetErrorNow(err.Error())
-				return
+			// In Kubevirt eve container image is converted to PVC in volumemgr, there is nothing to mount here.
+			if !ctx.hvTypeKube {
+
+				snapshotID := containerd.GetSnapshotID(ds.FileLocation)
+				if err := ctx.casClient.MountSnapshot(snapshotID, cas.GetRoofFsPath(ds.FileLocation)); err != nil {
+					err := fmt.Errorf("doActivate: Failed mount snapshot: %s for %s. Error %s",
+						snapshotID, config.UUIDandVersion.UUID, err)
+					log.Error(err.Error())
+					status.SetErrorNow(err.Error())
+					return
+				}
 			}
 		default:
 			// assume everything else to be disk formats
