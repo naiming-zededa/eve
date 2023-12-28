@@ -1118,7 +1118,6 @@ func (r *LinuxNIReconciler) getSubgraphState(intSG, currSG dg.GraphR, forApp boo
 			if route.ForApp.ID != emptyUUID {
 				return true
 			}
-
 		}
 		if sysctlConf, isSysctl := item.(linux.Sysctl); isSysctl {
 			if sysctlConf.ForApp.ID != emptyUUID {
@@ -1146,6 +1145,8 @@ func (r *LinuxNIReconciler) getSubgraphState(intSG, currSG dg.GraphR, forApp boo
 			continue
 		}
 		if state.InTransition() {
+			r.log.Noticef("XXX: Item %v is in progress (in transition: %+v)",
+				dg.Reference(item), item)
 			inProgress = true
 		}
 		if itemErr := state.WithError(); itemErr != nil {
@@ -1165,6 +1166,8 @@ func (r *LinuxNIReconciler) getSubgraphState(intSG, currSG dg.GraphR, forApp boo
 			if ignoreExtraItem(item) {
 				continue
 			}
+			r.log.Noticef("XXX: Item %v is in progress (extra: %+v)",
+				dg.Reference(item), item)
 			inProgress = true
 		}
 		return inProgress, failedItems
@@ -1183,6 +1186,8 @@ func (r *LinuxNIReconciler) getSubgraphState(intSG, currSG dg.GraphR, forApp boo
 		if exists && !shouldExist && ignoreExtraItem(item) {
 			continue
 		}
+		r.log.Noticef("XXX: Item %v is in progress (diff: %+v  vs. %+v)",
+			itemRef, intItem, currItem)
 		inProgress = true
 	}
 	return inProgress, failedItems
