@@ -43,6 +43,9 @@ const (
 	KubevirtHypervisorName = "kubevirt"
 	kubevirtStateDir       = "/run/hypervisor/kubevirt/"
 	eveLableKey            = "App-Domain-Name"
+	// Define the KubeVirt resource's name and namespace
+	kubeVirtName      = "kubevirt"
+	kubeVirtNamespace = "kubevirt"
 )
 
 // VM instance meta data structure.
@@ -1266,12 +1269,11 @@ func getConfig(ctx *kubevirtContext) error {
 
 // Register the device  with Kubevirt
 // Refer https://kubevirt.io/user-guide/virtual_machines/host-devices/#host-preparation-for-pci-passthrough
+// Refer https://kubevirt.io/user-guide/virtual_machines/host-devices/#usb-host-passthrough
 func registerWithKV(kvClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, pciAssignments []pciDevice, serialAssignments []string, usbAssignments []string) error {
 
 	pcidevices := make([]v1.HostDevice, len(pciAssignments))
-	// Define the KubeVirt resource's name and namespace
-	kubeVirtName := "kubevirt"
-	kubeVirtNamespace := "kubevirt"
+	usbdevices := make([]v1.HostDevice, len(usbAssignments))
 
 	// Retrieve the KubeVirt resource
 	kubeVirt, err := kvClient.KubeVirt(kubeVirtNamespace).Get(kubeVirtName, &metav1.GetOptions{})
@@ -1281,8 +1283,7 @@ func registerWithKV(kvClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInsta
 
 	// Get the currently registered  devices from Kubevirt
 	pciHostDevs := kubeVirt.Spec.Configuration.PermittedHostDevices.PciHostDevices
-	// mediatedDevs := kubeVirt.Spec.Configuration.PermittedHostDevices.MediatedDevices
-	// usbDevs := kubeVirt.Spec.Configuration.PermittedHostDevices.usb
+	usbDevs := kubeVirt.Spec.Configuration.PermittedHostDevices.USB
 
 	for i, pa := range pciAssignments {
 
@@ -1291,9 +1292,18 @@ func registerWithKV(kvClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInsta
 			return logError("can't fetch the vendor id for pci device %v", err)
 		}
 
+		// Delete 0x prefix it exists, kubevirt does not like it
+		if strings.HasPrefix(vendor, "0x") {
+			vendor = vendor[2:]
+		}
+
 		devid, err := pa.devid()
 		if err != nil {
 			return logError("can't fetch the device id for pci device %v", err)
+		}
+
+		if strings.HasPrefix(devid, "0x") {
+			devid = devid[2:]
 		}
 
 		pciVendorSelector := vendor + ":" + devid
@@ -1308,6 +1318,7 @@ func registerWithKV(kvClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInsta
 				PCIVendorSelector: pciVendorSelector,
 			}
 
+			logrus.Infof("Registering PCI device %s as resource %s with kubevirt", pciVendorSelector, resname)
 			kubeVirt.Spec.Configuration.PermittedHostDevices.PciHostDevices = append(kubeVirt.Spec.Configuration.PermittedHostDevices.PciHostDevices, newpcidev)
 			_, err = kvClient.KubeVirt(kubeVirtNamespace).Update(kubeVirt)
 
@@ -1320,11 +1331,59 @@ func registerWithKV(kvClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInsta
 
 		pcidevices[i] = v1.HostDevice{
 			DeviceName: resname,
-			Name:       "pcidev" + strconv.Itoa(i+1),
+			Name:       "nvme" + strconv.Itoa(i+1),
 		}
 
 	}
 
+	for i, ua := range usbAssignments {
+		vendor_id, err := ua.vid()
+		if err != nil {
+			return logError("can't fetch the vendor id for pci device %v", err)
+		}
+
+		// Delete 0x prefix it exists, kubevirt does not like it
+		if strings.HasPrefix(vendor, "0x") {
+			vendor_id = vendor_id[2:]
+		}
+
+		product_id, err := ua.devid()
+		if err != nil {
+			return logError("can't fetch the device id for pci device %v", err)
+		}
+
+		if strings.HasPrefix(devid, "0x") {
+			product_id = product_id[2:]
+		}
+
+		// Check if we already registered this device with kubevirt. If not register with kubevirt
+		registered := isRegisteredUSBHostDevice(product_id, vendor_id, usbDevs)
+		resname := "devices.kubevirt.io/usb" + strconv.Itoa(i+1)
+		if !registered {
+
+			newusbdev := v1.USBHostDevice{
+				ResourceName: resname,
+				Selectors:    []v1.USBSelector{Product: product_id, Vendor: vendor_id},
+			}
+
+			logrus.Infof("Registering USB device %s:%s as resource %s with kubevirt", vendor_id, product_id, resname)
+			kubeVirt.Spec.Configuration.PermittedHostDevices.USB = append(kubeVirt.Spec.Configuration.PermittedHostDevices.USB, newusbdev)
+			_, err = kvClient.KubeVirt(kubeVirtNamespace).Update(kubeVirt)
+
+			if err != nil {
+				return logError("can't update the PCI device info from kubevirt %v", err)
+			}
+		}
+
+		// At this point we have registered the USB device with kubevirt
+		//  Create HostDevice array which will be inserted into vmi Hostdevices
+
+		usbdevices[i] = v1.HostDevice{
+			DeviceName: resname,
+			Name:       "usb" + strconv.Itoa(i+1),
+		}
+
+	}
 	vmi.Spec.Domain.Devices.HostDevices = pcidevices
 
 	return nil
@@ -1343,22 +1402,33 @@ func isRegisteredPciHostDevice(pciVendorSelector string, PciHostDevices []v1.Pci
 	return false
 }
 
+// This for vGPUs. Not used for now
 /*
 func isRegisteredMediatedDevice(mdevNameSelector string, mdevDevices []v1.MediatedDevices) bool {
 
-		for _, mdev := range mdevDevices {
-			if mdev.mdevNameSelector == mdevNameSelector {
+	for _, mdev := range mdevDevices {
+		if mdev.mdevNameSelector == mdevNameSelector {
+			return true
+		}
+	}
+
+	return false
+}
+*/
+
+func isRegisteredUSBHostDevice(product_id string, vendor_id string, usbDevices []v1.USBHostDevice) bool {
+
+	for _, udev := range usbDevices {
+		for _, singledev := range udev.Selectors {
+			if singledev.Product == product_id && singledev.Vendor == vendor_id {
 				return true
 			}
 		}
-
-		return false
 	}
 
-func isRegisteredUsbDevice() (bool, error) {
-
+	return false
 }
-*/
+
 func CleanupStaleVMI() (int, error) {
 	kubeconfig, err := kubeapi.GetKubeConfig()
 	if err != nil {

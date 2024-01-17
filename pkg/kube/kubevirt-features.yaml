@@ -8,6 +8,7 @@ spec:
     permittedHostDevices:
       pciHostDevices:   # <- PCIe passthrough devices like nvme drives
       mediatedDevices:  # <- GPUs
+      usb:              # <- USB passthrough
     developerConfiguration:
       featureGates:
         - LiveMigration
