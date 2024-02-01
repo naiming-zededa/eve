@@ -138,10 +138,10 @@ check_start_k3s() {
           k3s_pid=$!
           # Give the embedded etcd in k3s priority over io as its fsync latencies are critical
           ionice -c2 -n0 -p $k3s_pid
+          sleep 10
           # Default location where clients will look for config
           ln -s /etc/rancher/k3s/k3s.yaml ~/.kube/config
           cp /etc/rancher/k3s/k3s.yaml /run/.kube/k3s/k3s.yaml
-          sleep 10
       fi
   fi
 }
@@ -245,6 +245,18 @@ check_overwrite_nsmounter() {
     fi
   done
   ### REMOVE ME-
+}
+
+set_default_storageclass() {
+  if [ ! -e /var/lib/longhorn-1rep-sc-default ]; then
+    if ! kubectl get sc/longhorn; then
+      return
+    fi
+    # Intentionally done very late to avoid longhorn install overwriting us
+    kubectl patch storageclass longhorn -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+    kubectl patch storageclass longhorn-1replica -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+    touch /var/lib/longhorn-1rep-sc-default
+  fi
 }
 
 HOSTNAME=""
@@ -602,6 +614,7 @@ else
         else
           if [ -e /var/lib/longhorn_initialized ]; then
             check_overwrite_nsmounter
+            set_default_storageclass
           fi
         fi
 fi

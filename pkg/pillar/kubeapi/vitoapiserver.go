@@ -266,7 +266,7 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool, dis
 	// --insecure --uploadproxy-url https://10.43.31.180:8443  --access-mode RWO --block-volume --size 1000M
 
 	args := []string{"image-upload", "-n", EVEKubeNameSpace, "pvc", pvcName,
-		"--storage-class", "longhorn", "--image-path", diskfile, "--insecure",
+		"--storage-class", VolumeCSISingleNodeStorageClass, "--image-path", diskfile, "--insecure",
 		"--uploadproxy-url", uploadproxyURL, "--kubeconfig", EVEkubeConfigFile}
 
 	args = append(args, "--access-mode", "ReadWriteOnce")
