@@ -547,6 +547,7 @@ if [ ! -f /var/lib/all_components_initialized ]; then
             #kubectl apply -f  https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_VERSION}/deploy/longhorn.yaml
             # Switch back to above once all the longhorn services use the updated go iscsi tools
             kubectl apply -f /etc/longhorn-config.yaml
+            kubectl apply -f /etc/longhorn-1replica-storageclass.yaml
             touch /var/lib/longhorn_initialized
           fi
           sleep 10

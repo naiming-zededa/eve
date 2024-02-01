@@ -27,6 +27,7 @@ RUN mkdir -p /etc/containerd
 COPY kubevirt-features.yaml /etc
 COPY config-k3s.toml /etc/containerd/
 COPY longhorn-config.yaml /etc/
+COPY longhorn-1replica-storageclass.yaml /etc/
 COPY debuguser-role-binding.yaml /etc/
 COPY external-boot-image.tar /etc/
 RUN ls -l /etc/

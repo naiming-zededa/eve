@@ -13,6 +13,8 @@ const (
 	VolumeCSINameSpace = "eve-kube-app"
 	// CSI clustered storage class
 	VolumeCSIClusterStorageClass = "longhorn"
+	// CSI single node storage class
+	VolumeCSISingleNodeStorageClass = "longhorn-1replica"
 	// Default local storage class
 	VolumeCSILocalStorageClass = "local-path"
 )
