@@ -38,7 +38,6 @@ import (
 
 	//"k8s.io/client-go/kubernetes"
 	v1 "kubevirt.io/api/core/v1"
-	"kubevirt.io/client-go/kubecli"
 )
 
 // KubevirtHypervisorName is a name of kubevirt hypervisor
@@ -197,12 +196,9 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 	if err != nil {
 		return err
 	}
-	kubeconfig := ctx.kubeConfig
-	kvClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
-
+	kvClient, err := kubeapi.GetKubevirtClientSet()
 	if err != nil {
-		logrus.Errorf("couldn't get the kubernetes client API config: %v", err)
-		return err
+		return "", fmt.Errorf("couldn't get the kubevirt clientset: %v", err)
 	}
 
 	kubeName := base.GetAppKubeName(config.DisplayName, config.UUIDandVersion.UUID)
@@ -446,11 +442,9 @@ func (ctx kubevirtContext) Start(domainName string) error {
 	}
 
 	vmi := vmis.vmi
-	virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
-
+	virtClient, err := kubeapi.GetKubevirtClientSet()
 	if err != nil {
-		logrus.Errorf("couldn't get the kubernetes client API config: %v", err)
-		return err
+		return "", fmt.Errorf("couldn't get the kubevirt clientset: %v", err)
 	}
 
 	// Create the VM
@@ -505,11 +499,9 @@ func (ctx kubevirtContext) Stop(domainName string, force bool) error {
 		err := StopPodContainer(kubeconfig, vmis.name)
 		return err
 	} else {
-		virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
-
+		virtClient, err := kubeapi.GetKubevirtClientSet()
 		if err != nil {
-			logrus.Errorf("couldn't get the kubernetes client API config: %v", err)
-			return err
+			return "", fmt.Errorf("couldn't get the kubevirt clientset: %v", err)
 		}
 
 		// Stop the VM
@@ -547,11 +539,9 @@ func (ctx kubevirtContext) Delete(domainName string) (result error) {
 		err := StopPodContainer(kubeconfig, vmis.name)
 		return err
 	} else {
-		virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
-
+		virtClient, err := kubeapi.GetKubevirtClientSet()
 		if err != nil {
-			logrus.Errorf("couldn't get the kubernetes client API config: %v", err)
-			return err
+			return "", fmt.Errorf("couldn't get the kubevirt clientset: %v", err)
 		}
 
 		// Stop the VM
@@ -660,10 +650,9 @@ func getVMIStatus(vmiName string) (string, error) {
 		return "", logError("couldn't get the Kube Config: %v", err)
 	}
 
-	virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
-
+	virtClient, err := kubeapi.GetKubevirtClientSet()
 	if err != nil {
-		return "", logError("couldn't get the Kube client Config: %v", err)
+		return "", fmt.Errorf("couldn't get the kubevirt clientset: %v", err)
 	}
 
 	// Get the VMI info
@@ -1265,7 +1254,7 @@ func getConfig(ctx *kubevirtContext) error {
 
 // Register the device  with Kubevirt
 // Refer https://kubevirt.io/user-guide/virtual_machines/host-devices/#host-preparation-for-pci-passthrough
-func registerWithKV(kvClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, pciAssignments []pciDevice, serialAssignments []string, usbAssignments []string) error {
+func registerWithKV(kvClient kubeapi.KubevirtClientset, vmi *v1.VirtualMachineInstance, pciAssignments []pciDevice, serialAssignments []string, usbAssignments []string) error {
 
 	pcidevices := make([]v1.HostDevice, len(pciAssignments))
 	// Define the KubeVirt resource's name and namespace

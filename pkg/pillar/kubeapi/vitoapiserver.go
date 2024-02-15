@@ -7,7 +7,6 @@ package kubeapi
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -22,14 +21,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// CreatePVC : Creates a Persistent volume of given name and size
+// CreatePVC : creates a Persistent volume of given name and size.
 func CreatePVC(pvcName string, size uint64, log *base.LogObject) error {
 	// Get the Kubernetes clientset
 	clientset, err := GetClientSet()
 	if err != nil {
-		log.Errorf("Failed to get clientset %v", err)
-		errStr := fmt.Sprintf("Failed to get clientset %v", err)
-		return errors.New(errStr)
+		err = fmt.Errorf("failed to get clientset: %v", err)
+		log.Error(err)
+		return err
 	}
 
 	// PVC minimum supported size is 10MB
@@ -40,31 +39,33 @@ func CreatePVC(pvcName string, size uint64, log *base.LogObject) error {
 	pvc := NewPVCDefinition(pvcName, fmt.Sprint(size), nil, nil)
 
 	// Create the PVC in Kubernetes
-	result, err := clientset.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(context.Background(), pvc, metav1.CreateOptions{})
+	result, err := clientset.CoreV1().PersistentVolumeClaims(pvc.Namespace).
+		Create(context.Background(), pvc, metav1.CreateOptions{})
 	if err != nil {
-		log.Errorf("Failed to CreatePVC %s error %v", pvcName, err)
-		errStr := fmt.Sprintf("Failed to CreatePVC %s error %v", pvcName, err)
-		return errors.New(errStr)
+		err = fmt.Errorf("failed to CreatePVC %s: %v", pvcName, err)
+		log.Error(err)
+		return err
 	}
 
 	log.Noticef("Created PVC: %s\n", result.ObjectMeta.Name)
 	return nil
 }
 
-// DeletePVC : Deletes the PVC of given name
+// DeletePVC : deletes PVC of the given name.
 func DeletePVC(pvcName string, log *base.LogObject) error {
 	// Get the Kubernetes clientset
 	clientset, err := GetClientSet()
 	if err != nil {
-		log.Errorf("Failed to get clientset %v", err)
-		errStr := fmt.Sprintf("Failed to get clientset %v", err)
-		return errors.New(errStr)
+		err = fmt.Errorf("failed to get clientset: %v", err)
+		log.Error(err)
+		return err
 	}
-	err = clientset.CoreV1().PersistentVolumeClaims(VolumeCSINameSpace).Delete(context.Background(), pvcName, metav1.DeleteOptions{})
+	err = clientset.CoreV1().PersistentVolumeClaims(EVEKubeNameSpace).
+		Delete(context.Background(), pvcName, metav1.DeleteOptions{})
 	if err != nil {
-		log.Errorf("Failed to DeletePVC %s error %v", pvcName, err)
-		errStr := fmt.Sprintf("Failed to DeletePVC %s error %v", pvcName, err)
-		return errors.New(errStr)
+		err = fmt.Errorf("failed to DeletePVC %s: %v", pvcName, err)
+		log.Error(err)
+		return err
 	}
 	return nil
 }
@@ -74,15 +75,16 @@ func GetPVCList(log *base.LogObject) ([]string, error) {
 	// Get the Kubernetes clientset
 	clientset, err := GetClientSet()
 	if err != nil {
-		log.Errorf("Failed to get clientset %v", err)
-		errStr := fmt.Sprintf("Failed to get clientset %v", err)
-		return nil, errors.New(errStr)
+		err = fmt.Errorf("failed to get clientset: %v", err)
+		log.Error(err)
+		return nil, err
 	}
-	pvcs, err := clientset.CoreV1().PersistentVolumeClaims(VolumeCSINameSpace).List(context.Background(), metav1.ListOptions{})
+	pvcs, err := clientset.CoreV1().PersistentVolumeClaims(EVEKubeNameSpace).
+		List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		log.Errorf("Failed to get PVC list: %v", err)
-		errStr := fmt.Sprintf("Failed to get PVC list: %v", err)
-		return nil, errors.New(errStr)
+		err = fmt.Errorf("failed to get PVC list: %v", err)
+		log.Error(err)
+		return nil, err
 	}
 
 	var pvclist []string
@@ -98,32 +100,34 @@ func FindPVC(pvcName string, log *base.LogObject) (bool, error) {
 	// Get the Kubernetes clientset
 	clientset, err := GetClientSet()
 	if err != nil {
-		log.Errorf("Failed to get clientset %v", err)
-		errStr := fmt.Sprintf("Failed to get clientset %v", err)
-		return false, errors.New(errStr)
+		err = fmt.Errorf("failed to get clientset: %v", err)
+		log.Error(err)
+		return false, err
 	}
-	_, err = clientset.CoreV1().PersistentVolumeClaims(VolumeCSINameSpace).Get(context.Background(), pvcName, metav1.GetOptions{})
+	_, err = clientset.CoreV1().PersistentVolumeClaims(EVEKubeNameSpace).
+		Get(context.Background(), pvcName, metav1.GetOptions{})
 	if err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// GetPVCInfo : Returns the PVC info in the ImgInfo format
+// GetPVCInfo : Returns the PVC info in the ImgInfo format.
 func GetPVCInfo(pvcName string, log *base.LogObject) (*types.ImgInfo, error) {
 	// Get the Kubernetes clientset
 	clientset, err := GetClientSet()
 	if err != nil {
-		log.Errorf("Failed to get clientset %v", err)
-		errStr := fmt.Sprintf("Failed to get clientset %v", err)
-		return nil, errors.New(errStr)
+		err = fmt.Errorf("failed to get clientset: %v", err)
+		log.Error(err)
+		return nil, err
 	}
 
-	pvc, err := clientset.CoreV1().PersistentVolumeClaims(VolumeCSINameSpace).Get(context.Background(), pvcName, metav1.GetOptions{})
+	pvc, err := clientset.CoreV1().PersistentVolumeClaims(EVEKubeNameSpace).
+		Get(context.Background(), pvcName, metav1.GetOptions{})
 	if err != nil {
-		log.Errorf("GetPVCInfo failed to get info for pvc %s err %v", pvcName, err)
-		errStr := fmt.Sprintf("GetPVCInfo failed to get info for pvc %s err %v", pvcName, err)
-		return nil, errors.New(errStr)
+		err = fmt.Errorf("GetPVCInfo failed to get info for pvc %s: %v", pvcName, err)
+		log.Error(err)
+		return nil, err
 	}
 
 	fmt := zconfig.Format_name[int32(zconfig.Format_PVC)]
@@ -166,7 +170,6 @@ func getPVCSizes(pvc *corev1.PersistentVolumeClaim) (actualSizeBytes, usedSizeBy
 
 // longhorn PVC deals with Ki Mi not KB, MB
 func convertBytesToSize(b uint64) string {
-
 	bf := float64(b)
 	for _, unit := range []string{"", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"} {
 		if math.Abs(bf) < 1024.0 {
@@ -174,27 +177,28 @@ func convertBytesToSize(b uint64) string {
 		}
 		bf /= 1024.0
 	}
-
-	// Do we ever come here !!
+	// Do we ever come here ?!
 	return fmt.Sprintf("%.1fYi", bf)
 }
 
 // NewPVCDefinition : returns a default PVC object
-func NewPVCDefinition(pvcName string, size string, annotations, labels map[string]string) *corev1.PersistentVolumeClaim {
+func NewPVCDefinition(pvcName string, size string, annotations,
+	labels map[string]string) *corev1.PersistentVolumeClaim {
 
 	var (
-		volumeModeBlock = corev1.PersistentVolumeBlock // Filesystem is default so no need to declare
+		// Filesystem is default so no need to declare
+		volumeModeBlock = corev1.PersistentVolumeBlock
 	)
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        pvcName,
 			Annotations: annotations,
 			Labels:      labels,
-			Namespace:   VolumeCSINameSpace,
+			Namespace:   EVEKubeNameSpace,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			StorageClassName: stringPtr(VolumeCSIClusterStorageClass),
-			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
 			VolumeMode:       &volumeModeBlock,
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
@@ -205,29 +209,32 @@ func NewPVCDefinition(pvcName string, size string, annotations, labels map[strin
 	}
 }
 
-// RolloutDiskToPVC :  copy the content of diskfile to PVC
+// RolloutDiskToPVC : copy the content of diskfile to PVC
 // diskfile can be in qcow or raw format
 // If pvc does not exist, the command will create PVC and copies the data.
-func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool, diskfile string, pvcName string, filemode bool) error {
+func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
+	diskfile string, pvcName string, filemode bool) error {
 
 	// Get the Kubernetes clientset
 	clientset, err := GetClientSet()
 	if err != nil {
-		log.Errorf("Failed to get clientset %v", err)
-		errStr := fmt.Sprintf("Failed to get clientset %v", err)
-		return errors.New(errStr)
+		err = fmt.Errorf("failed to get clientset %v", err)
+		log.Error(err)
+		return err
 	}
 
 	var service *corev1.Service
 	// Get the Service from Kubernetes API.
 	i := 5
 	for {
-		service, err = clientset.CoreV1().Services("cdi").Get(context.Background(), "cdi-uploadproxy", metav1.GetOptions{})
+		service, err = clientset.CoreV1().Services("cdi").
+			Get(context.Background(), "cdi-uploadproxy", metav1.GetOptions{})
 
 		if err != nil {
 			if strings.Contains(err.Error(), "dial tcp 127.0.0.1:6443") && i <= 0 {
-				errStr := fmt.Sprintf("Failed to get Service cdi/cdi-uploadproxy: %v\n", err)
-				return errors.New(errStr)
+				err = fmt.Errorf("failed to get Service cdi/cdi-uploadproxy: %v\n", err)
+				log.Error(err)
+				return err
 			}
 			time.Sleep(10 * time.Second)
 			log.Noticef("RolloutDiskToPVC loop (%d), wait for 10 sec, err %v", i, err)
@@ -237,25 +244,23 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool, dis
 		i = i - 1
 	}
 
-	if service == nil {
-		errStr := fmt.Sprintf("Failed to get Service cdi/cdi-uploadproxy\n")
-		return errors.New(errStr)
-	}
 	// Get the ClusterIP of the Service.
 	clusterIP := service.Spec.ClusterIP
 	uploadproxyURL := "https://" + clusterIP + ":443"
 	log.Noticef("RolloutDiskToPVC diskfile %s pvc %s  URL %s", diskfile, pvcName, uploadproxyURL)
 	volSize, err := diskmetrics.GetDiskVirtualSize(log, diskfile)
 	if err != nil {
-		errStr := fmt.Sprintf("Failed to get virtual size of disk %s: %v", diskfile, err)
-		return errors.New(errStr)
+		err = fmt.Errorf("failed to get virtual size of disk %s: %v", diskfile, err)
+		log.Error(err)
+		return err
 	}
 
 	// ActualSize can be larger than VirtualSize for fully-allocated/not-thin QCOW2 files
 	actualVolSize, err := diskmetrics.GetDiskActualSize(log, diskfile)
 	if err != nil {
-		errStr := fmt.Sprintf("Failed to get actual size of disk %s: %v", diskfile, err)
-		return errors.New(errStr)
+		err = fmt.Errorf("failed to get actual size of disk %s: %v", diskfile, err)
+		log.Error(err)
+		return err
 	}
 	if actualVolSize > volSize {
 		volSize = actualVolSize
@@ -285,25 +290,24 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool, dis
 		// Add size
 		args = append(args, "--size", fmt.Sprint(volSize))
 	}
-	// add more debug level, default is 2
-	args = append(args, "-v", "7")
 
 	log.Noticef("virtctl args %v", args)
 
 	// Wait for long long time since some volumes could be in TBs
-	output, err := base.Exec(log, "/containers/services/kube/rootfs/usr/bin/virtctl", args...).WithContext(ctx).WithUnlimitedTimeout(432000 * time.Second).CombinedOutput()
+	output, err := base.Exec(log, "/containers/services/kube/rootfs/usr/bin/virtctl", args...).
+		WithContext(ctx).WithUnlimitedTimeout(432000 * time.Second).CombinedOutput()
 
 	if err != nil {
-		errStr := fmt.Sprintf("RolloutDiskToPVC: Failed to convert qcow to PVC  %s: %v", output, err)
-		return errors.New(errStr)
-	} else {
-		log.Noticef("virtctl no error, output %s", output)
+		err = fmt.Errorf("RolloutDiskToPVC: Failed to convert qcow to PVC %s: %v", output, err)
+		log.Error(err)
+		return err
 	}
 	err = waitForPVCReady(ctx, log, pvcName)
 
 	if err != nil {
-		errStr := fmt.Sprintf("RolloutDiskToPVC: error wait for PVC %v", err)
-		return errors.New(errStr)
+		err = fmt.Errorf("RolloutDiskToPVC: error wait for PVC %v", err)
+		log.Error(err)
+		return err
 	}
 
 	return nil
