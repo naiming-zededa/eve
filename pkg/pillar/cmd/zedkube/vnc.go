@@ -17,7 +17,6 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"kubevirt.io/client-go/kubecli"
 )
 
 func runAppVNC(ctx *zedkubeContext, config *types.AppInstanceConfig) {
@@ -68,15 +67,16 @@ func runAppVNC(ctx *zedkubeContext, config *types.AppInstanceConfig) {
 }
 
 func getVMIdomainName(ctx *zedkubeContext, config *types.AppInstanceConfig) (string, error) {
-	virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(ctx.config)
+	clientset, err := kubeapi.GetKubevirtClientSet()
 	if err != nil {
-		log.Errorf("getVMIs: get virtclient error %v", err)
-		return "", err
+		return "", fmt.Errorf("couldn't get the kubevirt clientset: %v", err)
 	}
+
+	ctx := context.Background()
 
 	vmiName := base.GetAppKubeName(config.DisplayName, config.UUIDandVersion.UUID)
 	var domainName string
-	vmis, err := virtClient.VirtualMachineInstance(kubeapi.EVEKubeNameSpace).List(context.Background(), &metav1.ListOptions{})
+	vmis, err := clientset.VirtualMachineInstance(kubeapi.EVEKubeNameSpace).List(context.Background(), &metav1.ListOptions{})
 	if err != nil {
 		log.Errorf("getVMIs: get VMI list error %v", err)
 		return "", err

@@ -16,25 +16,29 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/base"
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
-	"kubevirt.io/client-go/kubecli"
+
+	kubevirtapi "kubevirt.io/api/core/v1"
 )
 
 const (
-	EVEKubeNameSpace  = "eve-kube-app"
+	// EVEKubeNameSpace : Kubernetes namespace used to deploy VMIs/Pods running
+	// user applications.
+	EVEKubeNameSpace = "eve-kube-app"
+	// EVEkubeConfigFile : K3s config file path.
 	EVEkubeConfigFile = "/run/.kube/k3s/k3s.yaml"
-	// NetworkInstanceNAD : name of (singleton) NAD used to define connection between
+	// NetworkInstanceNAD : name of a (singleton) NAD used to define connection between
 	// pod and (any) network instance.
 	NetworkInstanceNAD = "network-instance-attachment"
-	// EVE k3s default namespace
-	VolumeCSINameSpace = "eve-kube-app"
-	// CSI clustered storage class
+	// VolumeCSIClusterStorageClass : CSI clustered storage class
 	VolumeCSIClusterStorageClass = "longhorn"
-	// Default local storage class
+	// VolumeCSILocalStorageClass : default local storage class
 	VolumeCSILocalStorageClass = "local-path"
 )
 
@@ -87,6 +91,33 @@ func GetNetClientSet() (*netclientset.Clientset, error) {
 	}
 
 	return nclientset, nil
+}
+
+// GetKubevirtClientSet : Get handle to kubernetes kubevirt clientset
+func GetKubevirtClientSet() (*KubevirtClientset, error) {
+	// Build the configuration from the provided kubeconfig file
+	c, err := GetKubeConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	config := *c
+	config.ContentConfig.GroupVersion = &schema.GroupVersion{Group: kubevirtapi.GroupName, Version: kubevirtapi.GroupVersion}
+	config.APIPath = "/apis"
+	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+	config.UserAgent = rest.DefaultKubernetesUserAgent()
+
+	coreClient, err := kubernetes.NewForConfig(&shallowCopy)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := rest.RESTClientFor(&config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &kubevirtClient{restClient: client, clientSet: coreClient}, nil
 }
 
 // WaitForKubernetes : Wait until kubernetes server is ready
@@ -142,9 +173,10 @@ func WaitForKubernetes(agentName string, ps *pubsub.PubSub, stillRunning *time.T
 
 func waitForLonghornReady(client *kubernetes.Clientset, hostname string) error {
 	// First we'll gate on the longhorn daemonsets existing
-	lhDaemonsets, err := client.AppsV1().DaemonSets("longhorn-system").List(context.Background(), metav1.ListOptions{})
+	lhDaemonsets, err := client.AppsV1().DaemonSets("longhorn-system").
+		List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("Checking if longhorn daemonsets exist: %v", err)
+		return fmt.Errorf("failed to list longhorn daemonsets: %v", err)
 	}
 	// Keep a running table of which expected Daemonsets exist
 	var lhExpectedDaemonsets = map[string]bool{
@@ -161,7 +193,7 @@ func waitForLonghornReady(client *kubernetes.Clientset, hostname string) error {
 			}
 		}
 
-		labelSelectors := []string{}
+		var labelSelectors []string
 		for dsLabelK, dsLabelV := range lhDaemonset.Spec.Template.Labels {
 			labelSelectors = append(labelSelectors, dsLabelK+"="+dsLabelV)
 		}
@@ -170,18 +202,18 @@ func waitForLonghornReady(client *kubernetes.Clientset, hostname string) error {
 			LabelSelector: strings.Join(labelSelectors, ","),
 		})
 		if err != nil {
-			return fmt.Errorf("Unable to get daemonset pods on node: %v", err)
+			return fmt.Errorf("unable to get daemonset pods on node: %v", err)
 		}
 		if len(pods.Items) != 1 {
-			return fmt.Errorf("Longhorn daemonset:%s missing on this node", lhDsName)
+			return fmt.Errorf("longhorn daemonset:%s missing on this node", lhDsName)
 		}
 		for _, pod := range pods.Items {
 			if pod.Status.Phase != "Running" {
-				return fmt.Errorf("Daemonset:%s not running on node", lhDsName)
+				return fmt.Errorf("daemonset:%s not running on node", lhDsName)
 			}
 			for _, podContainerState := range pod.Status.ContainerStatuses {
 				if !podContainerState.Ready {
-					return fmt.Errorf("Daemonset:%s not ready on node", lhDsName)
+					return fmt.Errorf("daemonset:%s not ready on node", lhDsName)
 				}
 			}
 		}
@@ -189,7 +221,7 @@ func waitForLonghornReady(client *kubernetes.Clientset, hostname string) error {
 
 	for dsPrefix, dsPrefixExists := range lhExpectedDaemonsets {
 		if !dsPrefixExists {
-			return fmt.Errorf("Longhorn missing daemonset:%s", dsPrefix)
+			return fmt.Errorf("longhorn missing daemonset:%s", dsPrefix)
 		}
 	}
 
@@ -199,8 +231,10 @@ func waitForLonghornReady(client *kubernetes.Clientset, hostname string) error {
 func waitForNodeReady(client *kubernetes.Clientset, readyCh chan bool, devUUID string) {
 	err := wait.PollImmediate(time.Second, time.Minute*20, func() (bool, error) {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			labelSelector := metav1.LabelSelector{MatchLabels: map[string]string{"node-uuid": devUUID}}
-			options := metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(&labelSelector)}
+			labelSelector := metav1.LabelSelector{
+				MatchLabels: map[string]string{"node-uuid": devUUID}}
+			options := metav1.ListOptions{
+				LabelSelector: metav1.FormatLabelSelector(&labelSelector)}
 			nodes, err := client.CoreV1().Nodes().List(context.Background(), options)
 			if err != nil {
 				return err
@@ -215,9 +249,10 @@ func waitForNodeReady(client *kubernetes.Clientset, readyCh chan bool, devUUID s
 				return fmt.Errorf("node not found by label uuid %s", devUUID)
 			}
 			// get all pods from kubevirt, and check if they are all running
-			pods, err := client.CoreV1().Pods("kubevirt").List(context.Background(), metav1.ListOptions{
-				FieldSelector: "status.phase=Running",
-			})
+			pods, err := client.CoreV1().Pods("kubevirt").
+				List(context.Background(), metav1.ListOptions{
+					FieldSelector: "status.phase=Running",
+				})
 			if err != nil {
 				return err
 			}
@@ -254,7 +289,8 @@ func waitForPVCReady(ctx context.Context, log *base.LogObject, pvcName string) e
 	var count int
 	var err2 error
 	for {
-		pvcs, err := clientset.CoreV1().PersistentVolumeClaims(EVEKubeNameSpace).List(context.Background(), metav1.ListOptions{})
+		pvcs, err := clientset.CoreV1().PersistentVolumeClaims(EVEKubeNameSpace).
+			List(context.Background(), metav1.ListOptions{})
 		if err != nil {
 			log.Errorf("GetPVCInfo failed to list pvc info err %v", err)
 			err2 = err
@@ -282,27 +318,24 @@ func waitForPVCReady(ctx context.Context, log *base.LogObject, pvcName string) e
 	return fmt.Errorf("waitForPVCReady: time expired count %d, err %v", count, err2)
 }
 
+// CleanupStaleVMI : delete all VMIs. Used by domainmgr on startup.
 func CleanupStaleVMI() (int, error) {
-	kubeconfig, err := GetKubeConfig()
+	clientset, err := GetKubevirtClientSet()
 	if err != nil {
-		return 0, fmt.Errorf("couldn't get the Kube Config: %v", err)
+		return 0, fmt.Errorf("couldn't get the kubevirt clientset: %v", err)
 	}
 
-	virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
-	if err != nil {
-		return 0, fmt.Errorf("couldn't get the Kube client Config: %v", err)
-	}
+	ctx := context.Background()
 
-	// Get the VMI list
-	vmiList, err := virtClient.VirtualMachineInstance(EVEKubeNameSpace).List(context.Background(), &metav1.ListOptions{})
+	// get a list of our VMs
+	vmiList, err := clientset.VirtualMachineInstance(EVEKubeNameSpace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return 0, fmt.Errorf("list the Kubevirt VMIs: %v", err)
+		return 0, fmt.Errorf("couldn't get the Kubevirt VMs: %v", err)
 	}
 
 	var count int
 	for _, vmi := range vmiList.Items {
-		err = virtClient.VirtualMachineInstance(EVEKubeNameSpace).Delete(context.Background(), vmi.ObjectMeta.Name, &metav1.DeleteOptions{})
-		if err != nil {
+		if err := clientset.VirtualMachineInstance(EVEKubeNameSpace).Delete(ctx, vmi.ObjectMeta.Name, metav1.DeleteOptions{}); err != nil {
 			return count, fmt.Errorf("delete vmi error: %v", err)
 		}
 		count++
