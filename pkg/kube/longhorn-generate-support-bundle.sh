@@ -2,12 +2,6 @@
 
 LOG_DIR=/persist/newlog/kube
 
-lhVersion=$(kubectl -n longhorn-system get configmap/longhorn-default-setting -o json | jq -r '.metadata.labels."app.kubernetes.io/version"')
-if [[ "$lhVersion" = *"v1.4"* ]]; then
-    echo "Unsupported longhorn version for support bundles.  Please USB install to get 1.5.3";
-    exit 0
-fi
-
 echo "Apply longhorn support bundle yaml at $(date)"
 
 cat <<EOF | kubectl apply -f -
@@ -39,11 +33,12 @@ ip=$(kubectl -n longhorn-system get supportbundle.longhorn.io/support-bundle-col
 filename=$(kubectl -n longhorn-system get supportbundle.longhorn.io/support-bundle-collect-info -o json | jq -r .status.filename)
 
 old_log_count=$(find "$LOG_DIR" -type f -name "longhornsupportbundle_*" | wc -l)
-if [ $old_log_count -gt 4 ]; then 
+if [ "$old_log_count" -gt 4 ]; then
+    # shellcheck disable=SC2046
     rm $(find "$LOG_DIR" -type f -name "longhornsupportbundle_*" | sort -n | head -n -4)
 fi
 
-curl http://${ip}:8080/bundle > ${LOG_DIR}/longhorn${filename}
+curl "http://${ip}:8080/bundle" > "${LOG_DIR}/longhorn${filename}"
 echo "longhorn support bundle downloaded to ${LOG_DIR}/longhorn${filename}"
 
 kubectl -n longhorn-system delete supportbundle.longhorn.io/support-bundle-collect-info

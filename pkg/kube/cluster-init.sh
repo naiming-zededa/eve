@@ -9,6 +9,7 @@ K3S_VERSION=v1.28.5+k3s1
 KUBEVIRT_VERSION=v1.1.0
 LONGHORN_VERSION=v1.6.0
 CDI_VERSION=v1.57.0
+# shellcheck disable=SC2034
 Node_IP=""
 MAX_K3S_RESTARTS=10
 RESTART_COUNT=0
@@ -55,7 +56,7 @@ save_crash_log() {
   if [ -e "${K3S_LOG_DIR}/${crashLogBaseName}" ]; then
     rm "${K3S_LOG_DIR}/${crashLogBaseName}"
   fi
-  gzip -k -9 ${K3S_LOG_DIR}/${fileBaseName} -c > "${K3S_LOG_DIR}/${crashLogBaseName}"
+  gzip -k -9 "${K3S_LOG_DIR}/${fileBaseName}" -c > "${K3S_LOG_DIR}/${crashLogBaseName}"
 }
 
 check_network_connection () {
@@ -79,7 +80,6 @@ wait_for_default_route() {
       logmsg "Default route found"
       return 0
     fi
-    #Make yetus happy
     logmsg "waiting for default route $iface $dest $gw $flags $refcnt $use $metric $mask $mtu $window $irtt"
     sleep 1
   done < /proc/net/route
@@ -99,7 +99,7 @@ get_default_intf_IP_prefix() {
     [ -z "$NODE_IP" ] && sleep 1
   done
 
-  echo "Node IP Address: $ip_address"
+  echo "Node IP Address: $NODE_IP"
   ip_prefix="$NODE_IP/32"
 
   # fill in the outbound external Interface IP prefix in multus config
@@ -128,7 +128,7 @@ wait_for_device_name() {
   # we should have the uuid since we got the device name
   DEVUUID=$(/bin/hostname)
   # get last 5 bytes of the DEVUUID as suffix to the hostname
-  DEVUUID_HASH=$(echo $DEVUUID | tail -c 6)
+  DEVUUID_HASH=$(echo "$DEVUUID" | tail -c 6)
   HOSTNAME="$HOSTNAME-$DEVUUID_HASH"
   if ! grep -q node-name /etc/rancher/k3s/config.yaml; then
     echo "node-name: $HOSTNAME" >> /etc/rancher/k3s/config.yaml
@@ -137,10 +137,10 @@ wait_for_device_name() {
 
 check_start_k3s() {
   pgrep -f "k3s server" > /dev/null 2>&1
-  if [ $? -eq 1 ]; then 
+  if [ $? -eq 1 ]; then
       if [ $RESTART_COUNT -lt $MAX_K3S_RESTARTS ]; then
           ## Must be after reboot, or from k3s restart
-          let "RESTART_COUNT++"
+          RESTART_COUNT=$((RESTART_COUNT+1))
           save_crash_log "k3s.log"
           if [ ! -f /var/lib/cni/bin ]; then
             copy_cni_plugin_files
@@ -159,8 +159,12 @@ check_start_k3s() {
           ln -s /etc/rancher/k3s/k3s.yaml ~/.kube/config
           cp /etc/rancher/k3s/k3s.yaml /run/.kube/k3s/k3s.yaml
           sleep 10
+          return 1
+      else
+        logmsg "k3s is down and restart count exceeded."
       fi
   fi
+  return 0
 }
 
 apply_multus_cni() {
@@ -223,8 +227,8 @@ setup_prereqs () {
 
 apply_longhorn_disk_config() {
         node=$1
-        kubectl label node $node node.longhorn.io/create-default-disk='config'
-        kubectl annotate node $node node.longhorn.io/default-disks-config='[ { "path":"/persist/vault/volumes", "allowScheduling":true }]'
+        kubectl label node "$node" node.longhorn.io/create-default-disk='config'
+        kubectl annotate node "$node" node.longhorn.io/default-disks-config='[ { "path":"/persist/vault/volumes", "allowScheduling":true }]'
 }
 
 config_cluster_roles() {
@@ -234,8 +238,8 @@ config_cluster_roles() {
   openssl req -new -key /tmp/user.key -out /tmp/user.csr -subj "/CN=debugging-user/O=rbac"
   openssl x509 -req -in /tmp/user.csr -CA /var/lib/rancher/k3s/server/tls/client-ca.crt \
     -CAkey /var/lib/rancher/k3s/server/tls/client-ca.key -CAcreateserial -out /tmp/user.crt -days 365
-  user_key_base64=$(cat /tmp/user.key | base64 -w0)
-  user_crt_base64=$(cat /tmp/user.crt | base64 -w0)
+  user_key_base64=$(base64 -w0 < /tmp/user.key)
+  user_crt_base64=$(base64 -w0 < /tmp/user.crt)
 
   # generate kubeConfigure user for debugging-user
   cp /etc/rancher/k3s/k3s.yaml /var/lib/rancher/k3s/user.yaml
@@ -253,13 +257,11 @@ check_overwrite_nsmounter() {
   # When https://github.com/longhorn/longhorn/issues/6857 is resolved, remove this 'REMOVE ME' section
   # In addition to pkg/kube/nsmounter and the copy of it in pkg/kube/Dockerfile
   longhornCsiPluginPods=$(kubectl -n longhorn-system get pod -o json | jq -r '.items[] | select(.metadata.labels.app=="longhorn-csi-plugin" and .status.phase=="Running") | .metadata.name')
-  for csiPod in $longhornCsiPluginPods; do    
-    kubectl -n longhorn-system exec pod/${csiPod} --container=longhorn-csi-plugin -- ls /usr/local/sbin/nsmounter.updated > /dev/null 2>@1
-    if [ $? -ne 0 ]; then
-      cat /usr/bin/nsmounter | kubectl -n longhorn-system exec -i pod/${csiPod} --container=longhorn-csi-plugin -- tee /usr/local/sbin/nsmounter
-      if [ $? -eq 0 ]; then
+  for csiPod in $longhornCsiPluginPods; do
+    if ! kubectl -n longhorn-system exec "pod/${csiPod}" --container=longhorn-csi-plugin -- ls /usr/local/sbin/nsmounter.updated > /dev/null 2>@1; then
+      if kubectl -n longhorn-system exec -i "pod/${csiPod}" --container=longhorn-csi-plugin -- tee /usr/local/sbin/nsmounter < /usr/bin/nsmounter; then
         logmsg "Updated nsmounter in longhorn pod ${csiPod}"
-        kubectl -n longhorn-system exec pod/${csiPod} --container=longhorn-csi-plugin -- touch /usr/local/sbin/nsmounter.updated
+        kubectl -n longhorn-system exec "pod/${csiPod}" --container=longhorn-csi-plugin -- touch /usr/local/sbin/nsmounter.updated
       fi
     fi
   done
@@ -276,20 +278,20 @@ vaultMgrStatusPath="/run/vaultmgr/VaultStatus/Application Data Store.json"
 vaultMgrStatus=0
 DataSecAtRestStatus_DATASEC_AT_REST_DISABLED=1
 DataSecAtRestStatus_DATASEC_AT_REST_ENABLED=2
-while [ $vaultMgrStatus -ne $DataSecAtRestStatus_DATASEC_AT_REST_DISABLED ] && [ $vaultMgrStatus -ne $DataSecAtRestStatus_DATASEC_AT_REST_ENABLED ]; 
+while [ $vaultMgrStatus -ne $DataSecAtRestStatus_DATASEC_AT_REST_DISABLED ] && [ $vaultMgrStatus -ne $DataSecAtRestStatus_DATASEC_AT_REST_ENABLED ];
 do
         logmsg "Waiting for vault, currently: $vaultMgrStatus"
         if [ -e "$vaultMgrStatusPath" ]; then
-                vaultMgrStatus=$(cat "$vaultMgrStatusPath" | jq -r .Status)
-        fi 
-        if [ $vaultMgrStatus -ne $DataSecAtRestStatus_DATASEC_AT_REST_DISABLED ] && [ $vaultMgrStatus -ne $DataSecAtRestStatus_DATASEC_AT_REST_ENABLED ]; then 
+                vaultMgrStatus=$(jq -r .Status < "$vaultMgrStatusPath")
+        fi
+        if [ $vaultMgrStatus -ne $DataSecAtRestStatus_DATASEC_AT_REST_DISABLED ] && [ $vaultMgrStatus -ne $DataSecAtRestStatus_DATASEC_AT_REST_ENABLED ]; then
                 sleep 1
         fi
 done
 
 check_start_containerd() {
         # Needed to get the pods to start
-        if [ ! -L /usr/bin/runc ]; then 
+        if [ ! -L /usr/bin/runc ]; then
                 ln -s /var/lib/rancher/k3s/data/current/bin/runc /usr/bin/runc
         fi
         if [ ! -L /usr/bin/containerd-shim-runc-v2 ]; then
@@ -297,25 +299,24 @@ check_start_containerd() {
         fi
 
         pgrep -f "/var/lib/rancher/k3s/data/current/bin/containerd" > /dev/null 2>&1
-        if [ $? -eq 1 ]; then 
+        if [ $? -eq 1 ]; then
                 mkdir -p /run/containerd-user
                 nohup /var/lib/rancher/k3s/data/current/bin/containerd --config /etc/containerd/config-k3s.toml &
                 containerd_pid=$!
                 logmsg "Started k3s-containerd at pid:$containerd_pid"
-        fi   
+        fi
         if [ -f /etc/external-boot-image.tar ]; then
-                # NOTE: https://kubevirt.io/user-guide/virtual_machines/boot_from_external_source/
-                # Install external-boot-image image to our eve user containerd registry.
-                # This image contains just kernel and initrd to bootstrap a container image as a VM.
-                # This is very similar to what we do on kvm based eve to start container as a VM.
-		logmsg "trying to install new external-boot-image"
-		# This import happens once per reboot
-		ctr -a /run/containerd-user/containerd.sock image import /etc/external-boot-image.tar docker.io/lfedge/eve-external-boot-image:latest
-		if [ $? -eq 0 ]; then
-			logmsg "Successfully installed external-boot-image"
-			rm -f /etc/external-boot-image.tar
-		fi
-	fi
+          # NOTE: https://kubevirt.io/user-guide/virtual_machines/boot_from_external_source/
+          # Install external-boot-image image to our eve user containerd registry.
+          # This image contains just kernel and initrd to bootstrap a container image as a VM.
+          # This is very similar to what we do on kvm based eve to start container as a VM.
+          logmsg "trying to install new external-boot-image"
+          # This import happens once per reboot
+          if ctr -a /run/containerd-user/containerd.sock image import /etc/external-boot-image.tar docker.io/lfedge/eve-external-boot-image:latest; then
+            logmsg "Successfully installed external-boot-image"
+            rm -f /etc/external-boot-image.tar
+          fi
+        fi
 }
 
 trigger_k3s_selfextraction() {
@@ -345,7 +346,7 @@ wait_for_item() {
   while true; do
     if [ -e "$filename" ]; then
       k3sproc=""
-      if pgrep -x "$process_name" > /dev/null; then
+      if pgrep -x "$processname" > /dev/null; then
         k3sproc="k3s server is running"
       else
         k3sproc="k3s server is NOT running"
@@ -374,6 +375,7 @@ check_node_ready_k3s_running() {
   while true; do
     # Check if 'k3s server' is running
     if ! check_k3s_running; then
+      # shellcheck disable=SC2034
       K3S_RUNNING=false
       logmsg "k3s server is not running, exit wait"
       break
@@ -381,7 +383,7 @@ check_node_ready_k3s_running() {
 
     # Check if the Kubernetes node is ready, apply label with device UUID
     if check_node_ready; then
-      logmsg "set node lable with uuid $DEVUUID"
+      logmsg "set node label with uuid $DEVUUID"
       kubectl label node "$HOSTNAME" node-uuid="$DEVUUID"
       break
     fi
@@ -396,12 +398,12 @@ check_node_ready_k3s_running() {
 # Return unix style 0 for success.  (Not 0 for false)
 are_all_pods_ready() {
   not_running=$(kubectl get pods -A -o json | jq '.items[] | select(.status.phase!="Running" and .status.phase!="Succeeded")' | jq -s length)
-  if [ $not_running -ne 0 ]; then
+  if [ "$not_running" -ne 0 ]; then
     return 1
   fi
 
   not_ready=$(kubectl get pods -A -o json | jq '.items[] | select(.status.phase=="Running") | .status.conditions[] | select(.type=="ContainersReady" and .status!="True")' | jq -s length)
-  if [ $not_ready -ne 0 ]; then
+  if [ "$not_ready" -ne 0 ]; then
     return 1
   fi
 
@@ -415,12 +417,13 @@ VNC_RUNNING=false
 check_and_run_vnc() {
   pid=$(pgrep -f "/usr/bin/virtctl vnc" )
   # if remote-console config file exist, and either has not started, or need to restart
-  if [ -f "$VMICONFIG_FILENAME" ] && { [ "$VNC_RUNNING" = false ] || [ -z "$pid"]; } then
+  if [ -f "$VMICONFIG_FILENAME" ] && { [ "$VNC_RUNNING" = false ] || [ -z "$pid" ]; } then
     vmiName=""
     vmiPort=""
 
     # Read the file and extract values
     while IFS= read -r line; do
+        # shellcheck disable=SC3010
         if [[ $line == *"VMINAME:"* ]]; then
             vmiName="${line#*VMINAME:}"   # Extract the part after "VMINAME:"
             vmiName="${vmiName%%[[:space:]]*}"  # Remove leading/trailing whitespace
@@ -432,7 +435,7 @@ check_and_run_vnc() {
 
     # Check if vminame and vncport were found and assign default values if not
     if [ -z "$vmiName" ] || [ -z "$vmiPort" ]; then
-        logmsg "Error: VMINAME or VNCPORT is empty in $myVNCFile"
+        logmsg "Error: VMINAME or VNCPORT is empty in $VMICONFIG_FILENAME"
         return 1
     fi
 
@@ -462,7 +465,7 @@ do
         if [ -b /dev/zvol/persist/etcd-storage ]; then
                 # blkid would also work...
                 fs=$(lsblk -f -d /dev/zvol/persist/etcd-storage | grep -v FSTYPE | awk '{print $2}')
-                if [ "$fs" == "ext4" ]; then
+                if [ "$fs" = "ext4" ]; then
                         etcd_fs_ready=1
                 fi
         fi
@@ -488,17 +491,17 @@ if [ ! -f /var/lib/all_components_initialized ]; then
                 trigger_k3s_selfextraction
                 touch /var/lib/k3s_initialized
         fi
-        
+
         check_start_containerd
         check_start_k3s
 
-        node_count_ready=$(kubectl get node | grep -w $HOSTNAME | grep -w Ready | wc -l)
-        if [ $node_count_ready -ne 1 ]; then
+        node_count_ready=$(kubectl get node | grep -w "$HOSTNAME" | grep -cw Ready )
+        if [ "$node_count_ready" -ne 1 ]; then
           sleep 10
           continue
         fi
-        node_uuid_len=$(kubectl get nodes -l node-uuid=$DEVUUID -o json | jq '.items | length')
-        if [ $node_uuid_len -eq 0 ]; then
+        node_uuid_len=$(kubectl get nodes -l node-uuid="$DEVUUID" -o json | jq '.items | length')
+        if [ "$node_uuid_len" -eq 0 ]; then
           logmsg "set node label with uuid $DEVUUID"
           kubectl label node "$HOSTNAME" node-uuid="$DEVUUID"
         fi
@@ -547,7 +550,7 @@ if [ ! -f /var/lib/all_components_initialized ]; then
           if are_all_pods_ready; then
             wait_for_item "longhorn"
             logmsg "Installing longhorn version ${LONGHORN_VERSION}"
-            apply_longhorn_disk_config $HOSTNAME
+            apply_longhorn_disk_config "$HOSTNAME"
             lhCfgPath=/var/lib/lh-cfg-${LONGHORN_VERSION}.yaml
             if [ ! -e $lhCfgPath ]; then
               curl -k https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_VERSION}/deploy/longhorn.yaml > "$lhCfgPath"
@@ -568,48 +571,21 @@ if [ ! -f /var/lib/all_components_initialized ]; then
         fi
 else
         check_start_containerd
-        pgrep -f "k3s server" > /dev/null 2>&1
-        if [ $? -eq 1 ]; then 
-            if [ $RESTART_COUNT -lt $MAX_K3S_RESTARTS ]; then
-                ## Must be after reboot, or from k3s restart
-                let "RESTART_COUNT++"
-                save_crash_log "k3s.log"
-                if [ ! -f /var/lib/cni/bin ]; then
-                  copy_cni_plugin_files
-                fi
-                ln -s /var/lib/k3s/bin/* /usr/bin
-                logmsg "Starting k3s server, restart count: $RESTART_COUNT"
-                # for now, always copy to get the latest
-                nohup /usr/bin/k3s server --config /etc/rancher/k3s/config.yaml &
-                k3s_pid=$!
-                logmsg "Looping until k3s is ready (restart path), pid:$k3s_pid"
-                until kubectl get node | grep "$HOSTNAME" | awk '{print $2}' | grep 'Ready'; do sleep 5; done
-                # Give the embedded etcd in k3s priority over io as its fsync latencies are critical
-                ionice -c2 -n0 -p $k3s_pid
-                logmsg "k3s is ready on this node, pid:$k3s_pid"
-                # Default location where clients will look for config
-                ln -s /etc/rancher/k3s/k3s.yaml ~/.kube/config
-                cp /etc/rancher/k3s/k3s.yaml /run/.kube/k3s/k3s.yaml
-
-                # apply multus
-                if [ ! -f /var/lib/multus_initialized ]; then
-                  apply_multus_cni
-                fi
-                pgrep -f "/opt/cni/bin/dhcp daemon" > /dev/null 2>&1
-                if [ $? -eq 1 ]; then
-                  /opt/cni/bin/dhcp daemon &
-                fi
-
-                # setup debug user credential, role and binding
-                if [ ! -f /var/lib/debuguser-initialized ]; then
-                  config_cluster_roles
-                else
-                  cp /var/lib/rancher/k3s/user.yaml /run/.kube/k3s/user.yaml
-                fi
-
-            else
-                logmsg "k3s is down and restart count exceeded."
-            fi
+        if ! check_start_k3s; then
+          # apply multus
+          if [ ! -f /var/lib/multus_initialized ]; then
+            apply_multus_cni
+          fi
+          pgrep -f "/opt/cni/bin/dhcp daemon" > /dev/null 2>&1
+          if [ $? -eq 1 ]; then
+            /opt/cni/bin/dhcp daemon &
+          fi
+          # setup debug user credential, role and binding
+          if [ ! -f /var/lib/debuguser-initialized ]; then
+            config_cluster_roles
+          else
+            cp /var/lib/rancher/k3s/user.yaml /run/.kube/k3s/user.yaml
+          fi
         else
           if [ -e /var/lib/longhorn_initialized ]; then
             check_overwrite_nsmounter
