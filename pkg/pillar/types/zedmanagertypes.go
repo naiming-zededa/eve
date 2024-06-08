@@ -140,6 +140,9 @@ type AppInstanceConfig struct {
 	// Contains the configuration of the snapshot handling for the app instance.
 	// Meanwhile, the list of actual snapshots is stored in the AppInstanceStatus.
 	Snapshot SnapshotConfig
+
+	// Cluster Designated Node Id
+	DesignatedNodeID uuid.UUID
 }
 
 type AppInstanceOpsCmd struct {
