@@ -5,12 +5,13 @@ package zedmanager
 
 import (
 	"fmt"
-	"github.com/lf-edge/eve/pkg/pillar/hypervisor"
 	"time"
+
+	"github.com/lf-edge/eve/pkg/pillar/hypervisor"
+	uuid "github.com/satori/go.uuid"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/lf-edge/eve/pkg/pillar/types"
-	"github.com/satori/go.uuid"
 )
 
 // Update this AppInstanceStatus generate config updates to
@@ -201,7 +202,7 @@ func doUpdate(ctx *zedmanagerContext,
 		return changed
 	}
 
-	effectiveActivate := effectiveActivateCurrentProfile(config, ctx.currentProfile)
+	effectiveActivate := effectiveActivateCombined(config, ctx)
 
 	if !effectiveActivate {
 		if status.Activated || status.ActivateInprogress {

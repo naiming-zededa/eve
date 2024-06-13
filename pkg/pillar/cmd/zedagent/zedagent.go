@@ -27,8 +27,11 @@ package zedagent
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -152,6 +155,7 @@ type zedagentContext struct {
 	subCipherMetricsZR        pubsub.Subscription
 	subCipherMetricsWwan      pubsub.Subscription
 	subPatchEnvelopeUsage     pubsub.Subscription
+	subEncPubToRemoteData     pubsub.Subscription // subEncPubToRemoteData for testing
 	zedcloudMetrics           *zedcloud.AgentMetrics
 	fatalFlag                 bool // From command line arguments
 	hangFlag                  bool // From command line arguments
@@ -227,6 +231,9 @@ type zedagentContext struct {
 
 	// Is Kubevirt eve
 	hvTypeKube bool
+
+	// EN cluster config
+	pubEdgeNodeClusterConfig pubsub.Publication
 
 	// Netdump
 	netDumper            *netdump.NetDumper // nil if netdump is disabled
@@ -601,6 +608,8 @@ func (zedagentCtx *zedagentContext) init() {
 	attestCtx.zedagentCtx = zedagentCtx
 	zedagentCtx.attestCtx = attestCtx
 	zedagentCtx.hvTypeKube = base.IsHVTypeKube()
+
+	getconfigCtx.localClusterIP, _ = base.GetLocalClusterIP(zedagentCtx.hvTypeKube)
 }
 
 func initializeDirs() {
@@ -1036,6 +1045,9 @@ func mainEventLoop(zedagentCtx *zedagentContext, stillRunning *time.Ticker) {
 		case change := <-zedagentCtx.subPatchEnvelopeUsage.MsgChan():
 			zedagentCtx.subPatchEnvelopeUsage.ProcessChange(change)
 
+		case change := <-zedagentCtx.subEncPubToRemoteData.MsgChan():
+			zedagentCtx.subEncPubToRemoteData.ProcessChange(change)
+
 		case <-hwInfoTiker.C:
 			triggerPublishHwInfo(zedagentCtx)
 
@@ -1088,6 +1100,15 @@ func initPublications(zedagentCtx *zedagentContext) {
 		log.Fatal(err)
 	}
 	getconfigCtx.pubZedAgentStatus.ClearRestarted()
+
+	zedagentCtx.pubEdgeNodeClusterConfig, err = ps.NewPublication(pubsub.PublicationOptions{
+		AgentName: agentName,
+		TopicType: types.EdgeNodeClusterConfig{},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	zedagentCtx.pubEdgeNodeClusterConfig.ClearRestarted()
 
 	getconfigCtx.pubPhysicalIOAdapters, err = ps.NewPublication(pubsub.PublicationOptions{
 		AgentName: agentName,
@@ -1946,6 +1967,19 @@ func initPostOnboardSubs(zedagentCtx *zedagentContext) {
 		ErrorTime:   errorTime,
 	})
 
+	zedagentCtx.subEncPubToRemoteData, err = ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:     "zedkube",
+		MyAgentName:   agentName,
+		TopicImpl:     types.EncPubToRemoteData{},
+		Activate:      true,
+		Ctx:           zedagentCtx,
+		CreateHandler: handleEncPubToRemoteDataCreate,
+		ModifyHandler: handleEncPubToRemoteDataModify,
+		DeleteHandler: handleEncPubToRemoteDataDelete,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
+	})
+
 	getconfigCtx.subPatchEnvelopeStatus, err = ps.NewSubscription(pubsub.SubscriptionOptions{
 		AgentName:     "zedrouter",
 		MyAgentName:   agentName,
@@ -2375,7 +2409,98 @@ func handleGlobalConfigImpl(ctxArg interface{}, key string,
 		reinitNetdumper(ctx)
 	}
 
+	// XXX handle testing for EdgeNode Cluster Config
+	handleEdgeNodeConfigItem(ctx, gcp)
+
 	log.Functionf("handleGlobalConfigImpl done for %s", key)
+}
+
+func handleEdgeNodeConfigItem(ctx *zedagentContext, gcp *types.ConfigItemValueMap) {
+	encConfigItemBase64 := gcp.GlobalValueString(types.ENClusterConfig)
+
+	var config *types.EdgeNodeClusterConfig
+	pub := ctx.pubEdgeNodeClusterConfig
+	items := pub.GetAll()
+	if len(items) == 1 {
+		for _, item := range items {
+			tempCfg := item.(types.EdgeNodeClusterConfig)
+			config = &tempCfg
+			break
+		}
+	}
+
+	log.Noticef("handleEdgeNodeConfigItem: ENClusterAPIConfig %s", encConfigItemBase64)
+	if encConfigItemBase64 == "" {
+		log.Noticef("handleEdgeNodeConfigItem: ENClusterAPIConfig not configured, unpublishing")
+		// XXX only gcp enc cluster config is cleartext token
+		if config != nil && config.EncryptedClusterToken != "" {
+			ctx.pubEdgeNodeClusterConfig.Unpublish("global")
+		}
+		return
+	}
+
+	if config != nil { // XXX temp
+		log.Noticef("handleEdgeNodeConfigItem: we have config from controller, no need to use configitme")
+		return
+	}
+	encConfigItem, err := base64.StdEncoding.DecodeString(encConfigItemBase64)
+	if err != nil {
+		log.Errorf("handleEdgeNodeConfigItem: DecodeString failed %s", err)
+		return
+	}
+
+	var encApiConfig types.ENClusterAPIConfig
+	if err := json.Unmarshal(encConfigItem, &encApiConfig); err != nil {
+		log.Errorf("handleEdgeNodeConfigItem: Unmarshal failed %s", err)
+		return
+	}
+
+	ipAddr, ipNet, err := net.ParseCIDR(encApiConfig.ClusterIPPrefix)
+	if err != nil {
+		log.Errorf("handleEdgeNodeConfigItem: ParseCIDR failed %s", err)
+		return
+	}
+	ipNet.IP = ipAddr
+
+	clusterUUID, err := convertToUUIDandVersion(encApiConfig.ClusterID)
+	if err != nil {
+		log.Errorf("handleEdgeNodeConfigItem: convertToUUIDandVersion failed %s", err)
+		return
+	}
+
+	joinServerIP := net.ParseIP(encApiConfig.JoinServerIP)
+	var isJoinNode bool
+	// deduce the bootstrap node status from clusterIPPrefix and joinServerIP
+	if ipAddr.Equal(joinServerIP) { // deduce the bootstrap node status from
+		isJoinNode = true
+	}
+	encConfig := types.EdgeNodeClusterConfig{
+		ClusterName:           encApiConfig.ClusterName,
+		ClusterID:             clusterUUID,
+		ClusterInterface:      encApiConfig.ClusterInterface,
+		ClusterIPPrefix:       *ipNet,
+		IsWorkerNode:          encApiConfig.IsWorkerNode,
+		JoinServerIP:          joinServerIP,
+		BootstrapNode:         isJoinNode,
+		EncryptedClusterToken: encApiConfig.EncryptedClusterToken,
+	}
+	log.Noticef("handleEdgeNodeConfigItem: ENClusterAPIConfig %+v, %v", encApiConfig, encConfig)
+
+	ctx.pubEdgeNodeClusterConfig.Publish("global", encConfig)
+}
+
+func convertToUUIDandVersion(myuuid string) (types.UUIDandVersion, error) {
+	uuidObj, err := uuid.FromString(myuuid)
+	if err != nil {
+		return types.UUIDandVersion{}, err
+	}
+
+	uuidAndVersion := types.UUIDandVersion{
+		UUID:    uuidObj,
+		Version: "0", // Set the version as a string value
+	}
+
+	return uuidAndVersion, nil
 }
 
 func handleGlobalConfigDelete(ctxArg interface{}, key string,
