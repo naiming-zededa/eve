@@ -436,7 +436,7 @@ func checkSVCRoute(ctx *zedkubeContext) {
 		break
 	}
 
-	if config == nil {
+	if config == nil { // skip if not cluster
 		return
 	}
 	exist, err := checkKubeSVCRouteExist(ctx, config)
