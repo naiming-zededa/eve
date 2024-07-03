@@ -1102,8 +1102,9 @@ func initPublications(zedagentCtx *zedagentContext) {
 	getconfigCtx.pubZedAgentStatus.ClearRestarted()
 
 	zedagentCtx.pubEdgeNodeClusterConfig, err = ps.NewPublication(pubsub.PublicationOptions{
-		AgentName: agentName,
-		TopicType: types.EdgeNodeClusterConfig{},
+		AgentName:  agentName,
+		Persistent: true,
+		TopicType:  types.EdgeNodeClusterConfig{},
 	})
 	if err != nil {
 		log.Fatal(err)
