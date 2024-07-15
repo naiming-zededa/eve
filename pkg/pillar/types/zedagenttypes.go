@@ -429,6 +429,7 @@ type NodeAgentStatus struct {
 	LocalMaintenanceMode       bool                  //enter Maintenance Mode
 	LocalMaintenanceModeReason MaintenanceModeReason //reason for Maintenance Mode
 	HVTypeKube                 bool
+	DrainInProgress            bool
 }
 
 // Key :
