@@ -436,6 +436,7 @@ done
 ln -s /persist/status       "$DIR/persist-status"
 ln -s /persist/log          "$DIR/persist-log"
 ln -s /persist/newlog       "$DIR/persist-newlog"
+[ -d /persist/kubelog ] && ln -s /persist/kubelog "$DIR/persist-kubelog"
 ln -s /persist/netdump      "$DIR/persist-netdump"
 ln -s /persist/kcrashes     "$DIR/persist-kcrashes"
 ln -s /run                  "$DIR/root-run"
@@ -464,13 +465,14 @@ fi
 # Make a tarball
 # --exlude='root-run/run'              /run/run/run/.. exclude symbolic link loop
 # --exclude='root-run/containerd-user'  the k8s.io/*/rootfs paths go deep
+# --exclude='persist-kubelog/save-var-lib'  /persist/kubelog/save-var-lib/.. exclude the saved /var/lib
 # --ignore-failed-read --warning=none  ignore all errors, even if read fails
 # --dereference                        follow symlinks
 echo "- tar/gzip"
 if check_tar_flags; then
-  tar -C "$TMP_DIR" --exclude='root-run/run' --exclude='root-run/containerd-user' --ignore-failed-read --warning=none --dereference -czf "$TARBALL_FILE" "$INFO_DIR"
+  tar -C "$TMP_DIR" --exclude='root-run/run' --exclude='root-run/containerd-user' --exclude='persist-kubelog/save-var-lib' --ignore-failed-read --warning=none --dereference -czf "$TARBALL_FILE" "$INFO_DIR"
 else
-  tar -C "$TMP_DIR" --exclude='root-run/run' --exclude='root-run/containerd-user' --dereference -czf "$TARBALL_FILE" "$INFO_DIR"
+  tar -C "$TMP_DIR" --exclude='root-run/run' --exclude='root-run/containerd-user' --exclude='persist-kubelog/save-var-lib' --dereference -czf "$TARBALL_FILE" "$INFO_DIR"
 fi
 rm -rf "$TMP_DIR"
 sync
