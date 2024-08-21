@@ -84,7 +84,6 @@ type nim struct {
 	subOnboardStatus         pubsub.Subscription
 	subWwanStatus            pubsub.Subscription
 	subNetworkInstanceConfig pubsub.Subscription
-	// Cluster status subscriptions
 	subEdgeNodeClusterStatus pubsub.Subscription
 
 	// Publications
@@ -165,15 +164,12 @@ func (n *nim) init() (err error) {
 		Metrics:   n.zedcloudMetrics,
 	}
 	n.dpcReconciler = &dpcreconciler.LinuxDpcReconciler{
-		Log:                 n.Log,
-		ExportCurrentState:  true, // XXX make configurable
-		ExportIntendedState: true, // XXX make configurable
-		AgentName:           agentName,
-		NetworkMonitor:      linuxNetMonitor,
-		SubControllerCert:   n.subControllerCert,
-		// Cluster
-		SubEdgeNodeClusterStatus: n.subEdgeNodeClusterStatus,
-
+		Log:                  n.Log,
+		ExportCurrentState:   true, // XXX make configurable
+		ExportIntendedState:  true, // XXX make configurable
+		AgentName:            agentName,
+		NetworkMonitor:       linuxNetMonitor,
+		SubControllerCert:    n.subControllerCert,
 		SubEdgeNodeCert:      n.subEdgeNodeCert,
 		PubCipherBlockStatus: n.pubCipherBlockStatus,
 		PubWwanConfig:        n.pubWwanConfig,
