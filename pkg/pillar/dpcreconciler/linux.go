@@ -179,6 +179,9 @@ type LinuxDpcReconciler struct {
 	CipherMetrics        *cipher.AgentMetrics
 	PubWwanConfig        pubsub.Publication
 
+	// Cluster status
+	SubEdgeNodeClusterStatus pubsub.Subscription
+
 	currentState  dg.Graph
 	intendedState dg.Graph
 
@@ -1170,6 +1173,8 @@ func (r *LinuxDpcReconciler) getIntendedRoutes(dpc types.DevicePortConfig) dg.Gr
 	// Routes are copied from the main table.
 	srcTable := syscall.RT_TABLE_MAIN
 	var cniRoutes []netmonitor.Route
+	var svcRoute *netlink.Route
+	var encConfig *types.EdgeNodeClusterStatus
 	if r.HVTypeKube {
 		ifIndex, found, err := r.NetworkMonitor.GetInterfaceIndex(kubeCNIBridge)
 		if err != nil {
@@ -1187,6 +1192,44 @@ func (r *LinuxDpcReconciler) getIntendedRoutes(dpc types.DevicePortConfig) dg.Gr
 				r.Log.Errorf("getIntendedRoutes: ListRoutes failed for ifIndex %d: %v",
 					ifIndex, err)
 			}
+		}
+
+		// set up the kube SVC route towards the cluster interface with nexthop being the
+		// cluster prefix IP address of the node. Get the EdgeNodeClusterStatus from the
+		// zedkube to get the interface, prefix.
+		// the main reason of this route is due to in cluster mode, the cluster interface
+		// can be dedicated only for kube, and may not have a default route to resolve
+		// the 10.43/16 service CIDR.
+		sub := r.SubEdgeNodeClusterStatus
+		if sub != nil {
+			items := sub.GetAll()
+			for _, item := range items {
+				s := item.(types.EdgeNodeClusterStatus)
+				encConfig = &s
+				break
+			}
+			if encConfig != nil {
+				link, err := netlink.LinkByName(encConfig.ClusterInterface)
+				if err != nil {
+					r.Log.Errorf("getIntendedRoutes: failed to get cluster link for %s: %v",
+						encConfig.ClusterInterface, err)
+				}
+				if err == nil && link != nil {
+					_, dst, _ := net.ParseCIDR(kubeSvcCIDR)
+					gw := encConfig.ClusterIPPrefix.IP
+					routes, err := netlink.RouteGet(gw)
+					if err == nil && len(routes) > 0 {
+						svcRoute = &netlink.Route{
+							LinkIndex: link.Attrs().Index,
+							Dst:       dst,
+							Table:     srcTable,
+							Gw:        gw,
+							Family:    netlink.FAMILY_V4,
+						}
+					}
+				}
+			}
+			r.Log.Noticef("getIntendedRoutes: CNI routes: %v, svc %v", cniRoutes, svcRoute) // XXX
 		}
 	}
 	for _, port := range dpc.Ports {
@@ -1231,6 +1274,15 @@ func (r *LinuxDpcReconciler) getIntendedRoutes(dpc types.DevicePortConfig) dg.Gr
 				Route:         rtCopy,
 				UnmanagedLink: true,
 			}, nil)
+		}
+
+		// add the svc route to the intended routes
+		if svcRoute != nil && encConfig != nil && encConfig.ClusterInterface == port.IfName {
+			intendedRoutes.PutItem(linux.Route{
+				Route:         *svcRoute,
+				UnmanagedLink: true,
+			}, nil)
+			r.Log.Noticef("getIntendedRoutes: svcRoute, port %v, dsttable %v, routes %v", port.IfName, dstTable, svcRoute) // XXX
 		}
 	}
 	return intendedRoutes
@@ -1922,11 +1974,90 @@ func (r *LinuxDpcReconciler) getIntendedMarkingRules(dpc types.DevicePortConfig,
 		Description:   "Mark DNS requests made from the Kubernetes network",
 	}
 
+	// XXX some kube cluster rules
+	markK3s := iptables.Rule{
+		RuleLabel:   "K3s mark",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "6443"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_k3s")},
+		Description: "Mark K3S API server traffic for kubernetes",
+	}
+
+	markEtcd := iptables.Rule{
+		RuleLabel:   "Etcd mark",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "2379:2381"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_etcd")},
+		Description: "Mark K3S HA with embedded etcd traffic for kubernetes",
+	}
+
+	markFlannel := iptables.Rule{
+		RuleLabel:   "Flannel mark",
+		MatchOpts:   []string{"-p", "udp", "--dport", "8472"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_flannel")},
+		Description: "Mark K3S with Flannel VxLan traffic for kubernetes",
+	}
+
+	markMetrics := iptables.Rule{
+		RuleLabel:   "Metrics mark",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "10250"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_metrics")},
+		Description: "Mark K3S metrics traffic for kubernetes",
+	}
+
+	markLongHornWebhook := iptables.Rule{
+		RuleLabel:   "Longhorn Webhook",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "9501:9503"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_lhweb")},
+		Description: "Mark K3S HA with longhorn webhook for kubernetes",
+	}
+	markLongHornInstMgr := iptables.Rule{
+		RuleLabel:   "Longhorn Instance Manager",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "8500:8501"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_lhinstmgr")},
+		Description: "Mark K3S HA with longhorn instance manager for kubernetes",
+	}
+	markIscsi := iptables.Rule{
+		RuleLabel:   "Iscsi",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "3260"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_iscsi")},
+		Description: "Mark K3S HA with longhorn iscsi for kubernetes",
+	}
+	markNFS := iptables.Rule{
+		RuleLabel:   "NFS",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "2049"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_nfs")},
+		Description: "Mark K3S HA with longhorn nfs for kubernetes",
+	}
+	markEncPub := iptables.Rule{ // XXX EncPubSub
+		RuleLabel:   "EncPubSub",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "12345"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_encpubsub")},
+		Description: "Mark EdgeNode PubSub traffic",
+	}
+
+	markEncBootstrap := iptables.Rule{ // XXX EncPubSub bootstrap status
+		RuleLabel:   "EncBootstrap",
+		MatchOpts:   []string{"-p", "tcp", "--dport", "12346"},
+		Target:      "CONNMARK",
+		TargetOpts:  []string{"--set-mark", controlProtoMark("in_encbootstrap")},
+		Description: "Mark EdgeNode Cluster bootstrap status traffic",
+	}
+
 	protoMarkV4Rules := []iptables.Rule{
 		markSSHAndGuacamole, markVnc, markIcmpV4, markDhcp,
 	}
 	if r.HVTypeKube {
-		protoMarkV4Rules = append(protoMarkV4Rules, markKubeDNS, markKubeSvc, markKubePod)
+		protoMarkV4Rules = append(protoMarkV4Rules, markKubeDNS, markKubeSvc, markKubePod,
+			markK3s, markEtcd, markFlannel, markMetrics, markLongHornWebhook, markLongHornInstMgr,
+			markIscsi, markNFS, markEncPub, markEncBootstrap)
 	}
 	protoMarkV6Rules := []iptables.Rule{
 		markSSHAndGuacamole, markVnc, markIcmpV6,

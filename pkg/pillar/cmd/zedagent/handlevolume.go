@@ -106,6 +106,40 @@ func parseVolumeConfig(ctx *getconfigContext,
 		// Add config submitted via local profile server.
 		addLocalVolumeConfig(ctx, volumeConfig)
 
+		// XXX add Designated ID to the VolumeConfig
+		volumeConfig.DesignatedNodeID = devUUID
+		// XXX hack
+		if ctx.zedagentCtx.hvTypeKube {
+			appInstanceList := config.GetApps()
+			for _, ai := range appInstanceList {
+				if ai.Fixedresources.VirtualizationMode == zconfig.VmMode_NOHYPER {
+					for _, vr := range ai.VolumeRefList {
+						if vr.Uuid == volumeConfig.VolumeID.String() && volumeConfig.ContentID != uuid.Nil {
+							volumeConfig.IsNoHyper = true
+							log.Noticef("parseVolumeConfig: setting IsNoHyper for %s", volumeConfig.VolumeID.String())
+							break
+						}
+					}
+				}
+			}
+
+			pub := ctx.pubContentTreeConfig
+			items := pub.GetAll()
+			for _, item := range items {
+				ct := item.(types.ContentTreeConfig)
+				origDNID := ct.DesignatedNodeID
+				if volumeConfig.DesignatedNodeID != uuid.Nil && ct.ContentID == volumeConfig.ContentID {
+					ct.DesignatedNodeID = volumeConfig.DesignatedNodeID
+					log.Noticef("parseVolumeConfig designated ID copy to content tree: %v, contend id %v, url %s",
+						ct.DesignatedNodeID, ct.ContentID, ct.RelativeURL)
+				}
+				if origDNID != ct.DesignatedNodeID {
+					log.Noticef("parseVolumeConfig: pub content tree config update %s", ct.Key())
+					publishContentTreeConfig(ctx, ct)
+				}
+			}
+		}
+
 		publishVolumeConfig(ctx, *volumeConfig)
 	}
 
