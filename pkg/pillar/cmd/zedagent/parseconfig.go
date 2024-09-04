@@ -2971,7 +2971,7 @@ func scheduleDeviceOperation(getconfigCtx *getconfigContext, opsCmd *zconfig.Dev
 	case kubeapi.NOTSUPPORTED:
 		log.Function("scheduleDeviceOperation drain not supported, skipping")
 	case kubeapi.NOTREQUESTED:
-		err := kubeapi.RequestNodeDrain(ctx.pubNodeDrainRequest, kubeapi.DEVICEOP)
+		err := kubeapi.RequestNodeDrain(ctx.pubNodeDrainRequest, kubeapi.DEVICEOP, op.String())
 		if err != nil {
 			log.Errorf("scheduleDeviceOperation: can't request node drain: %v", err)
 			return *prevReturn

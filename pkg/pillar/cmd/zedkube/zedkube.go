@@ -8,6 +8,7 @@ package zedkube
 import (
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -101,6 +102,8 @@ type zedkubeContext struct {
 	pubServerCertFile        string
 	pubServerKeyFile         string
 	notifyPeerCount          int
+	// Primarily to block 'uncordon' after running it once at bootup
+	onBootUncordonCheckComplete bool
 }
 
 func inlineUsage() int {
@@ -539,18 +542,39 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	zedkubeCtx.subEdgeNodeClusterConfig = subEdgeNodeClusterConfig
 	subEdgeNodeClusterConfig.Activate()
 
+	// XXX hack for now
+	hostname, err := os.Hostname()
+	if err != nil {
+		log.Errorf("zedkube run: can't get hostname %v", err)
+	}
+	zedkubeCtx.nodeuuid = hostname
+
+	zedkubeCtx.config, err = kubeapi.GetKubeConfig()
+	if err != nil {
+		log.Errorf("zedkube: GetKubeConfig %v", err)
+	} else {
+		log.Noticef("zedkube: running")
+	}
+
 	// Look for edge node info
 	subEdgeNodeInfo, err := ps.NewSubscription(pubsub.SubscriptionOptions{
-		AgentName:   "zedagent",
-		MyAgentName: agentName,
-		TopicImpl:   types.EdgeNodeInfo{},
-		Persistent:  true,
-		Activate:    true,
+		AgentName:     "zedagent",
+		MyAgentName:   agentName,
+		TopicImpl:     types.EdgeNodeInfo{},
+		Persistent:    true,
+		Activate:      false,
+		Ctx:           &zedkubeCtx,
+		CreateHandler: handleEdgeNodeInfoCreate,
+		ModifyHandler: handleEdgeNodeInfoModify,
+		DeleteHandler: handleEdgeNodeInfoDelete,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	zedkubeCtx.subEdgeNodeInfo = subEdgeNodeInfo
+	subEdgeNodeInfo.Activate()
 
 	// subscribe to zedagent status events, for controller connection status
 	subZedAgentStatus, err := ps.NewSubscription(pubsub.SubscriptionOptions{
@@ -576,34 +600,14 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		publishNodeDrainStatus(&zedkubeCtx, kubeapi.NOTREQUESTED)
 	}
 
+	zedkubeCtx.pubResendTimer = time.NewTimer(60 * time.Second)
+	zedkubeCtx.pubResendTimer.Stop()
+
+	// This will wait for kubernetes, longhorn, etc. to be ready
 	err = kubeapi.WaitForKubernetes(agentName, ps, subEdgeNodeClusterConfig, stillRunning)
 	if err != nil {
 		log.Errorf("zedkube: WaitForKubenetes %v", err)
 	}
-	zedkubeCtx.config, err = kubeapi.GetKubeConfig()
-	if err != nil {
-		log.Errorf("zedkube: GetKubeConfig %v", err)
-	} else {
-		log.Noticef("zedkube: running")
-	}
-
-	zedkubeCtx.pubResendTimer = time.NewTimer(60 * time.Second)
-	zedkubeCtx.pubResendTimer.Stop()
-
-	//Re-enable local node
-	log.Noticef("zedkube re-enable-node/uncordon+")
-	cordoned, err := isNodeCordoned(&zedkubeCtx)
-	if err != nil {
-		log.Errorf("zedkube can't read local node cordon state, err:%v", err)
-	} else {
-		log.Noticef("zedkube isNodeCordoned cordoned:%v", cordoned)
-		if cordoned {
-			if err := cordonNode(&zedkubeCtx, false); err != nil {
-				log.Errorf("zedkube Unable to uncordon local node: %v", err)
-			}
-		}
-	}
-	log.Noticef("zedkube re-enable-node/uncordon-")
 
 	// notify peer nodes we are up, if there is any pubs, resend them
 	if zedkubeCtx.clusterPubSubStarted {
@@ -611,6 +615,8 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	}
 
 	appLogTimer := time.NewTimer(logcollectInterval * time.Second)
+
+	log.Notice("zedkube online")
 
 	for {
 		select {
@@ -871,4 +877,83 @@ func (s *ReceiveMap) Find(key string) bool {
 	defer s.mu.Unlock()
 	_, ok := s.v[key]
 	return ok
+}
+
+func handleEdgeNodeInfoCreate(ctxArg interface{}, key string,
+	statusArg interface{}) {
+	handleEdgeNodeInfoImpl(ctxArg, key, statusArg)
+}
+
+func handleEdgeNodeInfoModify(ctxArg interface{}, key string,
+	statusArg interface{}, oldStatusArg interface{}) {
+	handleEdgeNodeInfoImpl(ctxArg, key, statusArg)
+}
+
+func handleEdgeNodeInfoImpl(ctxArg interface{}, key string,
+	statusArg interface{}) {
+	ctxPtr := ctxArg.(*zedkubeContext)
+	nodeInfo := statusArg.(types.EdgeNodeInfo)
+	if err := getnodeNameAndUUID(ctxPtr); err != nil {
+		log.Errorf("handleEdgeNodeInfoImpl: getnodeNameAndUUID failed: %v", err)
+		return
+	}
+
+	ctxPtr.nodeName = nodeInfo.DeviceName
+	ctxPtr.nodeuuid = nodeInfo.DeviceID.String()
+
+	//Re-enable local node
+	if !ctxPtr.onBootUncordonCheckComplete {
+		go nodeOnBootHealthStatusWatcher(ctxPtr)
+	}
+}
+
+func handleEdgeNodeInfoDelete(ctxArg interface{}, key string,
+	statusArg interface{}) {
+	// do nothing?
+	log.Functionf("handleEdgeNodeInfoDelete(%s) done", key)
+}
+
+// It may be a while until the node is ready to be uncordoned
+// so we'll keep trying until it is
+func nodeOnBootHealthStatusWatcher(ctx *zedkubeContext) {
+	// Assume we're cordoned until we know otherwise
+	cordoned := true
+
+	// Loop until it is uncordoned once to allow for later
+	// cordon operations to be successful
+	for cordoned {
+		time.Sleep(15 * time.Second)
+
+		// Get the local kubernetes node health status
+		node, err := getLocalNode(ctx.nodeuuid)
+		if node == nil || err != nil {
+			continue
+		}
+
+		// Is the node is ready?
+		var ready bool = false
+		for _, condition := range node.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == "True" {
+				ready = true
+			}
+		}
+		if !ready {
+			continue
+		}
+
+		cordoned, err = isNodeCordoned(ctx.nodeuuid)
+		if err != nil {
+			log.Errorf("zedkube can't read local node cordon state, err:%v", err)
+			continue
+		}
+
+		if !cordoned {
+			// Block this from running again this boot.
+			ctx.onBootUncordonCheckComplete = true
+		}
+
+		if err = cordonNode(ctx.nodeuuid, false); err != nil {
+			log.Errorf("zedkube Unable to uncordon local node: %v", err)
+		}
+	}
 }
