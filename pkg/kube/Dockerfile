@@ -53,6 +53,10 @@ COPY longhorn-generate-support-bundle.sh /usr/bin/
 COPY nsmounter /usr/bin/
 COPY etcd-io-perf-snapshot.sh /usr/bin/
 
+# descehduler
+COPY descheduler-job.yaml /etc/
+COPY descheduler-policy-configmap.yaml /etc/
+
 # Containerd config
 RUN mkdir -p /etc/containerd
 COPY config-k3s.toml /etc/containerd/

@@ -37,6 +37,7 @@ type NodeDrainRequest struct {
 	Hostname    string
 	RequestedAt time.Time
 	RequestedBy DrainRequester
+	Context     string
 }
 
 // NodeDrainStatus is a response to NodeDrainRequest
