@@ -735,6 +735,12 @@ check_cluster_config_change() {
       if [ ! -f /var/lib/edge-node-cluster-mode ]; then
         return 0
       else
+        # check to see if the persistent config file exists, if yes, then we need to
+        # wait until zedkube to publish the ENC status file
+        if [ -f /persist/status/zedagent/EdgeNodeClusterConfig/global.json ]; then
+          logmsg "EdgeNodeClusterConfig file found, but the EdgeNodeClusterStatus file is missing, wait..."
+          return 0
+        fi
         touch /var/lib/convert-to-single-node
         reboot
       fi

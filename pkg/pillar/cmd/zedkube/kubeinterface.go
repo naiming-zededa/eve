@@ -14,11 +14,9 @@ import (
 	"time"
 
 	"github.com/lf-edge/eve/pkg/pillar/cipher"
-	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/vishvananda/netlink"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 )
 
 func runKubeConfig(ctx *zedkubeContext, config, oldconfig *types.EdgeNodeClusterConfig, isDel bool) {
