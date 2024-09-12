@@ -285,7 +285,7 @@ func waitForNodeReady(client *kubernetes.Clientset, readyCh chan bool, devUUID s
 			if err != nil {
 				return err
 			}
-			if len(pods.Items) < 6 {
+			if len(pods.Items) < 4 {
 				return fmt.Errorf("kubevirt running pods less than 6")
 			}
 
