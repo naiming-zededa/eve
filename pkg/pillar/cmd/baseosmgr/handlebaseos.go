@@ -33,9 +33,14 @@ func baseOsHandleStatusUpdateUUID(ctx *baseOsMgrContext, id string) {
 	}
 
 	// We want to wait to drain until we're sure we actually have a usable image local.
-	// So wait until the status meets LOADING which it is set to after VERIFIED.
-	// If we drained earlier it could be premature due to image download failures.
-	if status.State == types.LOADING || status.State == types.LOADED {
+	// So wait until the status meets LOADED which it is set to after DOWNLOADING and VERIFIED.
+	// If we drained earlier it would be premature due to image download failures.
+	log.Noticef("baseOsHandleStatusUpdateUUID() id:%s config:%v status:%v state:%s", id, config, status, status.State)
+
+	// eve baseos image is downloaded locally, verified, available, and most importantly has been activated
+	// before the node downtime/reboot is initiated, see if we need to defer the operation
+	if ((status.State == types.LOADING) || (status.State == types.LOADED) || (status.State == types.INSTALLED)) && config.Activate && !status.Activated {
+		log.Noticef("baseOsHandleStatusUpdateUUID() image just activated id:%s config:%v status:%v state:%s", id, config, status, status.State)
 		deferUpdate := shouldDeferForNodeDrain(ctx, id, config, status)
 		if deferUpdate {
 			return

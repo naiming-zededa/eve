@@ -80,7 +80,6 @@ kubenodeop handles NodeDrainRequest objects which zedkube subscribes to, initiat
         NodeDrainStatus -> NOTREQUESTED
 1. zedkube/handlenodedrain.go:handleNodeDrainRequestImpl()
     NodeDrainStatus -> REQUESTED
-    log.Noticef("Beginning kubernetes node drain process this could be a very long operation depending on replica rebuilds (24hours+)")
 1. zedkube/kubenodeop.go:cordonAndDrainNode()
     NodeDrainStatus -> STARTING
     Retry Cordon up to 10 times (in case k8s api states object changed)
@@ -107,8 +106,8 @@ NodeDrainStatus can be forced by writing the object (in pillar svc container fs)
 eg. to force disable drain:
 echo '{"Status":1,"RequestedBy":1}' > /tmp/force-NodeDrainStatus-global.json
 
-eg. to force drain complete:
-echo '{"Status":1,"RequestedBy":1}' > /tmp/force-NodeDrainStatus-global.json
+eg. to force deviceop drain complete:
+echo '{"Status":9,"RequestedBy":2}' > /tmp/force-NodeDrainStatus-global.json
 
 "Cannot evict pod as it would violate the pod's disruption budget":
 If NodeDrainStatus can get stuck if attempting to drain a node running a pod where the pod has an 

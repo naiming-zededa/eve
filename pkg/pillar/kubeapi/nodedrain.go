@@ -35,18 +35,30 @@ func RequestNodeDrain(pubNodeDrainRequest pubsub.Publication, requester DrainReq
 // GetDrainStatusOverride : an alternate way to set drain status for debug
 func GetDrainStatusOverride() *NodeDrainStatus {
 	// An alternate path to force a drain status in the event of a drain issue.
-	forceNodeDrainPath := "/tmp/force-NodeDrainStatus-global.json"
+	forceNodeDrainPath := "/persist/force-NodeDrainStatus-global.json"
 	if _, err := os.Stat(forceNodeDrainPath); err == nil {
 		b, err := os.ReadFile(forceNodeDrainPath)
 		if err == nil {
 			cfg := NodeDrainStatus{}
 			err = json.Unmarshal(b, &cfg)
 			if err == nil {
+				if cfg.Status == COMPLETE {
+					os.Remove(forceNodeDrainPath)
+				}
 				return &cfg
 			}
 		}
 	}
 	return nil
+}
+
+// DrainStatusFaultInjection_Wait : while this file exists, wait in the drain status
+func DrainStatus_FaultInjection_Wait() bool {
+	injectFaultPath := "/tmp/DrainStatus_FaultInjection_Wait"
+	if _, err := os.Stat(injectFaultPath); err == nil {
+		return true
+	}
+	return false
 }
 
 // GetNodeDrainStatus is a wrapper to either return latest NodeDrainStatus

@@ -93,7 +93,7 @@ var (
 		"volumemgr":        {f: volumemgr.Run},
 		"waitforaddr":      {f: waitforaddr.Run, inline: inlineAlways},
 		"zedagent":         {f: zedagent.Run},
-		"zedkube":          {f: zedkube.Run},
+		"zedkube":          {f: zedkube.Run, inline: inlineAlways},
 		"zedmanager":       {f: zedmanager.Run},
 		"zedrouter":        {f: zedrouter.Run},
 		"ipcmonitor":       {f: ipcmonitor.Run, inline: inlineAlways},
