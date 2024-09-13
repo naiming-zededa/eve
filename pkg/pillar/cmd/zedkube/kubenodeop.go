@@ -15,7 +15,6 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/base"
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubectl/pkg/drain"
@@ -127,12 +126,11 @@ func cordonAndDrainNode(ctx *zedkubeContext) {
 			}
 			//Retries for kubernetes api cache
 			//Operation cannot be fulfilled on nodes \\\"<node>\\\": the object has been modified; please apply your changes to the latest version and try again
-			if !apierrors.IsConflict(err) {
-				log.Errorf("cordonAndDrainNode nodedrain-step:drain-cordon-failure err:%v", err)
-				publishNodeDrainStatus(ctx, kubeapi.FAILEDCORDON)
-				return
-			}
+			// or connection refused
+
+			log.Errorf("cordonAndDrainNode nodedrain-step:drain-cordon-failure err:%v", err)
 			cordonTry = cordonTry + 1
+			time.Sleep(time.Second * 5)
 		}
 		if cordonTry == cordonTriesMax {
 			log.Errorf("cordonAndDrainNode nodedrain-step:drain-cordon-failure err:%v", err)
@@ -145,7 +143,7 @@ func cordonAndDrainNode(ctx *zedkubeContext) {
 	publishNodeDrainStatus(ctx, kubeapi.CORDONED)
 
 	//
-	// 3. Drains
+	// 3. Drain the node
 	//
 	drainRetry := 1
 	for {
@@ -165,9 +163,17 @@ func cordonAndDrainNode(ctx *zedkubeContext) {
 		publishNodeDrainStatus(ctx, kubeapi.DRAINRETRYING)
 		time.Sleep(time.Second * 300)
 	}
+
+	for {
+		if !kubeapi.DrainStatus_FaultInjection_Wait() {
+			break
+		}
+		time.Sleep(time.Second * 30)
+	}
+
 	request_time := getNodeDrainRequestTime(ctx)
 	//
-	// 4. Drain Complete
+	// 4. Drain Complete: notify requester
 	//
 	log.Notice("cordonAndDrainNode nodedrain-step:drain-complete")
 	// Please keep this log message unchanged as it is intended to be mined for statistics

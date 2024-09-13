@@ -3,7 +3,6 @@
 # Copyright (c) 2024 Zededa, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-K3S_VERSION=v1.28.5+k3s1
 KUBEVIRT_VERSION=v1.1.0
 LONGHORN_VERSION=v1.6.2
 CDI_VERSION=v1.54.0
@@ -30,6 +29,9 @@ MAX_WAIT_TIME=$((10 * 60)) # 10 minutes in seconds, exponential backoff for k3s 
 current_wait_time=$INITIAL_WAIT_TIME
 SAVE_KUBE_VAR_LIB_DIR="/persist/kube-save-var-lib"
 CLUSTER_WAIT_FILE="/run/kube/cluster-change-wait-ongoing"
+
+# Include update interface
+. /usr/bin/cluster-update.sh
 
 logmsg() {
         local MSG
@@ -229,7 +231,7 @@ apply_multus_cni() {
                 return 1
         fi
         logmsg "Done applying Multus"
-        ln -s /var/lib/cni/bin/multus /var/lib/rancher/k3s/data/current/bin/multus
+        link_multus_into_k3s
         # need to only do this once
         touch /var/lib/multus_initialized
         return 0
@@ -514,24 +516,6 @@ check_start_containerd() {
                 fi
         fi
 }
-trigger_k3s_selfextraction() {
-        # Analysis of the k3s source shows nearly any cli command will first self-extract a series of binaries.
-        # In our case we're looking for the containerd binary.
-        # k3s check-config appears to be the only cli cmd which doesn't:
-        # - start a long running process/server
-        # - timeout connecting to a socket
-        # - manipulate config/certs
-
-        # When run on the shell this does throw some config errors, its unclear if we need this issues fixed:
-        # - links: aux/ip6tables should link to iptables-detect.sh (fail)
-        # - links: aux/ip6tables-restore should link to iptables-detect.sh (fail)
-        # - links: aux/ip6tables-save should link to iptables-detect.sh (fail)
-        # - links: aux/iptables should link to iptables-detect.sh (fail)
-        # - links: aux/iptables-restore should link to iptables-detect.sh (fail)
-        # - links: aux/iptables-save should link to iptables-detect.sh (fail)
-        # - apparmor: enabled, but apparmor_parser missing (fail)
-        /usr/bin/k3s check-config >> $INSTALL_LOG 2>&1
-}
 
 # wait for debugging flag in /persist/k3s/wait_{flagname} if exist
 wait_for_item() {
@@ -641,17 +625,6 @@ get_enc_status() {
     else
       return 1
     fi
-}
-
-install_and_unpack_k3s() {
-  logmsg "Installing K3S version $K3S_VERSION on $HOSTNAME"
-  mkdir -p /var/lib/k3s/bin
-  /usr/bin/curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=${K3S_VERSION} INSTALL_K3S_SKIP_ENABLE=true INSTALL_K3S_BIN_DIR=/var/lib/k3s/bin sh -
-  sleep 5
-  logmsg "Initializing K3S version $K3S_VERSION"
-  ln -s /var/lib/k3s/bin/* /usr/bin
-  trigger_k3s_selfextraction
-  touch /var/lib/k3s_installed_unpacked
 }
 
 change_to_new_token() {
@@ -828,7 +801,7 @@ restore_var_lib() {
         cp -a "${source_dir}/." /var/lib
   else
         ## the saved files are missing, have do install again
-        install_and_unpack_k3s
+        Update_CheckNodeComponents
   fi
 }
 
@@ -918,11 +891,7 @@ logmsg "Using ZFS persistent storage"
 
 setup_prereqs
 
-# unpack k3s package and install into directories
-if [ ! -f /var/lib/k3s_installed_unpacked ]; then
-    install_and_unpack_k3s
-    logmsg "k3s installed and unpacked or copied"
-fi
+Update_CheckNodeComponents
 
 if [ -f /var/lib/convert-to-single-node ]; then
         logmsg "remove /var/lib and copy saved single node /var/lib"
@@ -1165,6 +1134,7 @@ fi
         check_kubeconfig_yaml_files
         check_and_remove_excessive_k3s_logs
         check_and_run_vnc
+        Update_CheckClusterComponents
         wait_for_item "wait"
         sleep 15
 done

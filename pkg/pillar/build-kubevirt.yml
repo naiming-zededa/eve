@@ -24,5 +24,9 @@ config:
   devices:
     - path: all
       type: a
+  security_opt:
+    - seccomp:unconfined
+  ports:
+    - 2345:2345
 buildArgs:
   - HV=kubevirt

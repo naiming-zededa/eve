@@ -392,7 +392,8 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	if err != nil {
 		log.Fatal(err)
 	}
-	subNodeDrainStatus.Activate()
+	ctx.subNodeDrainStatus = subNodeDrainStatus
+	ctx.subNodeDrainStatus.Activate()
 
 	cloudPingMetricPub, err := ps.NewPublication(
 		pubsub.PublicationOptions{
@@ -1080,6 +1081,7 @@ func printOutput(ctx *diagContext, caller string) {
 				ds.Name, ds.ImageSha256, ds.Progress, ds.TotalSize)
 		}
 	}
+
 	ctx.ph.Flush()
 }
 
@@ -1550,21 +1552,26 @@ func handleNodeDrainStatusImpl(ctxArg interface{}, key string,
 	configArg interface{}, oldConfigArg interface{}) {
 	ctx := ctxArg.(*diagContext)
 	newStatus := configArg.(kubeapi.NodeDrainStatus)
+	printNodeDrainStatus(ctx, newStatus)
+}
+
+func printNodeDrainStatus(ctx *diagContext, newStatus kubeapi.NodeDrainStatus) {
+	ts := time.Now().Format(time.RFC3339Nano)
 	switch newStatus.Status {
 	case kubeapi.REQUESTED:
-		ctx.ph.Print("INFO: Node Drain -> Requested\n")
+		ctx.ph.Print("INFO: Node Drain -> Requested at %v\n", ts)
 	case kubeapi.STARTING:
-		ctx.ph.Print("INFO: Node Drain -> Starting\n")
+		ctx.ph.Print("INFO: Node Drain -> Starting at %v\n", ts)
 	case kubeapi.CORDONED:
-		ctx.ph.Print("INFO: Node Drain -> Cordoned\n")
+		ctx.ph.Print("INFO: Node Drain -> Cordoned at %v\n", ts)
 	case kubeapi.FAILEDCORDON:
-		ctx.ph.Print("ERROR: Node Drain -> Failed Cordon\n")
+		ctx.ph.Print("ERROR: Node Drain -> Failed Cordon at %v\n", ts)
 	case kubeapi.DRAINRETRYING:
-		ctx.ph.Print("WARNING: Node Drain -> Retry Drain\n")
+		ctx.ph.Print("WARNING: Node Drain -> Retry Drain at %v\n", ts)
 	case kubeapi.FAILEDDRAIN:
-		ctx.ph.Print("ERROR: Node Drain -> Failed Drain\n")
+		ctx.ph.Print("ERROR: Node Drain -> Failed Drain at %v\n", ts)
 	case kubeapi.COMPLETE:
-		ctx.ph.Print("INFO: Node Drain -> Complete\n")
+		ctx.ph.Print("INFO: Node Drain -> Complete at %v\n", ts)
 	}
 	ctx.ph.Flush()
 }
