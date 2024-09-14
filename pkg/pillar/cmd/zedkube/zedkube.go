@@ -8,7 +8,6 @@ package zedkube
 import (
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -32,7 +31,10 @@ const (
 	stillRunningInterval = 25 * time.Second
 	logcollectInterval   = 30
 	// run VNC file
-	vmiVNCFileName = "/run/zedkube/vmiVNC.run"
+	vmiVNCFileName    = "/run/zedkube/vmiVNC.run"
+	serverTLSDir      = "/persist/kube-save-var-lib/rancher/k3s/server/tls"
+	pubServerCertFile = serverTLSDir + "/client-k3s-controller.crt"
+	pubServerKeyFile  = serverTLSDir + "/client-k3s-controller.key"
 
 	inlineCmdKubeClusterUpdateStatus = "pubKubeClusterUpdateStatus"
 )
@@ -96,6 +98,9 @@ type zedkubeContext struct {
 	quitServer               chan struct{}
 	statusServer             *http.Server
 	drainTimeoutHours        uint32
+	pubServerCertFile        string
+	pubServerKeyFile         string
+	notifyPeerCount          int
 }
 
 func inlineUsage() int {
@@ -582,12 +587,6 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		log.Noticef("zedkube: running")
 	}
 
-	// XXX hack for now
-	hostname, err := os.Hostname()
-	if err != nil {
-		log.Errorf("zedkube run: can't get hostname %v", err)
-	}
-	zedkubeCtx.nodeuuid = hostname
 	zedkubeCtx.pubResendTimer = time.NewTimer(60 * time.Second)
 	zedkubeCtx.pubResendTimer.Stop()
 
@@ -607,7 +606,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	log.Noticef("zedkube re-enable-node/uncordon-")
 
 	// notify peer nodes we are up, if there is any pubs, resend them
-	startupNotifyPeers(&zedkubeCtx)
+	if zedkubeCtx.clusterPubSubStarted {
+		startupNotifyPeers(&zedkubeCtx)
+	}
 
 	appLogTimer := time.NewTimer(logcollectInterval * time.Second)
 
@@ -620,6 +621,8 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 			collectAppLogs(&zedkubeCtx)
 			checkAppsStatus(&zedkubeCtx)
 			collectKubeStats(&zedkubeCtx)
+			checkPubServerStatus(&zedkubeCtx)
+			checkNotifyPeer(&zedkubeCtx)
 			appLogTimer = time.NewTimer(logcollectInterval * time.Second)
 
 		case change := <-subGlobalConfig.MsgChan():
@@ -680,8 +683,8 @@ func handleAppInstanceConfigCreate(ctxArg interface{}, key string,
 	ctx := ctxArg.(*zedkubeContext)
 	config := configArg.(types.AppInstanceConfig)
 
-	log.Functionf("handleAppInstanceConfigCreate(%v) spec for %s",
-		config.UUIDandVersion, config.DisplayName)
+	log.Noticef("handleAppInstanceConfigCreate(%v) spec for %s",
+		config.UUIDandVersion, config.DisplayName) // XXX
 
 	err := checkIoAdapterEthernet(ctx, &config)
 	log.Functionf("handleAppInstancConfigModify: genAISpec %v", err)
@@ -695,8 +698,8 @@ func handleAppInstanceConfigModify(ctxArg interface{}, key string,
 	config := configArg.(types.AppInstanceConfig)
 	oldconfig := oldConfigArg.(types.AppInstanceConfig)
 
-	log.Functionf("handleAppInstancConfigModify(%v) spec for %s",
-		config.UUIDandVersion, config.DisplayName)
+	log.Noticef("handleAppInstancConfigModify(%v) spec for %s",
+		config.UUIDandVersion, config.DisplayName) // XXX
 
 	err := checkIoAdapterEthernet(ctx, &config)
 

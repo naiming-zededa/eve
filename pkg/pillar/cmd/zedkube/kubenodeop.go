@@ -288,23 +288,22 @@ func drainAndDeleteNode(ctx *zedkubeContext) {
 		return
 	}
 
-	labelSelector := metav1.LabelSelector{MatchLabels: map[string]string{"node-uuid": ctx.nodeuuid}}
-	options := metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(&labelSelector)}
-	nodes, err := clientset.CoreV1().Nodes().List(context.Background(), options)
+	err = getnodeNameAndUUID(ctx)
 	if err != nil {
 		log.Errorf("drainAndDeleteNode: can't get nodes %v, on uuid %s", err, ctx.nodeuuid)
 		return
 	}
-	if len(nodes.Items) == 0 {
-		log.Errorf("drainAndDeleteNode: can't find node")
+
+	node, err := clientset.CoreV1().Nodes().Get(context.Background(), ctx.nodeName, metav1.GetOptions{})
+	if err != nil {
+		log.Errorf("drainAndDeleteNode: can't get nodes %v, for %s", err, ctx.nodeName)
 		return
 	}
-	node := nodes.Items[0]
 	nodeName := node.Name
 
 	// cordon the node first
 	node.Spec.Unschedulable = true
-	_, err = clientset.CoreV1().Nodes().Update(context.Background(), &node, metav1.UpdateOptions{})
+	_, err = clientset.CoreV1().Nodes().Update(context.Background(), node, metav1.UpdateOptions{})
 	if err != nil {
 		log.Errorf("drainAndDeleteNode: cordon node %s failed: %v, continue the delete", nodeName, err)
 	}

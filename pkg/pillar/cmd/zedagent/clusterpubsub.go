@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"time"
 
 	"github.com/lf-edge/eve/pkg/pillar/types"
 )
@@ -101,6 +102,9 @@ func handleEncPubToRemoteDataImp(ctxArg interface{}, key string, configArg inter
 			log.Noticef("handleEncPubToRemoteDataImp(%s) VC create/update %v", key, vcconfig)
 			getconfigCtx.pubVolumeConfig.Publish(key, vcconfig)
 		}
+		time.Sleep(3 * time.Second)
+		signalVolumeConfigRestarted(getconfigCtx) // XXX hack here for cluster pubsub
+		log.Noticef("handleEncPubToRemoteDataImp(%s) VC signalVolumeConfigRestarted", key)
 	case types.EncDataStoreConfig:
 		var dsconfig types.DatastoreConfig
 		err := decodeGobData(encCfg.AgentData, &dsconfig)

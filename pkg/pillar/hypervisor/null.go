@@ -5,8 +5,9 @@ package hypervisor
 
 import (
 	"fmt"
-	"github.com/lf-edge/eve/pkg/pillar/types"
 	"os"
+
+	"github.com/lf-edge/eve/pkg/pillar/types"
 
 	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
@@ -66,7 +67,7 @@ func (ctx nullContext) Task(status *types.DomainStatus) types.Task {
 }
 
 func (ctx nullContext) Setup(types.DomainStatus, types.DomainConfig,
-	*types.AssignableAdapters, *types.ConfigItemValueMap, *os.File) error {
+	*types.AssignableAdapters, string, *types.ConfigItemValueMap, *os.File) error {
 	return nil
 }
 

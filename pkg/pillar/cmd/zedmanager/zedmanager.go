@@ -56,6 +56,7 @@ type zedmanagerContext struct {
 	subGlobalConfig           pubsub.Subscription
 	subHostMemory             pubsub.Subscription
 	subZedAgentStatus         pubsub.Subscription
+	subEdgeNodeInfo           pubsub.Subscription
 	pubVolumesSnapConfig      pubsub.Publication
 	subVolumesSnapStatus      pubsub.Subscription
 	subAssignableAdapters     pubsub.Subscription
@@ -73,7 +74,7 @@ type zedmanagerContext struct {
 	assignableAdapters *types.AssignableAdapters
 	// Is it kubevirt eve
 	hvTypeKube bool
-	nodeUUID   string
+	nodeUUID   uuid.UUID
 }
 
 // AddAgentSpecificCLIFlags adds CLI options
@@ -412,6 +413,20 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		log.Fatal(err)
 	}
 
+	// Look for edge node info
+	subEdgeNodeInfo, err := ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:   "zedagent",
+		MyAgentName: agentName,
+		TopicImpl:   types.EdgeNodeInfo{},
+		Persistent:  true,
+		Activate:    false,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx.subEdgeNodeInfo = subEdgeNodeInfo
+	_ = subEdgeNodeInfo.Activate()
+
 	// Pick up debug aka log level before we start real work
 	for !ctx.GCInitialized {
 		log.Functionf("waiting for GCInitialized")
@@ -478,6 +493,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 					warningTime, errorTime)
 				ctx.checkFreedResources = false
 			}
+
+		case change := <-subEdgeNodeInfo.MsgChan():
+			subEdgeNodeInfo.ProcessChange(change)
 
 		case <-delayedStartTicker.C:
 			checkDelayedStartApps(&ctx)
@@ -713,6 +731,17 @@ func publishAppInstanceStatus(ctx *zedmanagerContext,
 	key := status.Key()
 	log.Tracef("publishAppInstanceStatus(%s)", key)
 	pub := ctx.pubAppInstanceStatus
+	if ctx.hvTypeKube {
+		sub := ctx.subENClusterAppStatus
+		st, _ := sub.Get(key)
+		if st != nil {
+			clusterStatus := st.(types.ENClusterAppStatus)
+			if !clusterStatus.ScheduledOnThisNode {
+				log.Functionf("publishAppInstanceStatus(%s) not scheduled on this node, skip", key)
+				return
+			}
+		}
+	}
 	pub.Publish(key, *status)
 }
 
@@ -1614,16 +1643,11 @@ func getKubeAppActivateStatus(ctx *zedmanagerContext, aiConfig types.AppInstance
 		return effectiveActivate
 	}
 
-	if ctx.nodeUUID == "" {
-		// XXX hack for now
-		hostname, err := os.Hostname()
+	if ctx.nodeUUID == uuid.Nil {
+		err := getnodeNameAndUUID(ctx)
 		if err != nil {
-			log.Errorf("zedmanager run: can't get hostname %v", err)
-		} else {
-			_, err := uuid.FromString(hostname)
-			if err == nil {
-				ctx.nodeUUID = hostname
-			}
+			log.Errorf("getKubeAppActivateStatus: can't get nodeUUID %v", err)
+			return false
 		}
 	}
 	sub := ctx.subENClusterAppStatus
@@ -1644,21 +1668,41 @@ func getKubeAppActivateStatus(ctx *zedmanagerContext, aiConfig types.AppInstance
 			if status.IsDNSet {
 				onTheDevice = true
 				break
+			} else if status.ScheduledOnThisNode {
+				onTheDevice = true
+				break
 			}
 		}
 	}
 
 	log.Noticef("getKubeAppActivateStatus: ai %s, node %s, onTheDevice %v, statusRunning %v",
 		aiConfig.DesignatedNodeID.String(), ctx.nodeUUID, onTheDevice, statusRunning)
-	if aiConfig.DesignatedNodeID.String() == ctx.nodeUUID {
+	if aiConfig.DesignatedNodeID == ctx.nodeUUID {
 		if statusRunning && !onTheDevice {
 			return false
 		}
 		return effectiveActivate
 	} else {
-		if statusRunning && onTheDevice {
+		//if statusRunning && onTheDevice {
+		// the pod is on this node, but it will not be in running state, unless
+		// zedmanager make this app activate and zedrouter CNI has the network status
+		// for this App. So, not in running state is ok.
+		if onTheDevice {
 			return effectiveActivate
 		}
 		return false
 	}
+}
+
+func getnodeNameAndUUID(ctx *zedmanagerContext) error {
+	if ctx.nodeUUID == uuid.Nil {
+		NodeInfo, err := ctx.subEdgeNodeInfo.Get("global")
+		if err != nil {
+			log.Errorf("getnodeNameAndUUID: can't get edgeNodeInfo %v", err)
+			return err
+		}
+		enInfo := NodeInfo.(types.EdgeNodeInfo)
+		ctx.nodeUUID = enInfo.DeviceID
+	}
+	return nil
 }

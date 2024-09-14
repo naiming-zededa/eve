@@ -41,6 +41,8 @@ type DomainConfig struct {
 	// KubeImageName: is the container image reference we pass to domainmgr to launch a native container
 	// in kubevirt eve
 	KubeImageName string
+	// if this node is the DNiD of the App
+	IsDNidNode bool
 
 	// XXX: to be deprecated, use CipherBlockStatus instead
 	CloudInitUserData *string `json:"pubsub-large-CloudInitUserData"` // base64-encoded
@@ -273,7 +275,7 @@ const (
 // Task represents any runnable entity on EVE
 type Task interface {
 	Setup(DomainStatus, DomainConfig, *AssignableAdapters,
-		*ConfigItemValueMap, *os.File) error
+		string, *ConfigItemValueMap, *os.File) error
 	Create(string, string, *DomainConfig) (int, error)
 	Start(string) error
 	Stop(string, bool) error
@@ -309,6 +311,8 @@ type DomainStatus struct {
 	WritableFiles  []cloudconfig.WritableFile // List of files from CloudInit scripts to be created in container
 	VmConfig                                  // From DomainConfig
 	Service        bool
+	// if this node is the DNiD of the App
+	IsDNidNode bool
 }
 
 func (status DomainStatus) Key() string {

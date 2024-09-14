@@ -130,8 +130,7 @@ func parseVolumeConfig(ctx *getconfigContext,
 				origDNID := ct.DesignatedNodeID
 				if volumeConfig.DesignatedNodeID != uuid.Nil && ct.ContentID == volumeConfig.ContentID {
 					ct.DesignatedNodeID = volumeConfig.DesignatedNodeID
-					log.Noticef("parseVolumeConfig designated ID copy to content tree: %v, contend id %v, url %s",
-						ct.DesignatedNodeID, ct.ContentID, ct.RelativeURL)
+					ct.IsNoHyper = volumeConfig.IsNoHyper
 				}
 				if origDNID != ct.DesignatedNodeID {
 					log.Noticef("parseVolumeConfig: pub content tree config update %s", ct.Key())

@@ -103,6 +103,7 @@ func parseContentInfoConfig(ctx *getconfigContext,
 				if volume.ContentID == contentConfig.ContentID {
 					if volume.DesignatedNodeID != uuid.Nil {
 						contentConfig.DesignatedNodeID = volume.DesignatedNodeID
+						contentConfig.IsNoHyper = volume.IsNoHyper
 						log.Noticef("parseContentInfo designated ID copy from volume config: %v, contentid %v, url %s", contentConfig.DesignatedNodeID, contentConfig.ContentID, contentConfig.RelativeURL)
 					}
 				}
