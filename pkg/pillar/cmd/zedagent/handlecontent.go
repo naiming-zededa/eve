@@ -8,6 +8,7 @@ package zedagent
 import (
 	"bytes"
 	"crypto/sha256"
+	"os"
 	"strings"
 
 	zconfig "github.com/lf-edge/eve-api/go/config"
@@ -68,6 +69,7 @@ func parseContentInfoConfig(ctx *getconfigContext,
 		contentInfoHash, newHash, len(cfgContentTreeList))
 
 	contentInfoHash = newHash
+	devUUIDStr, _ := os.Hostname()
 
 	// First look for deleted ones
 	items := ctx.pubContentTreeConfig.GetAll()
@@ -96,19 +98,25 @@ func parseContentInfoConfig(ctx *getconfigContext,
 		contentConfig.MaxDownloadSize = cfgContentTree.GetMaxSizeBytes()
 		contentConfig.DisplayName = cfgContentTree.GetDisplayName()
 		contentConfig.CustomMeta = cfgContentTree.GetCustomMetaData()
-		if ctx.zedagentCtx.hvTypeKube { // XXX passing from volume to contenttree for DNid
-			item2 := ctx.pubVolumeConfig.GetAll()
-			for _, vc := range item2 {
-				volume := vc.(types.VolumeConfig)
-				if volume.ContentID == contentConfig.ContentID {
-					if volume.DesignatedNodeID != uuid.Nil {
-						contentConfig.DesignatedNodeID = volume.DesignatedNodeID
-						contentConfig.IsNoHyper = volume.IsNoHyper
-						log.Noticef("parseContentInfo designated ID copy from volume config: %v, contentid %v, url %s", contentConfig.DesignatedNodeID, contentConfig.ContentID, contentConfig.RelativeURL)
-					}
-				}
+		contentConfig.IsLocal = true
+		controllerDNID := cfgContentTree.GetDesignatedNodeId()
+		// If this node is not designated node id set IsLocal to false.
+		// Content will be downloaded to only to the designated node id of that content tree.
+		// So on other nodes in the cluster mark the content tree as non-local.
+		// On single node eve either kvm or kubevirt based, this node will always be designated node.
+		// But if this is the contenttree of a container, we download it to all nodes of the cluster,
+		// so set IsLocal true in such case.
+
+		if controllerDNID != "" && controllerDNID != devUUIDStr {
+			if contentConfig.Format == zconfig.Format_CONTAINER {
+				contentConfig.IsLocal = true
+			} else {
+				contentConfig.IsLocal = false
 			}
 		}
+
+		log.Noticef("parseContentInfo designated ID copy from volume config: %v, contentid %v, url %s", controllerDNID, contentConfig.ContentID, contentConfig.RelativeURL)
+
 		publishContentTreeConfig(ctx, *contentConfig)
 	}
 	ctx.pubContentTreeConfig.SignalRestarted()
