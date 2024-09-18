@@ -8,10 +8,11 @@ package zedkube
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/gob"
-	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -77,16 +78,26 @@ func startupHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeContext)
 // just start up and notify all the peer nodes, to resend any subs we missed
 func startupNotifyPeers(ctx *zedkubeContext) {
 	log.Noticef("startupNotifyPeers")
-	log.Errorf("startupNotifyPeers: temp") // XXX
-	hosts, err := getClusterNodes(ctx)
+	hosts, notClusterMode, err := getClusterNodes(ctx)
 	if err != nil {
 		log.Errorf("startupNotifyPeers, Error getting cluster nodes")
 		return
 	}
 
+	if notClusterMode {
+		return
+	}
+
+	err = getnodeNameAndUUID(ctx)
+	if err != nil {
+		log.Errorf("startupNotifyPeers, Error getting nodeName and nodeUUID")
+		return
+	}
+
+	ctx.notifyPeerCount = 0
 	// notify all the peers we are up
 	for _, host := range hosts {
-		req, err := http.NewRequest("POST", "http://"+host+":"+types.ClusterPubPort+"/startup", nil)
+		req, err := http.NewRequest("POST", "https://"+host+":"+types.ClusterPubPort+"/startup", nil)
 		if err != nil {
 			log.Errorf("startupNotifyPeers: %v", err)
 			break
@@ -98,9 +109,23 @@ func startupNotifyPeers(ctx *zedkubeContext) {
 		if err != nil {
 			log.Errorf("startupNotifyPeers: %v", err)
 			break
+		} else {
+			ctx.notifyPeerCount++
 		}
 		log.Noticef("startupNotifyPeers: host %s, response status: %s, %v", host, resp.Status, err)
 		resp.Body.Close()
+	}
+}
+
+func checkNotifyPeer(ctx *zedkubeContext) {
+	if ctx.encNodeIPAddress == nil {
+		return
+	}
+
+	// needed when we first converting to cluster mode
+	if ctx.notifyPeerCount == 0 { // for now, we only have 2 peers in the cluster
+		log.Noticef("checkNotifyPeer: notify peers")
+		startupNotifyPeers(ctx)
 	}
 }
 
@@ -120,32 +145,29 @@ func handleEncPubToRemoteData(ctx *zedkubeContext, header *types.EncPubHeader, b
 	}
 }
 
-func getClusterNodes(ctx *zedkubeContext) ([]string, error) {
+func getClusterNodes(ctx *zedkubeContext) ([]string, bool, error) {
 	myNodeIP := ctx.encNodeIPAddress
 	if myNodeIP == nil {
-		log.Errorf("getClusterNodes: encNodeIPAddress is nil")
-		return nil, fmt.Errorf("encNodeIPAddress is nil")
+		return nil, true, nil
 	}
 
-	if ctx.config == nil {
-		config, err := kubeapi.GetKubeConfig()
-		if err != nil {
-			log.Errorf("getClusterNodes: config is nil")
-			return nil, err
-		}
-		ctx.config = config
+	config, err := kubeapi.GetKubeConfig()
+	if err != nil {
+		log.Errorf("getClusterNodes: config is nil")
+		return nil, false, err
 	}
+	ctx.config = config
 
-	clientset, err := kubernetes.NewForConfig(ctx.config)
+	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Errorf("collectAppLogs: can't get clientset %v", err)
-		return nil, err
+		return nil, false, err
 	}
 
 	nodes, err := clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		log.Errorf("Error getting cluster nodes")
-		return nil, err
+		return nil, false, err
 	}
 
 	// get all the nodes internal ip addresses except for my own
@@ -157,7 +179,7 @@ func getClusterNodes(ctx *zedkubeContext) ([]string, error) {
 			}
 		}
 	}
-	return hosts, nil
+	return hosts, false, nil
 }
 
 func sendPubToRemoteNodes(ctx *zedkubeContext, header types.EncPubHeader, body []byte) {
@@ -169,10 +191,14 @@ func sendPubToRemoteNodes(ctx *zedkubeContext, header types.EncPubHeader, body [
 	}
 
 	sentOk := true
-	hosts, err := getClusterNodes(ctx)
+	hosts, notClusterMode, err := getClusterNodes(ctx)
 	if err != nil {
 		log.Errorf("Error getting cluster nodes")
 		ctx.pubResendTimer = time.NewTimer(60 * time.Second)
+		return
+	}
+
+	if notClusterMode {
 		return
 	}
 
@@ -183,7 +209,7 @@ func sendPubToRemoteNodes(ctx *zedkubeContext, header types.EncPubHeader, body [
 
 	// relay the pub to remote nodes
 	for _, host := range hosts {
-		req, err := http.NewRequest("POST", "http://"+host+":"+types.ClusterPubPort, bytes.NewBuffer(body))
+		req, err := http.NewRequest("POST", "https://"+host+":"+types.ClusterPubPort, bytes.NewBuffer(body))
 		if err != nil {
 			log.Errorf("sendPubToRemoteNodes: %v", err)
 			sentOk = false
@@ -197,6 +223,7 @@ func sendPubToRemoteNodes(ctx *zedkubeContext, header types.EncPubHeader, body [
 		req.Header.Set("Agent-Name", header.AgentName)
 		req.Header.Set("Op-Type", strconv.Itoa(int(header.OpType)))
 
+		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			log.Errorf("sendPubToRemoteNodes: %v", err)
@@ -251,30 +278,40 @@ func getGobAndUUID(ctx *zedkubeContext, config interface{}) (bytes.Buffer, uuid.
 		}
 	}
 
-	nodeuuid, err := uuid.FromString(ctx.nodeuuid)
+	err := getnodeNameAndUUID(ctx)
 	if err != nil {
-		return buf, nodeuuid, err
+		return buf, uuid.Nil, err
 	}
-	return buf, nodeuuid, nil
+
+	u, err := uuid.FromString(ctx.nodeuuid)
+	if err != nil {
+		return buf, uuid.Nil, err
+	}
+	return buf, u, nil
 }
 
 func resendPubsToRemoteNodes(ctx *zedkubeContext) {
 	log.Noticef("resendPubsToRemoteNodes: retrying")
-	resendPubNetInstConfigs(ctx)
-	resendPubAppInstConfigs(ctx)
-	resendPubVolumeConfigs(ctx)
-	resendPubDatastoreConfigs(ctx)
-	resendPubContentTreeConfigs(ctx)
-}
-
-func resendPubNetInstConfigs(ctx *zedkubeContext) {
-	sub := ctx.subNetworkInstanceConfig
-	items := sub.GetAll()
-	nodeuuid, err := uuid.FromString(ctx.nodeuuid)
+	err := getnodeNameAndUUID(ctx)
 	if err != nil {
-		log.Errorf("sendAndPubEncNetInstConfig: %v", err)
+		log.Errorf("resendPubNetInstConfigs: %v", err)
 		return
 	}
+
+	u, err := uuid.FromString(ctx.nodeuuid)
+	if err != nil {
+		return
+	}
+	resendPubNetInstConfigs(ctx, u)
+	resendPubAppInstConfigs(ctx, u)
+	resendPubVolumeConfigs(ctx, u)
+	resendPubDatastoreConfigs(ctx, u)
+	resendPubContentTreeConfigs(ctx, u)
+}
+
+func resendPubNetInstConfigs(ctx *zedkubeContext, nodeuuid uuid.UUID) {
+	sub := ctx.subNetworkInstanceConfig
+	items := sub.GetAll()
 	header := types.EncPubHeader{
 		SenderUUID: nodeuuid,
 		TypeNumber: types.EncNetInstConfig,
@@ -301,14 +338,9 @@ func resendPubNetInstConfigs(ctx *zedkubeContext) {
 }
 
 // resendPubsToRemoteNodes resend all the AppInstanceConfig to remote nodes
-func resendPubAppInstConfigs(ctx *zedkubeContext) {
+func resendPubAppInstConfigs(ctx *zedkubeContext, nodeuuid uuid.UUID) {
 	sub := ctx.subAppInstanceConfig
 	items := sub.GetAll()
-	nodeuuid, err := uuid.FromString(ctx.nodeuuid)
-	if err != nil {
-		log.Errorf("sendAndPubEncAppInstConfig: %v", err)
-		return
-	}
 	header := types.EncPubHeader{
 		SenderUUID: nodeuuid,
 		TypeNumber: types.EncAppInstConfig,
@@ -331,14 +363,9 @@ func resendPubAppInstConfigs(ctx *zedkubeContext) {
 	}
 }
 
-func resendPubVolumeConfigs(ctx *zedkubeContext) {
+func resendPubVolumeConfigs(ctx *zedkubeContext, nodeuuid uuid.UUID) {
 	sub := ctx.subVolumeConfig
 	items := sub.GetAll()
-	nodeuuid, err := uuid.FromString(ctx.nodeuuid)
-	if err != nil {
-		log.Errorf("sendAndPubEncVolumeConfig: %v", err)
-		return
-	}
 	header := types.EncPubHeader{
 		SenderUUID: nodeuuid,
 		TypeNumber: types.EncVolumeConfig,
@@ -365,14 +392,9 @@ func resendPubVolumeConfigs(ctx *zedkubeContext) {
 	}
 }
 
-func resendPubDatastoreConfigs(ctx *zedkubeContext) {
+func resendPubDatastoreConfigs(ctx *zedkubeContext, nodeuuid uuid.UUID) {
 	sub := ctx.subDatastoreConfig
 	items := sub.GetAll()
-	nodeuuid, err := uuid.FromString(ctx.nodeuuid)
-	if err != nil {
-		log.Errorf("sendAndPubEncDataStoreConfig: %v", err)
-		return
-	}
 	header := types.EncPubHeader{
 		SenderUUID: nodeuuid,
 		TypeNumber: types.EncDataStoreConfig,
@@ -399,14 +421,9 @@ func resendPubDatastoreConfigs(ctx *zedkubeContext) {
 	}
 }
 
-func resendPubContentTreeConfigs(ctx *zedkubeContext) {
+func resendPubContentTreeConfigs(ctx *zedkubeContext, nodeuuid uuid.UUID) {
 	sub := ctx.subContentTreeConfig
 	items := sub.GetAll()
-	nodeuuid, err := uuid.FromString(ctx.nodeuuid)
-	if err != nil {
-		log.Errorf("sendAndPubEncContentTreeConfig: %v", err)
-		return
-	}
 	header := types.EncPubHeader{
 		SenderUUID: nodeuuid,
 		TypeNumber: types.EncContentTreeConfig,
@@ -433,8 +450,36 @@ func resendPubContentTreeConfigs(ctx *zedkubeContext) {
 	}
 }
 
+// when the device comes up the first time, it won't have these cert files
+// initially, need to wait for them.
+func checkPubServerStatus(ctx *zedkubeContext) {
+	if ctx.clusterPubSubStarted {
+		return
+	}
+
+	_, err := os.Stat(pubServerCertFile)
+	_, err1 := os.Stat(pubServerKeyFile)
+	if err != nil || err1 != nil {
+		return
+	}
+
+	log.Noticef("checkPubServerStatus: try to start cluster pubsub server")
+	go runClusterPubSubServer(ctx)
+	// notify the peers to resend to us the publications
+	startupNotifyPeers(ctx)
+}
+
 func runClusterPubSubServer(ctx *zedkubeContext) {
 	// XXX hold until the gcp allowClusterPubSub configitem
+	if ctx.pubServerCertFile == "" || ctx.pubServerKeyFile == "" {
+		_, err := os.Stat(pubServerCertFile)
+		_, err1 := os.Stat(pubServerKeyFile)
+		if err != nil || err1 != nil {
+			return
+		}
+		ctx.pubServerCertFile = pubServerCertFile
+		ctx.pubServerKeyFile = pubServerKeyFile
+	}
 	ctx.clusterPubSubStarted = true
 	log.Noticef("runClusterPubSubServer: start, clusterPubSubStarted set")
 
@@ -446,7 +491,11 @@ func runClusterPubSubServer(ctx *zedkubeContext) {
 		startupHandler(w, r, ctx)
 	})
 
-	http.ListenAndServe("0.0.0.0:"+types.ClusterPubPort, nil)
+	err := http.ListenAndServeTLS("0.0.0.0:"+types.ClusterPubPort,
+		ctx.pubServerCertFile, ctx.pubServerKeyFile, nil)
+	if err != nil {
+		log.Errorf("Failed to start HTTPS server: %v", err)
+	}
 }
 
 func handleNetworkInstanceCreate(ctxArg interface{}, key string,

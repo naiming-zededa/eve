@@ -29,8 +29,12 @@ type ContentTreeConfig struct {
 	GenerationCounter int64
 	DisplayName       string
 	CustomMeta        string
-	// XXX DesignatedNodeID
+	// DesignatedNodeID in cluster mode, with multiple nodes receiving the same
+	// content tree config, but only one Designated Node will download the
+	// content/volume and perform the PVC conversion tasks.
 	DesignatedNodeID uuid.UUID
+	// XXX is nohyper container
+	IsNoHyper bool
 }
 
 // Key is content info UUID which will be unique

@@ -115,3 +115,15 @@ func GetVMINameFromVirtLauncher(podName string) (vmiName string, isVirtLauncher 
 	}
 	return vmiName, true
 }
+
+func GetReplicaPodName(displayName, podName string, uuid uuid.UUID) (kubeName string, isReplicaPod bool) {
+	kubeName = GetAppKubeName(displayName, uuid)
+	if !strings.HasPrefix(podName, kubeName) {
+		return "", false
+	}
+	suffix := strings.TrimPrefix(podName, kubeName)
+	if strings.HasPrefix(suffix, "-") && len(suffix[1:]) == 5 {
+		return kubeName, true
+	}
+	return "", false
+}

@@ -42,6 +42,12 @@ func collectAppLogs(ctx *zedkubeContext) {
 		return
 	}
 
+	err = getnodeNameAndUUID(ctx)
+	if err != nil {
+		log.Errorf("collectAppLogs: can't get edgeNodeInfo %v", err)
+		return
+	}
+
 	// "Thu Aug 17 05:39:04 UTC 2023"
 	timestampRegex := regexp.MustCompile(`(\w{3} \w{3} \d{2} \d{2}:\d{2}:\d{2} \w+ \d{4})`)
 	nowStr := time.Now().String()
@@ -50,11 +56,14 @@ func collectAppLogs(ctx *zedkubeContext) {
 	sinceSec = logcollectInterval
 	for _, item := range items {
 		aiconfig := item.(types.AppInstanceConfig)
+		if aiconfig.FixedResources.VirtualizationMode != types.NOHYPER {
+			continue
+		}
 		if aiconfig.DesignatedNodeID != uuid.Nil && aiconfig.DesignatedNodeID.String() != ctx.nodeuuid { // For now, only check DNiD, need to add migration part
 			continue
 		}
-		contName := base.GetAppKubeName(aiconfig.DisplayName, aiconfig.UUIDandVersion.UUID)
-
+		kubeName := base.GetAppKubeName(aiconfig.DisplayName, aiconfig.UUIDandVersion.UUID)
+		contName := kubeName
 		opt := &corev1.PodLogOptions{}
 		if ctx.appLogStarted {
 			opt = &corev1.PodLogOptions{
@@ -62,6 +71,20 @@ func collectAppLogs(ctx *zedkubeContext) {
 			}
 		} else {
 			ctx.appLogStarted = true
+		}
+
+		pods, err := clientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("app=%s", kubeName),
+		})
+		if err != nil {
+			logrus.Errorf("checkReplicaSetMetrics: can't get pod %v", err)
+			continue
+		}
+		for _, pod := range pods.Items {
+			if strings.HasPrefix(pod.ObjectMeta.Name, kubeName) {
+				contName = pod.ObjectMeta.Name
+				break
+			}
 		}
 		req := clientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).GetLogs(contName, opt)
 		podLogs, err := req.Stream(context.Background())
@@ -115,6 +138,11 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		return
 	}
 
+	u, err := uuid.FromString(ctx.nodeuuid)
+	if err != nil {
+		return
+	}
+
 	clientset, err := getKubeClientSet()
 	if err != nil {
 		log.Errorf("checkAppsStatus: can't get clientset %v", err)
@@ -135,18 +163,19 @@ func checkAppsStatus(ctx *zedkubeContext) {
 	var oldStatus *types.ENClusterAppStatus
 	for _, item := range items {
 		aiconfig := item.(types.AppInstanceConfig)
-		if aiconfig.DesignatedNodeID != uuid.Nil { // if not for cluster app, skip
+		if aiconfig.DesignatedNodeID == uuid.Nil { // if not for cluster app, skip
 			continue
 		}
 		encAppStatus := types.ENClusterAppStatus{
 			AppUUID: aiconfig.UUIDandVersion.UUID,
-			IsDNSet: aiconfig.DesignatedNodeID.String() == ctx.nodeuuid,
+			IsDNSet: aiconfig.DesignatedNodeID == u,
 		}
 		contName := base.GetAppKubeName(aiconfig.DisplayName, aiconfig.UUIDandVersion.UUID)
 
 		for _, pod := range pods.Items {
 			contVMIName := "virt-launcher-" + contName
-			if pod.Name == contName || pod.Name == contVMIName {
+			log.Functionf("checkAppsStatus: pod %s, cont %s", pod.Name, contName)
+			if strings.HasPrefix(pod.Name, contName) || pod.Name == contVMIName {
 				encAppStatus.ScheduledOnThisNode = true
 				if pod.Status.Phase == corev1.PodRunning {
 					encAppStatus.StatusRunning = true
@@ -162,7 +191,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 				break
 			}
 		}
-		log.Noticef("checkAppsStatus: pod status %+v, old %+v", encAppStatus, oldStatus)
+		log.Noticef("checkAppsStatus: devname %s, pod (%d) status %+v, old %+v", ctx.nodeName, len(pods.Items), encAppStatus, oldStatus)
 
 		if oldStatus == nil || oldStatus.IsDNSet != encAppStatus.IsDNSet ||
 			oldStatus.ScheduledOnThisNode != encAppStatus.ScheduledOnThisNode || oldStatus.StatusRunning != encAppStatus.StatusRunning {

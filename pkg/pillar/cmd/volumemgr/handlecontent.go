@@ -21,8 +21,8 @@ import (
 // XXX hack for now to block and using hostname
 func handleContentTreeClusterForUs(config types.ContentTreeConfig) bool {
 	devUUIDStr, _ := os.Hostname()
-	if config.DesignatedNodeID != uuid.Nil && config.DesignatedNodeID.String() != devUUIDStr {
-		log.Noticef("handleContentTreeCreate(%s) not for us", config.Key())
+	if config.DesignatedNodeID != uuid.Nil && config.DesignatedNodeID.String() != devUUIDStr && !config.IsNoHyper {
+		log.Noticef("handleContentTreeClusterForUs(%s) not for us", config.Key())
 		return false
 	}
 	return true
@@ -101,6 +101,27 @@ func publishContentTreeStatus(ctx *volumemgrContext, status *types.ContentTreeSt
 	pub := ctx.pubContentTreeStatus
 	pub.Publish(key, *status)
 	log.Tracef("publishContentTreeStatus(%s) Done", key)
+	// make sure we have a reference name if in native container
+	checkAndAddReferenceName(ctx, status)
+}
+
+func checkAndAddReferenceName(ctx *volumemgrContext, status *types.ContentTreeStatus) {
+	pub := ctx.pubVolumeStatus
+	allVolumeStatus := pub.GetAll()
+	for _, item := range allVolumeStatus {
+		volumeStatus := item.(types.VolumeStatus)
+		if !volumeStatus.IsNoHyper {
+			continue
+		}
+		if volumeStatus.ContentID == status.ContentID {
+			volrefStatus := lookupVolumeRefStatus(ctx, volumeStatus.Key())
+			if volrefStatus != nil && volrefStatus.ReferenceName == "" {
+				volrefStatus.ReferenceName = status.ReferenceID()
+				log.Functionf("checkAndAddReferenceName(%s): fillin referencename for %v", volumeStatus.Key(), volrefStatus.ReferenceName)
+				publishVolumeRefStatus(ctx, volrefStatus)
+			}
+		}
+	}
 }
 
 func unpublishContentTreeStatus(ctx *volumemgrContext, status *types.ContentTreeStatus) {

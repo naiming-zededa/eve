@@ -17,8 +17,8 @@ import (
 // XXX hack for now to block and using hostname
 func handleVolumeClusterForUs(config types.VolumeConfig) bool {
 	devUUIDStr, _ := os.Hostname()
-	if config.DesignatedNodeID != uuid.Nil && config.DesignatedNodeID.String() != devUUIDStr {
-		log.Noticef("handleContentTreeCreate(%s) not for us", config.Key())
+	if config.DesignatedNodeID != uuid.Nil && config.DesignatedNodeID.String() != devUUIDStr && !config.IsNoHyper {
+		log.Noticef("handleVolumeClusterForUs(%s) not for us", config.Key())
 		return false
 	}
 	return true

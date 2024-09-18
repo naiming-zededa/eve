@@ -90,6 +90,7 @@ type domainContext struct {
 	pubDomainStatus        pubsub.Publication
 	subGlobalConfig        pubsub.Subscription
 	subZFSPoolStatus       pubsub.Subscription
+	subEdgeNodeInfo        pubsub.Subscription
 	pubAssignableAdapters  pubsub.Publication
 	pubDomainMetric        pubsub.Publication
 	pubHostMemory          pubsub.Publication
@@ -125,6 +126,7 @@ type domainContext struct {
 	cpuPinningSupported bool
 	// Is it kubevirt eve
 	hvTypeKube bool
+	nodeName   string
 }
 
 // AddAgentSpecificCLIFlags adds CLI options
@@ -413,9 +415,25 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	domainCtx.subZFSPoolStatus = subZFSPoolStatus
 	subZFSPoolStatus.Activate()
 
+	// Look for edge node info
+	subEdgeNodeInfo, err := ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:   "zedagent",
+		MyAgentName: agentName,
+		TopicImpl:   types.EdgeNodeInfo{},
+		Persistent:  true,
+		Activate:    false,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	domainCtx.subEdgeNodeInfo = subEdgeNodeInfo
+	_ = subEdgeNodeInfo.Activate()
+
 	// Parse any existing ConfigIntemValueMap but continue if there
 	// is none
-	for !domainCtx.GCComplete {
+	waitEdgeNodeInfo := true
+	wtTime := time.Now()
+	for !domainCtx.GCComplete || (domainCtx.hvTypeKube && waitEdgeNodeInfo) {
 		log.Noticef("waiting for GCComplete")
 		select {
 		case change := <-subGlobalConfig.MsgChan():
@@ -424,9 +442,16 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		case <-domainCtx.publishTicker.C:
 			publishProcessesHandler(&domainCtx)
 
+		case change := <-subEdgeNodeInfo.MsgChan():
+			subEdgeNodeInfo.ProcessChange(change)
+			waitEdgeNodeInfo = false
+
 		case <-stillRunning.C:
 		}
 		ps.StillRunning(agentName, warningTime, errorTime)
+		if time.Since(wtTime) > 5*time.Minute { // wait for max of 5 minutes
+			waitEdgeNodeInfo = false
+		}
 	}
 	log.Noticef("processed GCComplete")
 
@@ -511,6 +536,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 
 		case change := <-subZFSPoolStatus.MsgChan():
 			subZFSPoolStatus.ProcessChange(change)
+
+		case change := <-subEdgeNodeInfo.MsgChan():
+			subEdgeNodeInfo.ProcessChange(change)
 
 		case <-domainCtx.publishTicker.C:
 			publishProcessesHandler(&domainCtx)
@@ -649,6 +677,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 
 		case change := <-subPhysicalIOAdapter.MsgChan():
 			subPhysicalIOAdapter.ProcessChange(change)
+
+		case change := <-subEdgeNodeInfo.MsgChan():
+			subEdgeNodeInfo.ProcessChange(change)
 
 		case <-domainCtx.publishTicker.C:
 			start := time.Now()
@@ -976,12 +1007,15 @@ func verifyStatus(ctx *domainContext, status *types.DomainStatus) {
 				status.SetErrorDescription(errDescription)
 			}
 
-			//cleanup app instance tasks
-			if err := hyper.Task(status).Delete(status.DomainName); err != nil {
-				log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
-			}
-			if err := hyper.Task(status).Cleanup(status.DomainName); err != nil {
-				log.Errorf("failed to cleanup domain: %s (%v)", status.DomainName, err)
+			// in cluster mode, we can not delete the pod due to failing to get app info
+			if !ctx.hvTypeKube {
+				//cleanup app instance tasks
+				if err := hyper.Task(status).Delete(status.DomainName); err != nil {
+					log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
+				}
+				if err := hyper.Task(status).Cleanup(status.DomainName); err != nil {
+					log.Errorf("failed to cleanup domain: %s (%v)", status.DomainName, err)
+				}
 			}
 		}
 		status.DomainId = 0
@@ -1070,6 +1104,14 @@ func maybeRetryBoot(ctx *domainContext, status *types.DomainStatus) {
 	if !status.BootFailed {
 		return
 	}
+
+	err := getnodeNameAndUUID(ctx)
+	if err != nil {
+		log.Errorf("maybeRetryBoot(%s) getnodeNameAndUUID failed: %s",
+			status.Key(), err)
+		return
+	}
+
 	if status.Activated && status.BootFailed {
 		log.Functionf("maybeRetryBoot(%s) clearing bootFailed since Activated",
 			status.Key())
@@ -1118,7 +1160,7 @@ func maybeRetryBoot(ctx *domainContext, status *types.DomainStatus) {
 	}
 	defer file.Close()
 
-	if err := hyper.Task(status).Setup(*status, *config, ctx.assignableAdapters, nil, file); err != nil {
+	if err := hyper.Task(status).Setup(*status, *config, ctx.assignableAdapters, ctx.nodeName, nil, file); err != nil {
 		//it is retry, so omit error
 		log.Errorf("Failed to create DomainStatus from %+v: %s",
 			config, err)
@@ -1316,6 +1358,7 @@ func handleCreate(ctx *domainContext, key string, config *types.DomainConfig) {
 		State:          types.INSTALLED,
 		VmConfig:       config.VmConfig,
 		Service:        config.Service,
+		IsDNidNode:     config.IsDNidNode,
 	}
 
 	status.VmConfig.CPUs = ""
@@ -1525,6 +1568,13 @@ func doActivate(ctx *domainContext, config types.DomainConfig,
 	log.Functionf("doActivate(%v) for %s",
 		config.UUIDandVersion, config.DisplayName)
 
+	err := getnodeNameAndUUID(ctx)
+	if err != nil {
+		log.Errorf("doActivate(%s) getnodeNameAndUUID failed: %s",
+			status.Key(), err)
+		return
+	}
+
 	if ctx.cpuPinningSupported {
 		if err := assignCPUs(ctx, &config, status); err != nil {
 			log.Warnf("failed to assign CPUs for %s", config.DisplayName)
@@ -1660,7 +1710,7 @@ func doActivate(ctx *domainContext, config types.DomainConfig,
 	defer file.Close()
 
 	globalConfig := agentlog.GetGlobalConfig(log, ctx.subGlobalConfig)
-	if err := hyper.Task(status).Setup(*status, config, ctx.assignableAdapters, globalConfig, file); err != nil {
+	if err := hyper.Task(status).Setup(*status, config, ctx.assignableAdapters, ctx.nodeName, globalConfig, file); err != nil {
 		log.Errorf("Failed to create DomainStatus from %+v: %s",
 			config, err)
 		status.SetErrorNow(err.Error())
@@ -1726,6 +1776,11 @@ func doActivateTail(ctx *domainContext, status *types.DomainStatus,
 		log.Errorf("domain start for %s: %s", status.DomainName, err)
 		status.SetErrorNow(err.Error())
 
+		// HvKube case
+		if !status.IsDNidNode {
+			log.Noticef("doActivateTail(%v) we are not DNiD, skip delete app", status.DomainName)
+			return
+		}
 		// Delete
 		if err := hyper.Task(status).Delete(status.DomainName); err != nil {
 			log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
@@ -1755,6 +1810,11 @@ func doActivateTail(ctx *domainContext, status *types.DomainStatus,
 		status.SetErrorNow(err.Error())
 		log.Errorf("doActivateTail(%v) failed for %s: %s",
 			status.UUIDandVersion, status.DisplayName, err)
+
+		if !status.IsDNidNode {
+			log.Noticef("doActivateTail(%v) we are not DNiD, skip delete app", status.DomainName)
+			return
+		}
 		// Delete
 		if err := hyper.Task(status).Delete(status.DomainName); err != nil {
 			log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
@@ -1856,6 +1916,11 @@ func doInactivate(ctx *domainContext, status *types.DomainStatus, impatient bool
 	}
 
 	if status.DomainId != 0 {
+		if !status.IsDNidNode {
+			log.Noticef("doInactivate(%v) we are not DNiD, skip delete app", status.DomainName)
+			return
+		}
+
 		if err := hyper.Task(status).Delete(status.DomainName); err != nil {
 			log.Errorf("Failed to delete domain %s (%v)", status.DomainName, err)
 		} else {
@@ -2419,6 +2484,11 @@ func handleDelete(ctx *domainContext, key string, status *types.DomainStatus) {
 	// No point in publishing metrics any more
 	ctx.pubDomainMetric.Unpublish(status.Key())
 
+	if !status.IsDNidNode {
+		log.Noticef("handleDelete(%v) we are not DNiD, skip delete app", status.DomainName)
+		return
+	}
+
 	err := hyper.Task(status).Delete(status.DomainName)
 	if err != nil {
 		log.Errorln(err)
@@ -2461,6 +2531,11 @@ func DomainShutdown(status types.DomainStatus, force bool) error {
 
 	// Stop the domain
 	log.Functionf("Stopping domain - %s", status.DomainName)
+
+	if !status.IsDNidNode {
+		log.Noticef("DomainShutdown(%v) we are not DNiD, skip delete app", status.DomainName)
+		return nil
+	}
 	err = hyper.Task(&status).Stop(status.DomainName, force)
 
 	return err
@@ -3556,4 +3631,18 @@ func lookupCapabilities(ctx *domainContext) (*types.Capabilities, error) {
 		log.Fatalf("Unexpected type from pubCapabilities: %T", c)
 	}
 	return &capabilities, nil
+}
+
+func getnodeNameAndUUID(ctx *domainContext) error {
+	if ctx.nodeName == "" {
+		NodeInfo, err := ctx.subEdgeNodeInfo.Get("global")
+		if err != nil {
+			log.Errorf("getnodeNameAndUUID: can't get edgeNodeInfo %v", err)
+			return err
+		}
+		enInfo := NodeInfo.(types.EdgeNodeInfo)
+		ctx.nodeName = enInfo.DeviceName
+		log.Noticef("**getnodeNameAndUUID: devicename, NodeInfo %v", NodeInfo) // XXX
+	}
+	return nil
 }

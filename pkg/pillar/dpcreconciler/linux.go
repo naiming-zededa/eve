@@ -832,8 +832,17 @@ func (r *LinuxDpcReconciler) updateCurrentRoutes(dpc types.DevicePortConfig) (ch
 					cniIfIndex, err)
 			}
 			for _, rt := range cniRoutes {
+				// Make it a /16 route for cluster IP range.
+				routeTmp := rt.Data.(netlink.Route)
+				_, tmpRoute, err := net.ParseCIDR(kubePodCIDR)
+				if err != nil {
+					r.Log.Errorf("updateCurrentRoutes: failed to parse CIDR %s: %v",
+						kubePodCIDR, err)
+					continue
+				}
+				routeTmp.Dst = tmpRoute
 				currentRoutes.PutItem(linux.Route{
-					Route:         rt.Data.(netlink.Route),
+					Route:         routeTmp,
 					UnmanagedLink: true,
 				}, &reconciler.ItemStateData{
 					State:         reconciler.ItemStateCreated,
