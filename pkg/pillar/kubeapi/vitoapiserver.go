@@ -7,8 +7,10 @@ package kubeapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"time"
 
@@ -17,13 +19,17 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/diskmetrics"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	corev1 "k8s.io/api/core/v1"
+	v1errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+var label map[string]string
+
 // CreatePVC : creates a Persistent volume of given name and size.
 func CreatePVC(pvcName string, size uint64, log *base.LogObject) error {
 	// Get the Kubernetes clientset
+
 	clientset, err := GetClientSet()
 	if err != nil {
 		err = fmt.Errorf("failed to get clientset: %v", err)
@@ -35,15 +41,22 @@ func CreatePVC(pvcName string, size uint64, log *base.LogObject) error {
 	if size < 10*1024*1024 {
 		size = 10 * 1024 * 1024
 	}
+
+	// If I am creating a PVC on this node, I am the designated node id.
+	devUUIDStr, _ := os.Hostname()
+	label = map[string]string{"designated-nodeid": devUUIDStr}
 	// Define the Longhorn PVC object
-	pvc := NewPVCDefinition(pvcName, fmt.Sprint(size), nil, nil)
+	pvc := NewPVCDefinition(pvcName, fmt.Sprint(size), nil, label)
 
 	// Create the PVC in Kubernetes
 	result, err := clientset.CoreV1().PersistentVolumeClaims(pvc.Namespace).
 		Create(context.Background(), pvc, metav1.CreateOptions{})
 	if err != nil {
-		err = fmt.Errorf("failed to CreatePVC %s: %v", pvcName, err)
-		log.Error(err)
+		if v1errors.IsAlreadyExists(err) {
+			log.Errorf("Failed to CreatePVC %s error %v", pvcName, err)
+			errStr := fmt.Sprintf("Failed to CreatePVC %s error %v", pvcName, err)
+			return errors.New(errStr)
+		}
 		return err
 	}
 
@@ -264,6 +277,17 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
 	}
 	if actualVolSize > volSize {
 		volSize = actualVolSize
+	}
+
+	// Create PVC and then copy data. We create PVC to set the designated node id label.
+	if !exists {
+		err = CreatePVC(pvcName, volSize, log)
+		if err != nil {
+			err = fmt.Errorf("Error creating PVC %s", pvcName)
+			log.Error(err)
+			return err
+		}
+		exists = true
 	}
 
 	// Sample virtctl command

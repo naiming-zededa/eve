@@ -42,6 +42,8 @@ type DomainConfig struct {
 	// KubeImageName: is the container image reference we pass to domainmgr to launch a native container
 	// in kubevirt eve
 	KubeImageName string
+	// if this node is the DNiD of the App
+	IsDNidNode bool
 
 	// XXX: to be deprecated, use CipherBlockStatus instead
 	CloudInitUserData *string `json:"pubsub-large-CloudInitUserData"` // base64-encoded
@@ -276,7 +278,7 @@ const (
 // Task represents any runnable entity on EVE
 type Task interface {
 	Setup(DomainStatus, DomainConfig, *AssignableAdapters,
-		*ConfigItemValueMap, *os.File) error
+		string, *ConfigItemValueMap, *os.File) error
 	VirtualTPMSetup(domainName, agentName string, ps *pubsub.PubSub, warnTime, errTime time.Duration) error
 	VirtualTPMTerminate(domainName string) error
 	VirtualTPMTeardown(domainName string) error
@@ -318,6 +320,8 @@ type DomainStatus struct {
 	// VirtualTPM is a flag to signal the hypervisor implementation
 	// that vTPM is available for the domain.
 	VirtualTPM bool
+	// if this node is the DNiD of the App
+	IsDNidNode bool
 }
 
 func (status DomainStatus) Key() string {
@@ -471,6 +475,7 @@ type DomainMetric struct {
 	UsedMemoryPercent float64
 	LastHeard         time.Time
 	Activated         bool
+	NodeName          string // kube app running on node
 }
 
 // Key returns the key for pubsub

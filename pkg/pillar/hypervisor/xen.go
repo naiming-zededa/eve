@@ -121,7 +121,7 @@ func (ctx xenContext) Task(status *types.DomainStatus) types.Task {
 }
 
 func (ctx xenContext) Setup(status types.DomainStatus, config types.DomainConfig,
-	aa *types.AssignableAdapters, globalConfig *types.ConfigItemValueMap, file *os.File) error {
+	aa *types.AssignableAdapters, nodeName string, globalConfig *types.ConfigItemValueMap, file *os.File) error {
 	// first lets build the domain config
 	if err := ctx.CreateDomConfig(status.DomainName, config,
 		status.DiskStatusList, aa, globalConfig, file); err != nil {

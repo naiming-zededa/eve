@@ -27,8 +27,11 @@ package zedagent
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -40,6 +43,7 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/agentbase"
 	"github.com/lf-edge/eve/pkg/pillar/agentlog"
 	"github.com/lf-edge/eve/pkg/pillar/base"
+	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/netdump"
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
 	"github.com/lf-edge/eve/pkg/pillar/types"
@@ -111,6 +115,7 @@ type zedagentContext struct {
 	triggerHwInfo             chan<- destinationBitset
 	triggerLocationInfo       chan<- destinationBitset
 	triggerNTPSourcesInfo     chan<- destinationBitset
+	triggerClusterUpdateInfo  chan<- destinationBitset
 	triggerObjectInfo         chan<- infoForObjectKey
 	zbootRestarted            bool // published by baseosmgr
 	subOnboardStatus          pubsub.Subscription
@@ -153,6 +158,10 @@ type zedagentContext struct {
 	subCipherMetricsZR        pubsub.Subscription
 	subCipherMetricsWwan      pubsub.Subscription
 	subPatchEnvelopeUsage     pubsub.Subscription
+	subEncPubToRemoteData     pubsub.Subscription // subEncPubToRemoteData for testing
+	subNodeDrainStatus        pubsub.Subscription
+	pubNodeDrainRequest       pubsub.Publication
+	subClusterUpdateStatus    pubsub.Subscription
 	zedcloudMetrics           *zedcloud.AgentMetrics
 	fatalFlag                 bool // From command line arguments
 	hangFlag                  bool // From command line arguments
@@ -228,6 +237,9 @@ type zedagentContext struct {
 
 	// Is Kubevirt eve
 	hvTypeKube bool
+
+	// EN cluster config
+	pubEdgeNodeClusterConfig pubsub.Publication
 
 	// Netdump
 	netDumper            *netdump.NetDumper // nil if netdump is disabled
@@ -335,12 +347,14 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	triggerHwInfo := make(chan destinationBitset, 1)
 	triggerLocationInfo := make(chan destinationBitset, 1)
 	triggerNTPSourcesInfo := make(chan destinationBitset, 1)
+	triggerClusterUpdateInfo := make(chan destinationBitset, 1)
 	triggerObjectInfo := make(chan infoForObjectKey, 1)
 	zedagentCtx.flowlogQueue = flowlogQueue
 	zedagentCtx.triggerDeviceInfo = triggerDeviceInfo
 	zedagentCtx.triggerHwInfo = triggerHwInfo
 	zedagentCtx.triggerLocationInfo = triggerLocationInfo
 	zedagentCtx.triggerNTPSourcesInfo = triggerNTPSourcesInfo
+	zedagentCtx.triggerClusterUpdateInfo = triggerClusterUpdateInfo
 	zedagentCtx.triggerObjectInfo = triggerObjectInfo
 
 	// Initialize all zedagent publications.
@@ -505,6 +519,11 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	go ntpSourcesTimerTask(zedagentCtx, handleChannel, triggerNTPSourcesInfo)
 	getconfigCtx.ntpSourcesTickerHandle = <-handleChannel
 
+	// Initial publish of KubeClusterUpdateStatus
+	log.Noticef("Creating %s at %s", "kubeClusterUpdateStatusTask", agentlog.GetMyStack())
+	go kubeClusterUpdateStatusTask(zedagentCtx, triggerClusterUpdateInfo)
+	triggerPublishKubeClusterUpdateStatus(zedagentCtx)
+
 	//trigger channel for localProfile state machine
 	getconfigCtx.sideController.localProfileTrigger = make(chan Notify, 1)
 	//process saved local profile
@@ -540,6 +559,8 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 
 	// start remote attestation task
 	attestModuleStart(zedagentCtx)
+
+	initNodeDrainPubSub(zedagentCtx)
 
 	// Enter main zedagent event loop.
 	mainEventLoop(zedagentCtx, stillRunning) // never exits
@@ -615,6 +636,8 @@ func (zedagentCtx *zedagentContext) init() {
 	attestCtx.zedagentCtx = zedagentCtx
 	zedagentCtx.attestCtx = attestCtx
 	zedagentCtx.hvTypeKube = base.IsHVTypeKube()
+
+	getconfigCtx.localClusterIP, _ = base.GetLocalClusterIP(zedagentCtx.hvTypeKube)
 }
 
 func initializeDirs() {
@@ -781,6 +804,7 @@ func mainEventLoop(zedagentCtx *zedagentContext, stillRunning *time.Ticker) {
 	dnsCtx := zedagentCtx.dnsCtx
 
 	hwInfoTiker := time.NewTicker(3 * time.Hour)
+	kubeClusterUpdateTicker := time.NewTicker(1 * time.Minute)
 
 	for {
 		select {
@@ -1050,11 +1074,23 @@ func mainEventLoop(zedagentCtx *zedagentContext, stillRunning *time.Ticker) {
 		case change := <-zedagentCtx.subPatchEnvelopeUsage.MsgChan():
 			zedagentCtx.subPatchEnvelopeUsage.ProcessChange(change)
 
+		case change := <-zedagentCtx.subEncPubToRemoteData.MsgChan():
+			zedagentCtx.subEncPubToRemoteData.ProcessChange(change)
+
 		case <-hwInfoTiker.C:
 			triggerPublishHwInfo(zedagentCtx)
 
+		case <-kubeClusterUpdateTicker.C:
+			triggerPublishKubeClusterUpdateStatus(zedagentCtx)
+
 		case change := <-zedagentCtx.subEdgeviewStatus.MsgChan():
 			zedagentCtx.subEdgeviewStatus.ProcessChange(change)
+
+		case change := <-zedagentCtx.subNodeDrainStatus.MsgChan():
+			zedagentCtx.subNodeDrainStatus.ProcessChange(change)
+
+		case change := <-zedagentCtx.subClusterUpdateStatus.MsgChan():
+			zedagentCtx.subClusterUpdateStatus.ProcessChange(change)
 
 		case <-stillRunning.C:
 			// Fault injection
@@ -1102,6 +1138,16 @@ func initPublications(zedagentCtx *zedagentContext) {
 		log.Fatal(err)
 	}
 	getconfigCtx.pubZedAgentStatus.ClearRestarted()
+
+	zedagentCtx.pubEdgeNodeClusterConfig, err = ps.NewPublication(pubsub.PublicationOptions{
+		AgentName:  agentName,
+		Persistent: true,
+		TopicType:  types.EdgeNodeClusterConfig{},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	zedagentCtx.pubEdgeNodeClusterConfig.ClearRestarted()
 
 	getconfigCtx.pubPhysicalIOAdapters, err = ps.NewPublication(pubsub.PublicationOptions{
 		AgentName: agentName,
@@ -1960,6 +2006,19 @@ func initPostOnboardSubs(zedagentCtx *zedagentContext) {
 		ErrorTime:   errorTime,
 	})
 
+	zedagentCtx.subEncPubToRemoteData, err = ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:     "zedkube",
+		MyAgentName:   agentName,
+		TopicImpl:     types.EncPubToRemoteData{},
+		Activate:      true,
+		Ctx:           zedagentCtx,
+		CreateHandler: handleEncPubToRemoteDataCreate,
+		ModifyHandler: handleEncPubToRemoteDataModify,
+		DeleteHandler: handleEncPubToRemoteDataDelete,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
+	})
+
 	getconfigCtx.subPatchEnvelopeStatus, err = ps.NewSubscription(pubsub.SubscriptionOptions{
 		AgentName:     "msrv",
 		MyAgentName:   agentName,
@@ -1974,6 +2033,23 @@ func initPostOnboardSubs(zedagentCtx *zedagentContext) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	zedagentCtx.subClusterUpdateStatus, err = ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:     agentName,
+		MyAgentName:   agentName,
+		TopicImpl:     kubeapi.KubeClusterUpdateStatus{},
+		Persistent:    true,
+		Activate:      false, //need to have the zedagentCtx.subClusterUpdateStatus set before activation
+		Ctx:           zedagentCtx,
+		CreateHandler: handleClusterUpdateStatusCreate,
+		ModifyHandler: handleClusterUpdateStatusModify,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	zedagentCtx.subClusterUpdateStatus.Activate()
 }
 
 func triggerPublishHwInfoToDest(ctxPtr *zedagentContext, dest destinationBitset) {
@@ -1991,6 +2067,50 @@ func triggerPublishHwInfoToDest(ctxPtr *zedagentContext, dest destinationBitset)
 
 func triggerPublishHwInfo(ctxPtr *zedagentContext) {
 	triggerPublishHwInfoToDest(ctxPtr, AllDest)
+}
+
+func handleClusterUpdateStatusCreate(ctxArg interface{}, key string,
+	configArg interface{}) {
+	handleClusterUpdateStatusImpl(ctxArg, key, configArg, nil)
+}
+func handleClusterUpdateStatusModify(ctxArg interface{}, key string,
+	configArg interface{}, oldStatusArg interface{}) {
+	handleClusterUpdateStatusImpl(ctxArg, key, configArg, oldStatusArg)
+}
+func handleClusterUpdateStatusImpl(ctxArg interface{}, key string,
+	statusArg interface{}, oldStatusArg interface{}) {
+	ctx, ok := ctxArg.(*zedagentContext)
+	if !ok {
+		log.Fatalf("handleClusterUpdateStatusImpl invalid type in ctxArg: %v", ctxArg)
+	}
+	req, ok := statusArg.(kubeapi.KubeClusterUpdateStatus)
+	if !ok {
+		log.Fatalf("handleClusterUpdateStatusImpl invalid type in configArg: %v", statusArg)
+	}
+	log.Noticef("handleClusterUpdateStatusImpl key:%s obj:%v", key, req)
+
+	state := getDeviceState(ctx)
+	//if state != DEVICE_STATE_BASEOS_UPDATING {
+	// Ignore if not in baseos updating state
+	//	return
+	//}
+	log.Noticef("handleClusterUpdateStatusImpl devicestate:%s", state)
+	triggerPublishKubeClusterUpdateStatus(ctx)
+}
+func triggerPublishKubeClusterUpdateStatusToDest(ctxPtr *zedagentContext, dest destinationBitset) {
+	log.Notice("Triggered PublishKubeClusterUpdateStatus")
+	select {
+	case ctxPtr.triggerClusterUpdateInfo <- dest:
+		// Do nothing more
+	default:
+		// This occurs if we are already trying to send
+		// and we get a second and third trigger before that is complete.
+		log.Warnf("Failed to send on PublishKubeClusterUpdateStatus")
+	}
+}
+
+func triggerPublishKubeClusterUpdateStatus(ctxPtr *zedagentContext) {
+	triggerPublishKubeClusterUpdateStatusToDest(ctxPtr, AllDest)
 }
 
 func triggerPublishDevInfoToDest(ctxPtr *zedagentContext, dest destinationBitset) {
@@ -2099,6 +2219,7 @@ func triggerPublishAllInfo(ctxPtr *zedagentContext, dest destinationBitset) {
 		}
 		triggerPublishLocationToDest(ctxPtr, dest)
 		triggerPublishNTPSourcesToDest(ctxPtr, dest)
+		triggerPublishKubeClusterUpdateStatusToDest(ctxPtr, dest)
 	}()
 }
 
@@ -2399,7 +2520,98 @@ func handleGlobalConfigImpl(ctxArg interface{}, key string,
 		reinitNetdumper(ctx)
 	}
 
+	// XXX handle testing for EdgeNode Cluster Config
+	handleEdgeNodeConfigItem(ctx, gcp)
+
 	log.Functionf("handleGlobalConfigImpl done for %s", key)
+}
+
+func handleEdgeNodeConfigItem(ctx *zedagentContext, gcp *types.ConfigItemValueMap) {
+	encConfigItemBase64 := gcp.GlobalValueString(types.ENClusterConfig)
+
+	var config *types.EdgeNodeClusterConfig
+	pub := ctx.pubEdgeNodeClusterConfig
+	items := pub.GetAll()
+	if len(items) == 1 {
+		for _, item := range items {
+			tempCfg := item.(types.EdgeNodeClusterConfig)
+			config = &tempCfg
+			break
+		}
+	}
+
+	log.Noticef("handleEdgeNodeConfigItem: ENClusterAPIConfig %s", encConfigItemBase64)
+	if encConfigItemBase64 == "" {
+		log.Noticef("handleEdgeNodeConfigItem: ENClusterAPIConfig not configured, unpublishing")
+		// XXX only gcp enc cluster config is cleartext token
+		if config != nil && config.EncryptedClusterToken != "" {
+			ctx.pubEdgeNodeClusterConfig.Unpublish("global")
+		}
+		return
+	}
+
+	if config != nil { // XXX temp
+		log.Noticef("handleEdgeNodeConfigItem: we have config from controller, no need to use configitme")
+		return
+	}
+	encConfigItem, err := base64.StdEncoding.DecodeString(encConfigItemBase64)
+	if err != nil {
+		log.Errorf("handleEdgeNodeConfigItem: DecodeString failed %s", err)
+		return
+	}
+
+	var encApiConfig types.ENClusterAPIConfig
+	if err := json.Unmarshal(encConfigItem, &encApiConfig); err != nil {
+		log.Errorf("handleEdgeNodeConfigItem: Unmarshal failed %s", err)
+		return
+	}
+
+	ipAddr, ipNet, err := net.ParseCIDR(encApiConfig.ClusterIPPrefix)
+	if err != nil {
+		log.Errorf("handleEdgeNodeConfigItem: ParseCIDR failed %s", err)
+		return
+	}
+	ipNet.IP = ipAddr
+
+	clusterUUID, err := convertToUUIDandVersion(encApiConfig.ClusterID)
+	if err != nil {
+		log.Errorf("handleEdgeNodeConfigItem: convertToUUIDandVersion failed %s", err)
+		return
+	}
+
+	joinServerIP := net.ParseIP(encApiConfig.JoinServerIP)
+	var isJoinNode bool
+	// deduce the bootstrap node status from clusterIPPrefix and joinServerIP
+	if ipAddr.Equal(joinServerIP) { // deduce the bootstrap node status from
+		isJoinNode = true
+	}
+	encConfig := types.EdgeNodeClusterConfig{
+		ClusterName:           encApiConfig.ClusterName,
+		ClusterID:             clusterUUID,
+		ClusterInterface:      encApiConfig.ClusterInterface,
+		ClusterIPPrefix:       *ipNet,
+		IsWorkerNode:          encApiConfig.IsWorkerNode,
+		JoinServerIP:          joinServerIP,
+		BootstrapNode:         isJoinNode,
+		EncryptedClusterToken: encApiConfig.EncryptedClusterToken,
+	}
+	log.Noticef("handleEdgeNodeConfigItem: ENClusterAPIConfig %+v, %v", encApiConfig, encConfig)
+
+	ctx.pubEdgeNodeClusterConfig.Publish("global", encConfig)
+}
+
+func convertToUUIDandVersion(myuuid string) (types.UUIDandVersion, error) {
+	uuidObj, err := uuid.FromString(myuuid)
+	if err != nil {
+		return types.UUIDandVersion{}, err
+	}
+
+	uuidAndVersion := types.UUIDandVersion{
+		UUID:    uuidObj,
+		Version: "0", // Set the version as a string value
+	}
+
+	return uuidAndVersion, nil
 }
 
 func handleGlobalConfigDelete(ctxArg interface{}, key string,
@@ -2476,9 +2688,11 @@ func handleNodeAgentStatusImpl(ctxArg interface{}, key string,
 		status.UpdateInprogress, status.RebootReason,
 		status.BootReason.String())
 	updateInprogress := getconfigCtx.updateInprogress
+	drainInProgress := getconfigCtx.drainInProgress
 	ctx := getconfigCtx.zedagentCtx
 	ctx.remainingTestTime = status.RemainingTestTime
 	getconfigCtx.updateInprogress = status.UpdateInprogress
+	getconfigCtx.drainInProgress = status.DrainInProgress
 	ctx.rebootTime = status.RebootTime
 	ctx.rebootStack = status.RebootStack
 	ctx.rebootReason = status.RebootReason
@@ -2509,6 +2723,29 @@ func handleNodeAgentStatusImpl(ctxArg interface{}, key string,
 		log.Functionf("TestComplete and deferred poweroff")
 		ctx.poweroffCmdDeferred = false
 		infoStr := fmt.Sprintf("TestComplete and deferred Poweroff Cmd")
+		handleDeviceOperationCmd(ctx, infoStr, types.DeviceOperationPoweroff)
+	}
+	if ctx.rebootCmdDeferred &&
+		drainInProgress && !status.DrainInProgress {
+		log.Noticef("Drain complete and deferred Reboot Cmd")
+		log.Functionf("Drain complete check and deferred reboot Cmd")
+		ctx.rebootCmdDeferred = false
+		infoStr := fmt.Sprintf("Drain complete and deferred Reboot Cmd")
+		handleDeviceOperationCmd(ctx, infoStr, types.DeviceOperationReboot)
+	}
+	if ctx.shutdownCmdDeferred &&
+		drainInProgress && !status.DrainInProgress {
+		log.Noticef("Drain complete and deferred shutdown Cmd")
+		log.Functionf("Drain complete check and deferred shutdown Cmd")
+		ctx.shutdownCmdDeferred = false
+		infoStr := fmt.Sprintf("Drain complete and deferred shutdown Cmd")
+		handleDeviceOperationCmd(ctx, infoStr, types.DeviceOperationShutdown)
+	}
+	if ctx.poweroffCmdDeferred &&
+		drainInProgress && !status.DrainInProgress {
+		log.Functionf("Drain complete and deferred poweroff")
+		ctx.poweroffCmdDeferred = false
+		infoStr := fmt.Sprintf("Drain complete and deferred Poweroff Cmd")
 		handleDeviceOperationCmd(ctx, infoStr, types.DeviceOperationPoweroff)
 	}
 	if status.DeviceReboot {

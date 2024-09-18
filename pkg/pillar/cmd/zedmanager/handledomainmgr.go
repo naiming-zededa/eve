@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/lf-edge/eve/pkg/pillar/types"
+	uuid "github.com/satori/go.uuid"
 )
 
 // MaybeAddDomainConfig makes sure we have a DomainConfig
@@ -37,7 +38,12 @@ func MaybeAddDomainConfig(ctx *zedmanagerContext,
 	if ns != nil {
 		AppNum = ns.AppNum
 	}
-	effectiveActivate := effectiveActivateCurrentProfile(aiConfig, ctx.currentProfile)
+
+	isDNiDnode := false
+	if aiConfig.DesignatedNodeID != uuid.Nil && aiConfig.DesignatedNodeID == ctx.nodeUUID {
+		isDNiDnode = true
+	}
+	effectiveActivate := effectiveActivateCombined(aiConfig, ctx)
 	dc := types.DomainConfig{
 		UUIDandVersion:    aiConfig.UUIDandVersion,
 		DisplayName:       aiConfig.DisplayName,
@@ -51,6 +57,7 @@ func MaybeAddDomainConfig(ctx *zedmanagerContext,
 		MetaDataType:      aiConfig.MetaDataType,
 		Service:           aiConfig.Service,
 		CloudInitVersion:  aiConfig.CloudInitVersion,
+		IsDNidNode:        isDNiDnode,
 	}
 
 	dc.DiskConfigList = make([]types.DiskConfig, 0, len(aiStatus.VolumeRefStatusList))
@@ -84,9 +91,17 @@ func MaybeAddDomainConfig(ctx *zedmanagerContext,
 		// For NOHYPER type virtualization mode pass the KubeImageName to domainmgr
 		// pods will be launched using that KubeImageName in kubevirt eve
 		// Reference name can be empty for non-kubevirt eve and KubeImageName will be ignored in such cases.
-		if aiConfig.FixedResources.VirtualizationMode == types.NOHYPER {
+		if aiConfig.FixedResources.VirtualizationMode == types.NOHYPER && vrs.IsContainer() {
+			referencename := vrs.ReferenceName
 			dc.VirtualizationMode = types.NOHYPER
-			dc.KubeImageName = vrs.ReferenceName
+			if referencename == "" {
+				vrs2 := lookupVolumeRefStatus(ctx, vrc.Key())
+				if vrs2 != nil && vrs2.ReferenceName != "" {
+					referencename = vrs2.ReferenceName
+					log.Noticef("MaybeAddDomainConfig: got referencenename %s", referencename)
+				}
+			}
+			dc.KubeImageName = referencename
 		}
 	}
 	// let's fill some of the default values (arguably we may want controller

@@ -28,6 +28,10 @@ type VolumeConfig struct {
 	HasNoAppReferences      bool
 	Target                  zconfig.Target
 	CustomMeta              string
+	// Cluster Designated Node Id
+	DesignatedNodeID uuid.UUID
+	// Volume is for nohyper container
+	IsNoHyper bool
 }
 
 // Key is volume UUID which will be unique
@@ -131,6 +135,9 @@ type VolumeStatus struct {
 	WWN                     string
 	Target                  zconfig.Target
 	CustomMeta              string
+
+	// Volume is for nohyper container
+	IsNoHyper bool
 
 	ErrorAndTimeWithSource
 }

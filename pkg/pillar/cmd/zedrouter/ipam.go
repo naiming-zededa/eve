@@ -45,6 +45,21 @@ func (z *zedrouter) generateBridgeMAC(brNum int) net.HardwareAddr {
 func (z *zedrouter) generateAppMac(adapterNum int, appStatus *types.AppNetworkStatus,
 	netInstStatus *types.NetworkInstanceStatus) net.HardwareAddr {
 	h := sha256.New()
+
+	if z.withKubeNetworking {
+		h.Write(appStatus.UUIDandVersion.UUID[:])
+		h.Write(netInstStatus.UUIDandVersion.UUID[:])
+		nums := make([]byte, 1)
+		nums[0] = byte(adapterNum)
+		h.Write(nums)
+		hash := h.Sum(nil)
+		mac := net.HardwareAddr{hash[0], hash[1], hash[2], hash[3], hash[4], hash[5]}
+		mac[0] &= ^byte(1)
+		mac[0] |= byte(1 << 1)
+		z.log.Noticef("generateAppMac: mac %s, adapter %d", mac, adapterNum) // XXX
+		return mac
+	}
+
 	h.Write(appStatus.UUIDandVersion.UUID[:])
 	h.Write(netInstStatus.UUIDandVersion.UUID[:])
 	nums := make([]byte, 2)

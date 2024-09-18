@@ -6,6 +6,7 @@
 package kubeapi
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/lf-edge/eve/pkg/pillar/base"
@@ -14,7 +15,7 @@ import (
 
 // WaitForKubernetes in this file is just stub for non-kubevirt hypervisors.
 func WaitForKubernetes(
-	string, *pubsub.PubSub, *time.Ticker) error {
+	string, *pubsub.PubSub, *pubsub.PubSub, *time.Ticker) error {
 	panic("WaitForKubernetes is not built")
 }
 
@@ -26,4 +27,16 @@ func CleanupStaleVMI() (int, error) {
 // GetPVCList in this file is just stub for non-kubevirt hypervisors.
 func GetPVCList(*base.LogObject) ([]string, error) {
 	panic("GetPVCList is not built")
+}
+
+// RequestNodeDrain is a stub for non-kubevirt builds
+func RequestNodeDrain(pubsub.Publication) error {
+	// Nothing to do here, just noop
+	return fmt.Errorf("nokube requested drain, should not get here")
+}
+
+// GetNodeDrainStatus is a stub for non-kubevirt builds
+func GetNodeDrainStatus(pubsub.Subscription) *NodeDrainStatus {
+	// No need to query for inprogress operations, just a noop
+	return &NodeDrainStatus{Status: NOTSUPPORTED}
 }

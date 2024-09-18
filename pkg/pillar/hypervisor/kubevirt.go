@@ -28,6 +28,7 @@ import (
 	netattdefv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/sirupsen/logrus"
+	appsv1 "k8s.io/api/apps/v1"
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -48,12 +49,22 @@ const (
 	waitForPodCheckTime    = 15 // Check every 15 seconds, don't wait for too long to cause watchdog
 )
 
+type MetaDataType int
+
+// Constants representing different resource types.
+const (
+	IsMetaVmi MetaDataType = iota
+	IsMetaReplicaSet
+	IsMetaPod
+)
+
 // VM instance meta data structure.
 type vmiMetaData struct {
 	vmi      *v1.VirtualMachineInstance // Handle to the VM instance
 	pod      *k8sv1.Pod                 // Handle to the pod container
+	replica  *appsv1.ReplicaSet         // Handle to the replicaSetof pod
 	domainID int                        // DomainID understood by domainmgr in EVE
-	isPod    bool                       // switch on is Pod or is VMI
+	mtype    MetaDataType               // switch on is ReplicaSet, Pod or is VMI
 	name     string                     // Display-Name(all lower case) + first 5 bytes of domainName
 	cputotal uint64                     // total CPU in NS so far
 	maxmem   uint32                     // total Max memory usage in bytes so far
@@ -67,12 +78,14 @@ type kubevirtContext struct {
 	virthandlerIPAddr string
 	prevDomainMetric  map[string]types.DomainMetric
 	kubeConfig        *rest.Config
+	nodeNameMap       map[string]string // to pass nodeName between methods without pointer receiver
 }
 
 // Use few states  for now
 var stateMap = map[string]types.SwState{
 	"Paused":     types.PAUSED,
 	"Running":    types.RUNNING,
+	"NonLocal":   types.RUNNING,
 	"shutdown":   types.HALTING,
 	"suspended":  types.PAUSED,
 	"Pending":    types.PENDING,
@@ -132,6 +145,7 @@ func newKubevirt() Hypervisor {
 			devicemodel:      "virt",
 			vmiList:          make(map[string]*vmiMetaData),
 			prevDomainMetric: make(map[string]types.DomainMetric),
+			nodeNameMap:      make(map[string]string),
 		}
 	case "amd64":
 		return kubevirtContext{
@@ -139,6 +153,7 @@ func newKubevirt() Hypervisor {
 			devicemodel:      "pc-q35-3.1",
 			vmiList:          make(map[string]*vmiMetaData),
 			prevDomainMetric: make(map[string]types.DomainMetric),
+			nodeNameMap:      make(map[string]string),
 		}
 	}
 	return nil
@@ -185,16 +200,18 @@ func (ctx kubevirtContext) Task(status *types.DomainStatus) types.Task {
 
 // Use eve DomainConfig and DomainStatus and generate k3s VMI config or a Pod config
 func (ctx kubevirtContext) Setup(status types.DomainStatus, config types.DomainConfig,
-	aa *types.AssignableAdapters, globalConfig *types.ConfigItemValueMap, file *os.File) error {
+	aa *types.AssignableAdapters, nodeName string, globalConfig *types.ConfigItemValueMap, file *os.File) error {
 
 	diskStatusList := status.DiskStatusList
 	domainName := status.DomainName
 
 	logrus.Debugf("Setup called for Domain: %s, vmmode %v", domainName, config.VirtualizationMode)
 
+	getMyNodeUUID(&ctx, nodeName)
+
 	if config.VirtualizationMode == types.NOHYPER {
-		if err := ctx.CreatePodConfig(domainName, config, status, diskStatusList, aa, file); err != nil {
-			return logError("failed to build kube pod config: %v", err)
+		if err := ctx.CreateReplicaSetConfig(domainName, config, status, diskStatusList, aa, file); err != nil {
+			return logError("failed to build kube replicaset config: %v", err)
 		}
 	} else {
 		// Take eve domain config and convert to VMI config
@@ -226,6 +243,10 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 		return err
 	}
 
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		return logError("Failed to get nodeName")
+	}
 	kubeName := base.GetAppKubeName(config.DisplayName, config.UUIDandVersion.UUID)
 	// Get a VirtualMachineInstance object and populate the values from DomainConfig
 	vmi := v1.NewVMIReferenceFromNameWithNS(kubeapi.EVEKubeNameSpace, kubeName)
@@ -409,6 +430,27 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 		}
 	}
 
+	// Set the affinity to this node the VMI is preferred to run on
+	affinity := &k8sv1.Affinity{
+		NodeAffinity: &k8sv1.NodeAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []k8sv1.PreferredSchedulingTerm{
+				{
+					Preference: k8sv1.NodeSelectorTerm{
+						MatchExpressions: []k8sv1.NodeSelectorRequirement{
+							{
+								Key:      "kubernetes.io/hostname",
+								Operator: "In",
+								Values:   []string{nodeName},
+							},
+						},
+					},
+					Weight: 100,
+				},
+			},
+		},
+	}
+
+	vmi.Spec.Affinity = affinity
 	vmi.Labels = make(map[string]string)
 	vmi.Labels[eveLabelKey] = domainName
 
@@ -439,12 +481,13 @@ func (ctx kubevirtContext) Start(domainName string) error {
 	}
 	kubeconfig := ctx.kubeConfig
 
+	logrus.Infof("Starting Kubevirt domain %s, devicename nodename %d", domainName, len(ctx.nodeNameMap))
 	vmis, ok := ctx.vmiList[domainName]
 	if !ok {
 		return logError("start domain %s failed to get vmlist", domainName)
 	}
-	if vmis.isPod {
-		err := StartPodContainer(kubeconfig, ctx.vmiList[domainName].pod)
+	if vmis.mtype == IsMetaReplicaSet {
+		err := StartReplicaSetContiner(ctx, ctx.vmiList[domainName].replica)
 		return err
 	}
 
@@ -503,8 +546,8 @@ func (ctx kubevirtContext) Stop(domainName string, force bool) error {
 	if !ok {
 		return logError("domain %s failed to get vmlist", domainName)
 	}
-	if vmis.isPod {
-		err := StopPodContainer(kubeconfig, vmis.name)
+	if vmis.mtype == IsMetaReplicaSet {
+		err := StopReplicaSetContainer(kubeconfig, vmis.name)
 		return err
 	} else {
 		virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
@@ -540,8 +583,8 @@ func (ctx kubevirtContext) Delete(domainName string) (result error) {
 	if !ok {
 		return logError("delete domain %s failed to get vmlist", domainName)
 	}
-	if vmis.isPod {
-		err := StopPodContainer(kubeconfig, vmis.name)
+	if vmis.mtype == IsMetaReplicaSet {
+		err := StopReplicaSetContainer(kubeconfig, vmis.name)
 		return err
 	} else {
 		virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
@@ -593,8 +636,8 @@ func (ctx kubevirtContext) Info(domainName string) (int, types.SwState, error) {
 	if !ok {
 		return 0, types.HALTED, logError("info domain %s failed to get vmlist", domainName)
 	}
-	if vmis.isPod {
-		res, err = InfoPodContainer(ctx.kubeConfig, vmis.name)
+	if vmis.mtype == IsMetaReplicaSet {
+		res, err = InfoReplicaSetContainer(ctx, vmis.name)
 	} else {
 		res, err = getVMIStatus(vmis.name)
 	}
@@ -623,7 +666,11 @@ func (ctx kubevirtContext) Cleanup(domainName string) error {
 	if !ok {
 		return logError("cleanup domain %s failed to get vmlist", domainName)
 	}
-	if vmis.isPod {
+	if vmis.mtype == IsMetaReplicaSet {
+		_, err = InfoReplicaSetContainer(ctx, vmis.name)
+		if err == nil {
+			err = ctx.Delete(domainName)
+		}
 	} else {
 		err = waitForVMI(vmis.name, false)
 	}
@@ -733,7 +780,8 @@ func (ctx kubevirtContext) GetDomsCPUMem() (map[string]types.DomainMetric, error
 	url := "https://" + virtIP + ":8443/metrics"
 	httpClient := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+			DisableKeepAlives: true,
 		},
 	}
 
@@ -847,10 +895,8 @@ func (ctx kubevirtContext) GetDomsCPUMem() (map[string]types.DomainMetric, error
 	}
 
 	hasEmptyRes := len(ctx.vmiList) - len(res)
-	if hasEmptyRes > 0 {
-		// check and get the kubernetes pod's metrics
-		checkPodMetrics(ctx, res, hasEmptyRes)
-	}
+	checkReplicaSetMetrics(ctx, res, hasEmptyRes)
+
 	logrus.Debugf("GetDomsCPUMem: %d VMs: %+v, podnum %d", len(ctx.vmiList), res, hasEmptyRes)
 	return res, nil
 }
@@ -914,16 +960,22 @@ func assignToInt64(parsedValue interface{}) int64 {
 	return intValue
 }
 
-func (ctx kubevirtContext) CreatePodConfig(domainName string, config types.DomainConfig, status types.DomainStatus,
+func (ctx kubevirtContext) CreateReplicaSetConfig(domainName string, config types.DomainConfig, status types.DomainStatus,
 	diskStatusList []types.DiskStatus, aa *types.AssignableAdapters, file *os.File) error {
 
 	kubeName := base.GetAppKubeName(config.DisplayName, config.UUIDandVersion.UUID)
 	if config.KubeImageName == "" {
 		err := fmt.Errorf("domain config kube image name empty")
-		logrus.Errorf("CreatePodConfig: %v", err)
+		logrus.Errorf("CreateReplicaSetConfig: %v", err)
 		return err
 	}
 	ociName := config.KubeImageName
+
+	logrus.Infof("CreateReplicaSetConfig: domainName %s, kubeName %s, nodeName %d", domainName, kubeName, len(ctx.nodeNameMap))
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		return logError("Failed to get nodeName")
+	}
 
 	var netSelections []netattdefv1.NetworkSelectionElement
 	for _, vif := range config.VifList {
@@ -945,7 +997,7 @@ func (ctx kubevirtContext) CreatePodConfig(domainName string, config types.Domai
 			// Check if the NAD is created in the cluster, return error if not
 			err := kubeapi.CheckEtherPassThroughNAD(nadName)
 			if err != nil {
-				logrus.Errorf("CreatePodConfig: check ether NAD failed, %v", err)
+				logrus.Errorf("CreateReplicaSetConfig: check ether NAD failed, %v", err)
 				return err
 			}
 		}
@@ -956,68 +1008,411 @@ func (ctx kubevirtContext) CreatePodConfig(domainName string, config types.Domai
 		annotations = map[string]string{
 			"k8s.v1.cni.cncf.io/networks": encodeSelections(netSelections),
 		}
-		logrus.Infof("CreatePodConfig: annotations %+v", annotations)
+		logrus.Infof("CreateReplicaSetConfig: annotations %+v", annotations)
 	} else {
-		err := fmt.Errorf("CreatePodConfig: no network selections, exit")
+		err := fmt.Errorf("CreateReplicaSetConfig: no network selections, exit")
 		return err
 	}
 
-	vcpus := strconv.Itoa(config.VCpus*1000) + "m"
+	//vcpus := strconv.Itoa(config.VCpus*1000) + "m"
 	// FixedResources.Memory is in Kbytes
-	memoryLimit := strconv.Itoa(config.Memory * 1000)
-	memoryRequest := strconv.Itoa(config.Memory * 1000)
+	//memoryLimit := "100Mi" // convertToKubernetesFormat(config.Memory * 1000)
+	//memoryRequest := memoryLimit
 
-	pod := &k8sv1.Pod{
+	var replicaNum int32
+	var tolerateSec int64
+	replicaNum = 1
+	//tolerateSec = 420 // try 7 minutes
+	tolerateSec = 30 // try half a minute to see
+	repNum := &replicaNum
+	tolSec := &tolerateSec
+	replicaSet := &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        kubeName,
-			Namespace:   kubeapi.EVEKubeNameSpace,
-			Annotations: annotations,
+			Name:      kubeName,
+			Namespace: kubeapi.EVEKubeNameSpace,
 		},
-		Spec: k8sv1.PodSpec{
-			Containers: []k8sv1.Container{
-				{
-					Name:            kubeName,
-					Image:           ociName,
-					ImagePullPolicy: k8sv1.PullNever,
-					SecurityContext: &k8sv1.SecurityContext{
-						Privileged: &[]bool{true}[0],
+		Spec: appsv1.ReplicaSetSpec{
+			Replicas: repNum,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app": kubeName,
+				},
+			},
+			Template: k8sv1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app": kubeName,
 					},
-					Resources: k8sv1.ResourceRequirements{
-						Limits: k8sv1.ResourceList{
-							k8sv1.ResourceCPU:    resource.MustParse(vcpus),
-							k8sv1.ResourceMemory: resource.MustParse(memoryLimit),
+					Annotations: annotations,
+				},
+				Spec: k8sv1.PodSpec{
+					Tolerations: []k8sv1.Toleration{
+						{
+							Key:               "node.kubernetes.io/unreachable",
+							Operator:          "Exists",
+							Effect:            "NoExecute",
+							TolerationSeconds: tolSec,
 						},
-						Requests: k8sv1.ResourceList{
-							k8sv1.ResourceCPU:    resource.MustParse(vcpus),
-							k8sv1.ResourceMemory: resource.MustParse(memoryRequest),
+						{
+							Key:               "node.kubernetes.io/not-ready",
+							Operator:          "Exists",
+							Effect:            "NoExecute",
+							TolerationSeconds: tolSec,
 						},
+					},
+					Affinity: &k8sv1.Affinity{
+						NodeAffinity: &k8sv1.NodeAffinity{
+							PreferredDuringSchedulingIgnoredDuringExecution: []k8sv1.PreferredSchedulingTerm{
+								{
+									Preference: k8sv1.NodeSelectorTerm{
+										MatchExpressions: []k8sv1.NodeSelectorRequirement{
+											{
+												Key:      "kubernetes.io/hostname",
+												Operator: "In",
+												Values:   []string{nodeName},
+											},
+										},
+									},
+									Weight: 100,
+								},
+							},
+						},
+					},
+					Containers: []k8sv1.Container{
+						{
+							Name:            kubeName,
+							Image:           ociName,
+							ImagePullPolicy: k8sv1.PullNever,
+							SecurityContext: &k8sv1.SecurityContext{
+								Privileged: &[]bool{true}[0],
+							},
+						},
+					},
+					RestartPolicy: k8sv1.RestartPolicyAlways,
+					DNSConfig: &k8sv1.PodDNSConfig{
+						Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // XXX, temp, Add your desired DNS servers here
 					},
 				},
 			},
-			DNSConfig: &k8sv1.PodDNSConfig{
-				Nameservers: []string{"8.8.8.8", "1.1.1.1"}, // XXX, temp, Add your desired DNS servers here
-			},
 		},
 	}
-	pod.Labels = make(map[string]string)
-	pod.Labels[eveLabelKey] = domainName
-	logrus.Infof("CreatePodConfig: pod setup %+v", pod)
+	logrus.Infof("CreateReplicaSetConfig: replicaset %+v", replicaSet)
+
+	// Add pod non-image volume disks
+	if len(diskStatusList) > 1 {
+		leng := len(diskStatusList) - 1
+		for _, ds := range diskStatusList[1:] {
+			if ds.Devtype == "9P" { // skip 9P volume type
+				if leng > 0 {
+					leng--
+				} else {
+					break
+				}
+			}
+		}
+		if leng > 0 {
+			volumes := make([]k8sv1.Volume, leng)
+			mounts := make([]k8sv1.VolumeMount, leng)
+
+			i := 0
+			for _, ds := range diskStatusList[1:] {
+				if ds.Devtype == "9P" {
+					continue
+				}
+				voldispName := strings.ToLower(ds.DisplayName)
+				//voldevs[i] = k8sv1.VolumeDevice{
+				//	Name:       voldispName,
+				//	DevicePath: ds.MountDir,
+				//}
+				mounts[i] = k8sv1.VolumeMount{
+					Name:      voldispName,
+					MountPath: ds.MountDir,
+				}
+
+				volumes[i].Name = voldispName
+				volumes[i].VolumeSource = k8sv1.VolumeSource{
+					PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+						ClaimName: strings.ToLower(ds.DisplayName),
+						//ClaimName: ds.VolumeKey,
+					},
+				}
+				logrus.Infof("CreateReplicaSetConfig:(%d) mount[i] %+v, volumes[i] %+v", i, mounts[i], volumes[i])
+				i++
+			}
+			replicaSet.Spec.Template.Spec.Containers[0].VolumeMounts = mounts
+			replicaSet.Spec.Template.Spec.Volumes = volumes
+		}
+	}
+	logrus.Infof("CreateReplicaSetConfig: replicaset setup %+v", replicaSet)
 
 	// Now we have VirtualMachine Instance object, save it to config file for debug purposes
 	// and save it in context which will be used to start VM in Start() call
 	meta := vmiMetaData{
-		pod:      pod,
-		isPod:    true,
+		replica:  replicaSet,
+		mtype:    IsMetaReplicaSet,
 		name:     kubeName,
 		domainID: int(rand.Uint32()),
 	}
 	ctx.vmiList[domainName] = &meta
 
-	podStr := fmt.Sprintf("%+v", pod)
+	repStr := fmt.Sprintf("%+v", replicaSet)
 
 	// write to config file
-	file.WriteString(podStr)
+	file.WriteString(repStr)
 
+	return nil
+}
+
+func StartReplicaSetContiner(ctx kubevirtContext, rep *appsv1.ReplicaSet) error {
+	err := getConfig(&ctx)
+	if err != nil {
+		return err
+	}
+	clientset, err := kubernetes.NewForConfig(ctx.kubeConfig)
+	if err != nil {
+		logrus.Errorf("StartReplicaSetContiner: can't get clientset %v", err)
+		return err
+	}
+
+	opStr := "created"
+	result, err := clientset.AppsV1().ReplicaSets(kubeapi.EVEKubeNameSpace).Create(context.TODO(), rep, metav1.CreateOptions{})
+	if err != nil {
+		if !errors.IsAlreadyExists(err) {
+			logrus.Errorf("StartReplicaSetContiner: replicaset create failed: %v", err)
+			return err
+		} else {
+			opStr = "already exists"
+		}
+	}
+
+	logrus.Infof("StartReplicaSetContiner: Rep %s %s, result %v", rep.ObjectMeta.Name, opStr, result)
+
+	err = checkForReplicaSet(ctx, rep.ObjectMeta.Name)
+	if err != nil {
+		logrus.Errorf("StartReplicaSetContiner: check for pod status error %v", err)
+		return err
+	}
+	logrus.Infof("StartReplicaSetContiner: Pod %s running", rep.ObjectMeta.Name)
+	return nil
+}
+
+func checkForReplicaSet(ctx kubevirtContext, repName string) error {
+	var i int
+	var status string
+	var err error
+	for {
+		i++
+		logrus.Infof("checkForReplicaSet: check(%d) wait 15 sec, %v", i, repName)
+		time.Sleep(15 * time.Second)
+
+		status, err = InfoReplicaSetContainer(ctx, repName)
+		if err != nil {
+			logrus.Infof("checkForReplicaSet: repName %s, %v", repName, err)
+		} else {
+			if status == "Running" || status == "NonLocal" {
+				logrus.Infof("checkForReplicaSet: (%d) status %s, good", i, status)
+				return nil
+			} else {
+				logrus.Errorf("checkForReplicaSet(%d): get podName info status %v (not running)", i, status)
+			}
+		}
+		if i > waitForPodCheckCounter {
+			break
+		}
+	}
+
+	return fmt.Errorf("checkForReplicaSet: timed out, statuus %s, err %v", status, err)
+}
+
+func InfoReplicaSetContainer(ctx kubevirtContext, repName string) (string, error) {
+
+	err := getConfig(&ctx)
+	if err != nil {
+		return "", err
+	}
+	podclientset, err := kubernetes.NewForConfig(ctx.kubeConfig)
+	if err != nil {
+		return "", logError("InfoReplicaSetContainer: couldn't get the pod Config: %v", err)
+	}
+
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		return "", logError("Failed to get nodeName")
+	}
+	pods, err := podclientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s", repName),
+	})
+	if err != nil {
+		return "", logError("InfoReplicaSetContainer: couldn't get the pods: %v", err)
+	}
+
+	var foundNonlocal bool
+	for _, pod := range pods.Items {
+		if nodeName != pod.Spec.NodeName {
+			foundNonlocal = true
+			logrus.Infof("InfoReplicaSetContainer: rep %s, nodeName %v differ w/ hostname", repName, pod.Spec.NodeName)
+			continue
+		}
+
+		var res string
+		// https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/
+		switch pod.Status.Phase {
+		case k8sv1.PodPending:
+			res = "Pending"
+		case k8sv1.PodRunning:
+			res = "Running"
+		case k8sv1.PodSucceeded:
+			res = "Running"
+		case k8sv1.PodFailed:
+			res = "Failed"
+		case k8sv1.PodUnknown:
+			res = "Scheduling"
+		default:
+			res = "Scheduling"
+		}
+		logrus.Infof("InfoReplicaSetContainer: rep %s, nodeName %v, status %s", pod.ObjectMeta.Name, pod.Spec.NodeName, res)
+		if pod.Status.Phase != k8sv1.PodRunning {
+			continue
+		}
+
+		return res, nil
+	}
+	if foundNonlocal {
+		return "NonLocal", nil
+	}
+	return "", logError("InfoReplicaSetContainer: pod not ready")
+}
+
+func checkReplicaSetMetrics(ctx kubevirtContext, res map[string]types.DomainMetric, emptySlot int) {
+
+	err := getConfig(&ctx)
+	if err != nil {
+		return
+	}
+	kubeconfig := ctx.kubeConfig
+	podclientset, err := kubernetes.NewForConfig(kubeconfig)
+	if err != nil {
+		logrus.Errorf("checkReplicaSetMetrics: can not get pod client %v", err)
+		return
+	}
+
+	clientset, err := metricsv.NewForConfig(kubeconfig)
+	if err != nil {
+		logrus.Errorf("checkReplicaSetMetrics: can't get clientset %v", err)
+		return
+	}
+
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		logrus.Errorf("checkReplicaSetMetrics: can't get node name") // XXX may remove
+		return
+	}
+
+	count := 0
+	for n, vmis := range ctx.vmiList {
+		if vmis.mtype != IsMetaReplicaSet {
+			continue
+		}
+		count++
+		repName := vmis.name
+		pods, err := podclientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("app=%s", repName),
+		})
+		if err != nil {
+			logrus.Errorf("checkReplicaSetMetrics: can't get pod %v", err)
+			continue
+		}
+
+		for _, pod := range pods.Items {
+			dm := getPodMetrics(clientset, pod, vmis, nodeName, res)
+			if dm != nil {
+				if count <= emptySlot {
+					res[n] = *dm
+				}
+				logrus.Infof("checkReplicaSetMetrics: dm %+v, res %v", dm, res)
+
+				ctx.vmiList[n] = vmis // update for the last seen metrics
+			}
+		}
+	}
+
+	logrus.Infof("checkReplicaSetMetrics: done with vmiList")
+}
+
+func getPodMetrics(clientset *metricsv.Clientset, pod k8sv1.Pod, vmis *vmiMetaData,
+	nodeName string, res map[string]types.DomainMetric) *types.DomainMetric {
+	if pod.Status.Phase != k8sv1.PodRunning {
+		return nil
+	}
+	if nodeName != pod.Spec.NodeName { // cluster, pod from other nodes
+		return nil
+	}
+	podName := pod.ObjectMeta.Name
+	memoryLimits := pod.Spec.Containers[0].Resources.Limits.Memory()
+
+	metrics, err := clientset.MetricsV1beta1().PodMetricses(kubeapi.EVEKubeNameSpace).Get(context.TODO(), podName, metav1.GetOptions{})
+	if err != nil {
+		logrus.Errorf("checkReplicaSetMetrics: get pod metrics error %v", err)
+		return nil
+	}
+
+	cpuTotalNs := metrics.Containers[0].Usage[k8sv1.ResourceCPU]
+	cpuTotalNsAsFloat64 := cpuTotalNs.AsApproximateFloat64() * float64(time.Second) // get nanoseconds
+	totalCpu := uint64(cpuTotalNsAsFloat64)
+
+	//allocatedMemory := metrics.Containers[0].Usage[k8sv1.ResourceMemory]
+	usedMemory := metrics.Containers[0].Usage[k8sv1.ResourceMemory]
+	maxMemory := uint32(usedMemory.Value())
+	if vmis != nil {
+		if vmis.maxmem < maxMemory {
+			vmis.maxmem = maxMemory
+		} else {
+			maxMemory = vmis.maxmem
+		}
+	}
+
+	available := uint32(memoryLimits.Value())
+	if uint32(usedMemory.Value()) < available {
+		available = available - uint32(usedMemory.Value())
+	}
+	usedMemoryPercent := calculateMemoryUsagePercent(usedMemory.Value(), memoryLimits.Value())
+	BytesInMegabyte := uint32(1024 * 1024)
+
+	var realCPUTotal uint64
+	if vmis != nil {
+		realCPUTotal = vmis.cputotal + totalCpu
+		vmis.cputotal = realCPUTotal
+	}
+	dm := &types.DomainMetric{
+		CPUTotalNs:        realCPUTotal,
+		CPUScaled:         1,
+		AllocatedMB:       uint32(memoryLimits.Value()) / BytesInMegabyte,
+		UsedMemory:        uint32(usedMemory.Value()) / BytesInMegabyte,
+		MaxUsedMemory:     maxMemory / BytesInMegabyte,
+		AvailableMemory:   available / BytesInMegabyte,
+		UsedMemoryPercent: usedMemoryPercent,
+		NodeName:          pod.Spec.NodeName,
+	}
+	logrus.Infof("getPodMetrics: dm %+v, res %v", dm, res)
+	return dm
+}
+
+func StopReplicaSetContainer(kubeconfig *rest.Config, repName string) error {
+
+	clientset, err := kubernetes.NewForConfig(kubeconfig)
+	if err != nil {
+		logrus.Errorf("StopReplicaSetContainer: can't get clientset %v", err)
+		return err
+	}
+
+	err = clientset.AppsV1().ReplicaSets(kubeapi.EVEKubeNameSpace).Delete(context.TODO(), repName, metav1.DeleteOptions{})
+	if err != nil {
+		// Handle error
+		logrus.Errorf("StopReplicaSetContainer: deleting pod: %v", err)
+		return err
+	}
+
+	logrus.Infof("StopReplicaSetContainer: Pod %s deleted", repName)
 	return nil
 }
 
@@ -1030,98 +1425,32 @@ func encodeSelections(selections []netattdefv1.NetworkSelectionElement) string {
 	return string(bytes)
 }
 
-// StartPodContainer :  Starts container as kubernetes pod
-func StartPodContainer(kubeconfig *rest.Config, pod *k8sv1.Pod) error {
-
-	clientset, err := kubernetes.NewForConfig(kubeconfig)
-	if err != nil {
-		logrus.Errorf("StartPodContainer: can't get clientset %v", err)
-		return err
-	}
-
-	opStr := "created"
-	_, err = clientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).Create(context.TODO(), pod, metav1.CreateOptions{})
-	if err != nil {
-		if !errors.IsAlreadyExists(err) {
-			// TODO: update
-			logrus.Errorf("StartPodContainer: pod create filed: %v", err)
-			return err
-		} else {
-			opStr = "already exists"
-		}
-	}
-
-	logrus.Infof("StartPodContainer: Pod %s %s with nad %+v", pod.ObjectMeta.Name, opStr, pod.Annotations)
-
-	err = checkForPod(kubeconfig, pod.ObjectMeta.Name)
-	if err != nil {
-		logrus.Errorf("StartPodContainer: check for pod status error %v", err)
-		return err
-	}
-	logrus.Infof("StartPodContainer: Pod %s running", pod.ObjectMeta.Name)
-	return nil
-}
-
-func checkForPod(kubeconfig *rest.Config, podName string) error {
-	var i int
-	var status string
-	var err error
-	// wait for pod to be in running state, sometimes can take long, but we only wait for
-	// about a minute in order not to cause watchdog action
-	for {
-		i++
-		logrus.Infof("checkForPod: check(%d) wait 15 sec, %v", i, podName)
-		time.Sleep(waitForPodCheckTime * time.Second)
-
-		status, err = InfoPodContainer(kubeconfig, podName)
-		if err != nil {
-			logrus.Infof("checkForPod: podName %s, %v", podName, err)
-		} else {
-			if status == "Running" {
-				return nil
-			} else {
-				logrus.Errorf("checkForPod: get podName info status %v (not running)", status)
-			}
-		}
-		if i > waitForPodCheckCounter {
-			break
-		}
-	}
-
-	return fmt.Errorf("checkForPod: timed out, statuus %s, err %v", status, err)
-}
-
-// StopPodContainer : Stops the running kubernetes pod
-func StopPodContainer(kubeconfig *rest.Config, podName string) error {
-
-	clientset, err := kubernetes.NewForConfig(kubeconfig)
-	if err != nil {
-		logrus.Errorf("StopPodContainer: can't get clientset %v", err)
-		return err
-	}
-
-	err = clientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).Delete(context.TODO(), podName, metav1.DeleteOptions{})
-	if err != nil {
-		// Handle error
-		logrus.Errorf("StopPodContainer: deleting pod: %v", err)
-		return err
-	}
-
-	logrus.Infof("StopPodContainer: Pod %s deleted", podName)
-	return nil
-}
-
 // InfoPodContainer : Get the pod information
-func InfoPodContainer(kubeconfig *rest.Config, podName string) (string, error) {
-
-	podclientset, err := kubernetes.NewForConfig(kubeconfig)
+func InfoPodContainer(ctx kubevirtContext, podName string) (string, error) {
+	err := getConfig(&ctx)
+	if err != nil {
+		return "", err
+	}
+	podclientset, err := kubernetes.NewForConfig(ctx.kubeConfig)
 	if err != nil {
 		return "", logError("InfoPodContainer: couldn't get the pod Config: %v", err)
+	}
+
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		return "", logError("Failed to get nodeName")
 	}
 
 	pod, err := podclientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
 		return "", logError("InfoPodContainer: couldn't get the pod: %v", err)
+	}
+
+	if nodeName != pod.Spec.NodeName {
+		logrus.Infof("InfoPodContainer: pod %s, nodeName %v differ w/ hostname", podName, pod.Spec.NodeName)
+		return "", nil
+	} else {
+		logrus.Infof("InfoPodContainer: pod %s, nodeName %v, matches the hostname uuid", podName, pod.Spec.NodeName)
 	}
 
 	var res string
@@ -1140,7 +1469,7 @@ func InfoPodContainer(kubeconfig *rest.Config, podName string) (string, error) {
 	default:
 		res = "Scheduling"
 	}
-	logrus.Infof("InfoPodContainer: pod %s, status %s", podName, res)
+	logrus.Infof("InfoPodContainer: pod %s, nodeName %v, status %s", podName, pod.Spec.NodeName, res)
 
 	return res, nil
 }
@@ -1164,9 +1493,15 @@ func checkPodMetrics(ctx kubevirtContext, res map[string]types.DomainMetric, emp
 		return
 	}
 
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		logrus.Errorf("checkPodMetrics: can't get node name") // XXX may remove
+		return
+	}
+
 	count := 0
 	for n, vmis := range ctx.vmiList {
-		if !vmis.isPod {
+		if vmis.mtype != IsMetaPod {
 			continue
 		}
 		count++
@@ -1181,6 +1516,10 @@ func checkPodMetrics(ctx kubevirtContext, res map[string]types.DomainMetric, emp
 		metrics, err := clientset.MetricsV1beta1().PodMetricses(kubeapi.EVEKubeNameSpace).Get(context.TODO(), podName, metav1.GetOptions{})
 		if err != nil {
 			logrus.Errorf("checkPodMetrics: get pod metrics error %v", err)
+			continue
+		}
+
+		if nodeName != pod.Spec.NodeName { // cluster, pod from other nodes
 			continue
 		}
 
@@ -1214,6 +1553,7 @@ func checkPodMetrics(ctx kubevirtContext, res map[string]types.DomainMetric, emp
 			MaxUsedMemory:     maxMemory / BytesInMegabyte,
 			AvailableMemory:   available / BytesInMegabyte,
 			UsedMemoryPercent: usedMemoryPercent,
+			NodeName:          pod.Spec.NodeName,
 		}
 		if count <= emptySlot {
 			res[n] = dm
@@ -1372,4 +1712,10 @@ func (ctx kubevirtContext) VirtualTPMTerminate(domainName string) error {
 
 func (ctx kubevirtContext) VirtualTPMTeardown(domainName string) error {
 	return fmt.Errorf("not implemented")
+}
+
+func getMyNodeUUID(ctx *kubevirtContext, nodeName string) {
+	if len(ctx.nodeNameMap) == 0 {
+		ctx.nodeNameMap["nodename"] = nodeName
+	}
 }

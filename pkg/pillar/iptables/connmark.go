@@ -65,6 +65,26 @@ var ControlProtocolMarkingIDMap = map[string]uint32{
 	"kube_svc": 14,
 	// Traffic directly forwarded between Kubernetes pods (not via services).
 	"kube_pod": 15,
+	// hack, for kubernetes api-server
+	"in_k3s": 16,
+	// hack, for kube Etcd
+	"in_etcd": 17,
+	// hack, for flannel VxLan
+	"in_flannel": 18,
+	// hack, for kube Metrics
+	"in_metrics": 19,
+	// hack, for longhorn webhook
+	"in_lhweb": 20,
+	// hack, for longhorn instance manager
+	"in_lhinstmgr": 21,
+	// hack, for longhorn iscsi
+	"in_iscsi": 22,
+	// hack, for longhorn nfs
+	"in_nfs": 23,
+	// hack, for enc pubsub
+	"in_encpubsub": 24,
+	// hack, for cluster bootstrap
+	"in_encbootstrap": 25,
 }
 
 // GetConnmark : create connection mark corresponding to the given attributes.

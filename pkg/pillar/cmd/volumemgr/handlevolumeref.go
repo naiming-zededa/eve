@@ -20,6 +20,14 @@ func handleVolumeRefCreate(ctxArg interface{}, key string,
 	needUpdateVol := false
 	vs := ctx.LookupVolumeStatus(config.VolumeKey())
 	if vs != nil {
+		referenceName := vs.ReferenceName
+		if vs.IsNoHyper {
+			ctStatus := ctx.LookupContentTreeStatus(vs.ContentID.String())
+			if ctStatus != nil {
+				referenceName = ctStatus.ReferenceID()
+				log.Noticef("handleVolumeRefCreate(%s) referencename %s", vs.Key(), referenceName)
+			}
+		}
 		updateVolumeStatusRefCount(ctx, vs)
 		publishVolumeStatus(ctx, vs)
 		status = &types.VolumeRefStatus{
@@ -37,7 +45,7 @@ func handleVolumeRefCreate(ctxArg interface{}, key string,
 			VerifyOnly:             config.VerifyOnly,
 			Target:                 vs.Target,
 			CustomMeta:             vs.CustomMeta,
-			ReferenceName:          vs.ReferenceName,
+			ReferenceName:          referenceName,
 		}
 		if vs.HasError() {
 			description := vs.ErrorDescription
@@ -169,6 +177,20 @@ func unpublishVolumeRefStatus(ctx *volumemgrContext, key string) {
 func updateVolumeRefStatus(ctx *volumemgrContext, vs *types.VolumeStatus) {
 	sub := ctx.subVolumeRefConfig
 	items := sub.GetAll()
+	var referenceName string
+	if vs != nil {
+		// the original referenceName assignment is at 'doUpdateVol', and during restart, need to check
+		// if the native container volumestatus ReferenceName is empty, and reassign it.
+		referenceName = vs.ReferenceName
+		if vs.IsNoHyper {
+			ctStatus := ctx.LookupContentTreeStatus(vs.ContentID.String())
+			if ctStatus != nil {
+				referenceName = ctStatus.ReferenceID()
+				log.Noticef("updateVolumeRefStatus(%s) referencename %s", vs.Key(), referenceName)
+			}
+		}
+	}
+	log.Functionf("updateVolumeRefStatus: referencename %s, vs %v", referenceName, vs)
 	for _, st := range items {
 		vrc := st.(types.VolumeRefConfig)
 		if vrc.VolumeKey() == vs.Key() {
@@ -185,7 +207,7 @@ func updateVolumeRefStatus(ctx *volumemgrContext, vs *types.VolumeStatus) {
 				status.Target = vs.Target
 				status.CustomMeta = vs.CustomMeta
 				status.WWN = vs.WWN
-				status.ReferenceName = vs.ReferenceName
+				status.ReferenceName = referenceName
 			} else {
 				status = &types.VolumeRefStatus{
 					VolumeID:               vrc.VolumeID,
@@ -201,7 +223,7 @@ func updateVolumeRefStatus(ctx *volumemgrContext, vs *types.VolumeStatus) {
 					WWN:                    vs.WWN,
 					VerifyOnly:             vrc.VerifyOnly,
 					Target:                 vs.Target,
-					ReferenceName:          vs.ReferenceName,
+					ReferenceName:          referenceName,
 				}
 			}
 			if vs.HasError() {
