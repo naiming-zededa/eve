@@ -104,10 +104,13 @@ The current node drain progress is available from the global NodeDrainStatus obj
 NodeDrainStatus can be forced by writing the object (in pillar svc container fs) to: /tmp/force-NodeDrainStatus-global.json
 
 eg. to force disable drain:
-echo '{"Status":1,"RequestedBy":1}' > /tmp/force-NodeDrainStatus-global.json
+echo '{"Status":1,"RequestedBy":1}' > /persist/force-NodeDrainStatus-global.json
 
 eg. to force deviceop drain complete:
-echo '{"Status":9,"RequestedBy":2}' > /tmp/force-NodeDrainStatus-global.json
+echo '{"Status":9,"RequestedBy":2}' > /persist/force-NodeDrainStatus-global.json
+
+eg. to force baseosmgr drain complete:
+echo '{"Status":9,"RequestedBy":3}' > /persist/force-NodeDrainStatus-global.json
 
 "Cannot evict pod as it would violate the pod's disruption budget":
 If NodeDrainStatus can get stuck if attempting to drain a node running a pod where the pod has an 

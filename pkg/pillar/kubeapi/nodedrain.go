@@ -15,7 +15,7 @@ import (
 )
 
 // RequestNodeDrain generates the NodeDrainRequest object and publishes it
-func RequestNodeDrain(pubNodeDrainRequest pubsub.Publication, requester DrainRequester) error {
+func RequestNodeDrain(pubNodeDrainRequest pubsub.Publication, requester DrainRequester, context string) error {
 	hostname, err := os.Hostname()
 	if err != nil {
 		return fmt.Errorf("RequestNodeDrain: can't get hostname %v", err)
@@ -24,6 +24,7 @@ func RequestNodeDrain(pubNodeDrainRequest pubsub.Publication, requester DrainReq
 		Hostname:    hostname,
 		RequestedAt: time.Now(),
 		RequestedBy: requester,
+		Context:     context,
 	}
 	err = pubNodeDrainRequest.Publish("global", drainReq)
 	if err != nil {
