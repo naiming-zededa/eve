@@ -30,7 +30,7 @@ func GetPVCList(*base.LogObject) ([]string, error) {
 }
 
 // RequestNodeDrain is a stub for non-kubevirt builds
-func RequestNodeDrain(pubsub.Publication) error {
+func RequestNodeDrain(pubsub.Publication, DrainRequester, string) error {
 	// Nothing to do here, just noop
 	return fmt.Errorf("nokube requested drain, should not get here")
 }

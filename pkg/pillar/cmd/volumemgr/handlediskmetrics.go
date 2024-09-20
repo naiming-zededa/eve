@@ -123,6 +123,7 @@ func diskMetricsTimerTask(ctx *volumemgrContext, handleChannel chan interface{})
 		case <-diskMetricTicker.C:
 			start := time.Now()
 			createOrUpdateDiskMetrics(ctx, wdName)
+			createOrUpdatePvcDiskMetrics(ctx, wdName)
 			generateAndPublishVolumeMgrStatus(ctx)
 			ctx.ps.CheckMaxTimeTopic(wdName, "createOrUpdateDiskMetrics", start,
 				warningTime, errorTime)
