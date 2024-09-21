@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	// "github.com/lf-edge/eve/pkg/newlog/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.22.5.darwin-amd64/src/strings"
 	"github.com/lf-edge/eve/pkg/pillar/agentbase"
 	"github.com/lf-edge/eve/pkg/pillar/agentlog"
 	"github.com/lf-edge/eve/pkg/pillar/base"
@@ -898,7 +900,7 @@ func handleEdgeNodeInfoImpl(ctxArg interface{}, key string,
 		return
 	}
 
-	ctxPtr.nodeName = nodeInfo.DeviceName
+	ctxPtr.nodeName = strings.ToLower(nodeInfo.DeviceName)
 	ctxPtr.nodeuuid = nodeInfo.DeviceID.String()
 
 	//Re-enable local node
