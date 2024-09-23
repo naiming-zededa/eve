@@ -6,7 +6,6 @@
 package zedkube
 
 import (
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -80,10 +79,12 @@ type zedkubeContext struct {
 
 	networkInstanceStatusMap sync.Map
 	ioAdapterMap             sync.Map
+	deviceNetworkStatus      types.DeviceNetworkStatus
+	clusterConfig            types.EdgeNodeClusterConfig
 	config                   *rest.Config
 	appLogStarted            bool
 	appContainerLogger       *logrus.Logger
-	encNodeIPAddress         *net.IP
+	clusterIPIsReady         bool
 	nodeuuid                 string
 	nodeName                 string
 	isKubeStatsLeader        bool
@@ -93,10 +94,9 @@ type zedkubeContext struct {
 	pubResendTimer           *time.Timer
 	drainOverrideTimer       *time.Timer
 	receiveMap               *ReceiveMap
-	stopMonitor              chan struct{}
 	clusterPubSubStarted     bool
-	quitServer               chan struct{}
 	statusServer             *http.Server
+	statusServerWG           sync.WaitGroup
 	drainTimeoutHours        uint32
 	pubServerCertFile        string
 	pubServerKeyFile         string
@@ -206,8 +206,6 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	// Run a periodic timer so we always update StillRunning
 	stillRunning := time.NewTicker(stillRunningInterval)
 
-	zedkubeCtx.stopMonitor = make(chan struct{})
-	zedkubeCtx.quitServer = make(chan struct{})
 	zedkubeCtx.appContainerLogger = agentlog.CustomLogInit(logrus.InfoLevel)
 
 	// Get AppInstanceConfig from zedagent
@@ -322,13 +320,15 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	// Watch DNS to learn which ports are used for management.
 	subDeviceNetworkStatus, err := ps.NewSubscription(
 		pubsub.SubscriptionOptions{
-			AgentName:   "nim",
-			MyAgentName: agentName,
-			TopicImpl:   types.DeviceNetworkStatus{},
-			Activate:    false,
-			Ctx:         &zedkubeCtx,
-			WarningTime: warningTime,
-			ErrorTime:   errorTime,
+			AgentName:     "nim",
+			MyAgentName:   agentName,
+			TopicImpl:     types.DeviceNetworkStatus{},
+			Activate:      false,
+			Ctx:           &zedkubeCtx,
+			CreateHandler: handleDNSCreate,
+			ModifyHandler: handleDNSModify,
+			WarningTime:   warningTime,
+			ErrorTime:     errorTime,
 		})
 	if err != nil {
 		log.Fatal(err)
@@ -437,32 +437,26 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	zedkubeCtx.electionStopCh = make(chan struct{})
 	go handleLeaderElection(&zedkubeCtx)
 
-	// Wait for device network status to be initialized, this is need for
-	// provisionting the 2nd ip address on the cluster interface, otherwise
-	// we'll add ip prefix onto kethX interface instead of ethX interface
-	// and wait for the certs, which cluster config need to decrypt the token
-	var deviceNetStatusInitialized, controllerCertInitiazlized, edgenodeCertInitiazlized bool
-	for !deviceNetStatusInitialized || !controllerCertInitiazlized || !edgenodeCertInitiazlized {
-		log.Noticef("zedkube run: waiting for device network status, net %v, controller %v, edgenode %v",
-			deviceNetStatusInitialized, controllerCertInitiazlized, edgenodeCertInitiazlized)
+	// Wait for the certs, which are needed to decrypt the token inside the cluster config.
+	var controllerCertInitialized, edgenodeCertInitialized bool
+	for !controllerCertInitialized || !edgenodeCertInitialized {
+		log.Noticef("zedkube run: waiting for controller cert (initialized=%t), "+
+			"edgenode cert (initialized=%t)", controllerCertInitialized,
+			edgenodeCertInitialized)
 		select {
-		case change := <-subDeviceNetworkStatus.MsgChan():
-			subDeviceNetworkStatus.ProcessChange(change)
-			deviceNetStatusInitialized = true
-
 		case change := <-subControllerCert.MsgChan():
 			subControllerCert.ProcessChange(change)
-			controllerCertInitiazlized = true
+			controllerCertInitialized = true
 
 		case change := <-subEdgeNodeCert.MsgChan():
 			subEdgeNodeCert.ProcessChange(change)
-			edgenodeCertInitiazlized = true
+			edgenodeCertInitialized = true
 
 		case <-stillRunning.C:
 		}
 		ps.StillRunning(agentName, warningTime, errorTime)
 	}
-	log.Noticef("zedkube run: device network status initialized")
+	log.Noticef("zedkube run: controller and edge node certs are ready")
 
 	//
 	// NodeDrainRequest subscriber and NodeDrainStatus publisher
@@ -576,7 +570,11 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		publishNodeDrainStatus(&zedkubeCtx, kubeapi.NOTREQUESTED)
 	}
 
-	err = kubeapi.WaitForKubernetes(agentName, ps, subEdgeNodeClusterConfig, stillRunning)
+	err = kubeapi.WaitForKubernetes(agentName, ps, stillRunning,
+		// Make sure we keep ClusterIPIsReady up to date while we wait
+		// for Kubernetes to come up.
+		pubsub.WatchAndProcessSubChanges(subEdgeNodeClusterConfig),
+		pubsub.WatchAndProcessSubChanges(subDeviceNetworkStatus))
 	if err != nil {
 		log.Errorf("zedkube: WaitForKubenetes %v", err)
 	}
@@ -614,6 +612,9 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 
 	for {
 		select {
+		case change := <-subDeviceNetworkStatus.MsgChan():
+			subDeviceNetworkStatus.ProcessChange(change)
+
 		case change := <-subAppInstanceConfig.MsgChan():
 			subAppInstanceConfig.ProcessChange(change)
 
@@ -808,7 +809,7 @@ func handleEdgeNodeClusterConfigImpl(ctxArg interface{}, key string,
 	log.Noticef("handleEdgeNodeClusterConfigImpl for %s, config %+v, oldconfig %+v",
 		key, config, oldconfig)
 
-	runKubeConfig(ctx, &config, oldConfigPtr, false)
+	applyClusterConfig(ctx, &config, oldConfigPtr)
 
 	publishNodeDrainStatus(ctx, kubeapi.NOTREQUESTED)
 }
@@ -818,7 +819,7 @@ func handleEdgeNodeClusterConfigDelete(ctxArg interface{}, key string,
 	ctx := ctxArg.(*zedkubeContext)
 	log.Noticef("handleEdgeNodeClusterConfigDelete for %s", key)
 	config := statusArg.(types.EdgeNodeClusterConfig)
-	runKubeConfig(ctx, &config, nil, true)
+	applyClusterConfig(ctx, nil, &config)
 	ctx.pubEdgeNodeClusterStatus.Unpublish("global")
 
 	publishNodeDrainStatus(ctx, kubeapi.NOTSUPPORTED)

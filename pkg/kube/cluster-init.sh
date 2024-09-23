@@ -620,7 +620,10 @@ get_enc_status() {
     join_serverIP=$(echo "$enc_data" | jq -r '.JoinServerIP')
     cluster_token=$(echo "$enc_data" | jq -r '.EncryptedClusterToken')
     cluster_node_ip=$(echo "$enc_data" | jq -r '.ClusterIPPrefix.IP')
-    if [ -n "$cluster_intf" ] && [ -n "$join_serverIP" ] && [ -n "$cluster_token" ] && [ -n "$cluster_node_ip" ] && ( [ "$is_bootstrap" = "true" ] || [ "$is_bootstrap" = "false" ] ); then
+    cluster_node_ip_is_ready=$(echo "$enc_data" | jq -r '.ClusterIPIsReady')
+    if [ -n "$cluster_intf" ] && [ -n "$join_serverIP" ] && [ -n "$cluster_token" ] &&\
+       [ -n "$cluster_node_ip" ] && [ "$cluster_node_ip_is_ready" = "true" ] &&\
+       ( [ "$is_bootstrap" = "true" ] || [ "$is_bootstrap" = "false" ] ); then
       return 0
     else
       return 1

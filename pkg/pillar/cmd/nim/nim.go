@@ -328,15 +328,6 @@ func (n *nim) run(ctx context.Context) (err error) {
 
 		case change := <-n.subEdgeNodeClusterStatus.MsgChan():
 			n.subEdgeNodeClusterStatus.ProcessChange(change)
-			subd := n.subDevicePortConfigA
-			if subd != nil {
-				item, err := subd.Get("zedagent")
-				if err == nil {
-					dpc := item.(types.DevicePortConfig)
-					n.Log.Noticef("Cluster status changed, getIntendedRoutes: dpc")
-					n.dpcManager.AddDPC(dpc)
-				}
-			}
 
 		case change := <-n.subEdgeNodeCert.MsgChan():
 			n.subEdgeNodeCert.ProcessChange(change)
@@ -688,15 +679,22 @@ func (n *nim) initSubscriptions() (err error) {
 		WarningTime: warningTime,
 		ErrorTime:   errorTime,
 	})
+	if err != nil {
+		return err
+	}
 
-	// Cluster status
+	// Subscribe to EdgeNodeClusterStatus to get the cluster interface and the cluster
+	// IP address which DPC Reconciler should assign statically.
 	n.subEdgeNodeClusterStatus, err = n.PubSub.NewSubscription(pubsub.SubscriptionOptions{
-		AgentName:   "zedkube",
-		MyAgentName: agentName,
-		TopicImpl:   types.EdgeNodeClusterStatus{},
-		Activate:    false,
-		WarningTime: warningTime,
-		ErrorTime:   errorTime,
+		AgentName:     "zedkube",
+		MyAgentName:   agentName,
+		TopicImpl:     types.EdgeNodeClusterStatus{},
+		Activate:      false,
+		CreateHandler: n.handleEdgeNodeClusterStatusCreate,
+		ModifyHandler: n.handleEdgeNodeClusterStatusModify,
+		DeleteHandler: n.handleEdgeNodeClusterStatusDelete,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
 	})
 	if err != nil {
 		return err
@@ -903,6 +901,23 @@ func (n *nim) handleNetworkInstanceUpdate() {
 		}
 	}
 	n.dpcManager.UpdateFlowlogState(flowlogEnabled)
+}
+
+func (n *nim) handleEdgeNodeClusterStatusCreate(_ interface{}, _ string,
+	statusArg interface{}) {
+	status := statusArg.(types.EdgeNodeClusterStatus)
+	n.dpcManager.UpdateClusterStatus(status)
+}
+
+func (n *nim) handleEdgeNodeClusterStatusModify(_ interface{}, _ string,
+	statusArg, _ interface{}) {
+	status := statusArg.(types.EdgeNodeClusterStatus)
+	n.dpcManager.UpdateClusterStatus(status)
+}
+
+func (n *nim) handleEdgeNodeClusterStatusDelete(_ interface{}, _ string, _ interface{}) {
+	// Apply empty cluster status, which effectively removes the cluster IP.
+	n.dpcManager.UpdateClusterStatus(types.EdgeNodeClusterStatus{})
 }
 
 func (n *nim) isDeviceOnboarded() bool {
