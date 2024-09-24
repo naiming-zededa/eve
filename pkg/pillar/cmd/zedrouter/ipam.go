@@ -45,26 +45,20 @@ func (z *zedrouter) generateBridgeMAC(brNum int) net.HardwareAddr {
 func (z *zedrouter) generateAppMac(adapterNum int, appStatus *types.AppNetworkStatus,
 	netInstStatus *types.NetworkInstanceStatus) net.HardwareAddr {
 	h := sha256.New()
-
-	if z.withKubeNetworking {
-		h.Write(appStatus.UUIDandVersion.UUID[:])
-		h.Write(netInstStatus.UUIDandVersion.UUID[:])
-		nums := make([]byte, 1)
-		nums[0] = byte(adapterNum)
-		h.Write(nums)
-		hash := h.Sum(nil)
-		mac := net.HardwareAddr{hash[0], hash[1], hash[2], hash[3], hash[4], hash[5]}
-		mac[0] &= ^byte(1)
-		mac[0] |= byte(1 << 1)
-		z.log.Noticef("generateAppMac: mac %s, adapter %d", mac, adapterNum) // XXX
-		return mac
-	}
-
 	h.Write(appStatus.UUIDandVersion.UUID[:])
 	h.Write(netInstStatus.UUIDandVersion.UUID[:])
 	nums := make([]byte, 2)
 	nums[0] = byte(adapterNum)
-	nums[1] = byte(appStatus.AppNum)
+	if appStatus.MACGenerator != types.MACGeneratorClusterDeterministic {
+		// Skipped for MACGeneratorClusterDeterministic.
+		// Appending AppNum into the hash calculation could result in cluster
+		// nodes generating different MAC address for the same app interface.
+		// This is because the order of application config processing can
+		// differ between nodes.
+		// This is undesirable. When application is rescheduled to another node,
+		// the aim is to preserve MAC addresses of its interfaces.
+		nums[1] = byte(appStatus.AppNum)
+	}
 	h.Write(nums)
 	hash := h.Sum(nil)
 	switch netInstStatus.Type {
@@ -78,7 +72,7 @@ func (z *zedrouter) generateAppMac(adapterNum int, appStatus *types.AppNetworkSt
 		case types.MACGeneratorNodeScoped:
 			return net.HardwareAddr{0x00, 0x16, 0x3e, 0x00,
 				byte(adapterNum), byte(appStatus.AppNum)}
-		case types.MACGeneratorGloballyScoped:
+		case types.MACGeneratorGloballyScoped, types.MACGeneratorClusterDeterministic:
 			mac := net.HardwareAddr{hash[0], hash[1], hash[2], hash[3], hash[4], hash[5]}
 			// Mark this MAC address as unicast by setting the I/G bit to zero.
 			mac[0] &= ^byte(1)
