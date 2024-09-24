@@ -35,6 +35,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+	"k8s.io/utils/pointer"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 )
@@ -53,20 +54,20 @@ type MetaDataType int
 // Constants representing different resource types.
 const (
 	IsMetaVmi MetaDataType = iota
-	IsMetaReplicaSet
 	IsMetaPod
+	IsMetaReplicaVMI
+	IsMetaReplicaPod
 )
 
 // VM instance meta data structure.
 type vmiMetaData struct {
-	vmi      *v1.VirtualMachineInstance // Handle to the VM instance
-	pod      *k8sv1.Pod                 // Handle to the pod container
-	replica  *appsv1.ReplicaSet         // Handle to the replicaSetof pod
-	domainID int                        // DomainID understood by domainmgr in EVE
-	mtype    MetaDataType               // switch on is ReplicaSet, Pod or is VMI
-	name     string                     // Display-Name(all lower case) + first 5 bytes of domainName
-	cputotal uint64                     // total CPU in NS so far
-	maxmem   uint32                     // total Max memory usage in bytes so far
+	repPod   *appsv1.ReplicaSet                   // Handle to the replicaSetof pod
+	repVMI   *v1.VirtualMachineInstanceReplicaSet // Handle to the replicaSet of VMI
+	domainID int                                  // DomainID understood by domainmgr in EVE
+	mtype    MetaDataType                         // switch on is ReplicaSet, Pod or is VMI
+	name     string                               // Display-Name(all lower case) + first 5 bytes of domainName
+	cputotal uint64                               // total CPU in NS so far
+	maxmem   uint32                               // total Max memory usage in bytes so far
 }
 
 type kubevirtContext struct {
@@ -209,12 +210,12 @@ func (ctx kubevirtContext) Setup(status types.DomainStatus, config types.DomainC
 	getMyNodeUUID(&ctx, nodeName)
 
 	if config.VirtualizationMode == types.NOHYPER {
-		if err := ctx.CreateReplicaSetConfig(domainName, config, status, diskStatusList, aa, file); err != nil {
+		if err := ctx.CreateReplicaPodConfig(domainName, config, status, diskStatusList, aa, file); err != nil {
 			return logError("failed to build kube replicaset config: %v", err)
 		}
 	} else {
-		// Take eve domain config and convert to VMI config
-		if err := ctx.CreateVMIConfig(domainName, config, status, diskStatusList, aa, file); err != nil {
+		// Take eve domain config and convert to VMI Replicaset config
+		if err := ctx.CreateReplicaVMIConfig(domainName, config, status, diskStatusList, aa, file); err != nil {
 			return logError("failed to build kube config: %v", err)
 		}
 	}
@@ -223,12 +224,12 @@ func (ctx kubevirtContext) Setup(status types.DomainStatus, config types.DomainC
 
 }
 
-// Kubevirt VMI config spec is updated with the domain config/status of the app.
+// Kubevirt VMI ReplicaSet config spec is updated with the domain config/status of the app.
 // The details and the struct of the spec can be found at:
 // https://kubevirt.io/api-reference/v1.0.0/definitions.html
-func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.DomainConfig, status types.DomainStatus,
+func (ctx kubevirtContext) CreateReplicaVMIConfig(domainName string, config types.DomainConfig, status types.DomainStatus,
 	diskStatusList []types.DiskStatus, aa *types.AssignableAdapters, file *os.File) error {
-	logrus.Debugf("CreateVMIConfig called for Domain: %s", domainName)
+	logrus.Debugf("CreateReplicaVMIConfig called for Domain: %s", domainName)
 
 	err := getConfig(&ctx)
 	if err != nil {
@@ -236,7 +237,6 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 	}
 
 	kvClient, err := kubecli.GetKubevirtClientFromRESTConfig(ctx.kubeConfig)
-
 	if err != nil {
 		logrus.Errorf("couldn't get the kubernetes client API config: %v", err)
 		return err
@@ -257,7 +257,7 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 
 	// Set memory
 	mem := v1.Memory{}
-	m, err := resource.ParseQuantity(convertToKubernetesFormat(config.Memory * 1024)) // To bytes from KB
+	m, err := resource.ParseQuantity(convertToKubernetesFormat(config.Memory * 1024))
 	if err != nil {
 		logrus.Errorf("Could not parse the memory value %v", err)
 		return err
@@ -305,7 +305,6 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 		vols := make([]v1.Volume, len(diskStatusList))
 		ndisks := len(diskStatusList)
 		for i, ds := range diskStatusList {
-
 			diskName := "disk" + strconv.Itoa(i+1)
 
 			// Domainmgr sets devtype 9P for container images. Though in kubevirt container image is
@@ -351,7 +350,6 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 					},
 				}
 			} else {
-
 				pvcName, err := ds.GetPVCNameFromVolumeKey()
 				if err != nil {
 					return logError("Failed to fetch PVC Name from volumekey %v", ds.VolumeKey)
@@ -376,7 +374,6 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 					},
 				}
 			}
-
 		}
 		vmi.Spec.Domain.Devices.Disks = disks[0:ndisks]
 		vmi.Spec.Volumes = vols[0:ndisks]
@@ -413,7 +410,6 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 				tap := pciDevice{pciLong: ib.PciLong, ioType: ib.Type}
 				pciAssignments = addNoDuplicatePCI(pciAssignments, tap)
 			}
-
 		}
 	}
 
@@ -453,26 +449,58 @@ func (ctx kubevirtContext) CreateVMIConfig(domainName string, config types.Domai
 	vmi.Labels = make(map[string]string)
 	vmi.Labels[eveLabelKey] = domainName
 
+	// Create a VirtualMachineInstanceReplicaSet
+	replicaSet := &v1.VirtualMachineInstanceReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      kubeName, // XXX + "-replicaset",
+			Namespace: kubeapi.EVEKubeNameSpace,
+		},
+		Spec: v1.VirtualMachineInstanceReplicaSetSpec{
+			Replicas: pointer.Int32Ptr(1),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					eveLabelKey: domainName,
+				},
+			},
+			Template: &v1.VirtualMachineInstanceTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						eveLabelKey: domainName,
+					},
+				},
+				Spec: vmi.Spec,
+			},
+		},
+	}
+
+	logrus.Infof("CreateReplicaVMIConfig: VirtualMachineInstanceReplicaSet: %+v", replicaSet)
+
 	// Now we have VirtualMachine Instance object, save it to config file for debug purposes
 	// and save it in context which will be used to start VM in Start() call
 	// dispName is for vmi name/handle on kubernetes
 	meta := vmiMetaData{
-		vmi:      vmi,
+		repVMI:   replicaSet,
 		name:     kubeName,
+		mtype:    IsMetaReplicaVMI,
 		domainID: int(rand.Uint32()),
 	}
 	ctx.vmiList[domainName] = &meta
 
-	vmiStr := fmt.Sprintf("%+v", vmi)
+	repvmiStr := fmt.Sprintf("%+v", replicaSet)
 
 	// write to config file
-	file.WriteString(vmiStr)
+	file.WriteString(repvmiStr)
 
 	return nil
 }
 
 func (ctx kubevirtContext) Start(domainName string) error {
 	logrus.Debugf("Starting Kubevirt domain %s", domainName)
+
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		return logError("Failed to get nodeName")
+	}
 
 	err := getConfig(&ctx)
 	if err != nil {
@@ -485,46 +513,48 @@ func (ctx kubevirtContext) Start(domainName string) error {
 	if !ok {
 		return logError("start domain %s failed to get vmlist", domainName)
 	}
-	if vmis.mtype == IsMetaReplicaSet {
-		err := StartReplicaSetContiner(ctx, ctx.vmiList[domainName].replica)
+
+	// Start the Pod ReplicaSet
+	if vmis.mtype == IsMetaReplicaPod {
+		err := StartReplicaPodContiner(ctx, ctx.vmiList[domainName].repPod)
 		return err
+	} else if vmis.mtype != IsMetaReplicaVMI {
+		return logError("Start domain %s wrong type", domainName)
 	}
 
-	vmi := vmis.vmi
+	// Start the VMI ReplicaSet
+	repvmi := vmis.repVMI
 	virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
-
 	if err != nil {
 		logrus.Errorf("couldn't get the kubernetes client API config: %v", err)
 		return err
 	}
 
-	// Create the VM
+	// Create the VMI ReplicaSet
 	i := 5
 	for {
-		_, err = virtClient.VirtualMachineInstance(kubeapi.EVEKubeNameSpace).Create(context.Background(), vmi)
+		_, err = virtClient.ReplicaSet(kubeapi.EVEKubeNameSpace).Create(repvmi)
 		if err != nil {
 			if strings.Contains(err.Error(), "dial tcp 127.0.0.1:6443") && i <= 0 {
-				logrus.Infof("Start VM failed %v\n", err)
+				logrus.Infof("Start VMI replicaset failed %v\n", err)
 				return err
 			}
 			time.Sleep(10 * time.Second)
-			logrus.Infof("Start VM failed, retry (%d) err %v", i, err)
+			logrus.Infof("Start VMI replicaset failed, retry (%d) err %v", i, err)
 		} else {
 			break
 		}
 		i = i - 1
 	}
+	logrus.Infof("Started Kubevirt domain replicaset %s, VMI replicaset %s", domainName, vmis.name)
 
-	logrus.Infof("Started Kubevirt domain %s", domainName)
-
-	err = waitForVMI(vmis.name, true)
+	err = waitForVMI(vmis.name, nodeName, true)
 	if err != nil {
 		logrus.Errorf("couldn't start VMI %v", err)
 		return err
 	}
 
 	return nil
-
 }
 
 // Create is no-op for kubevirt, just return the domainID we already have.
@@ -545,22 +575,16 @@ func (ctx kubevirtContext) Stop(domainName string, force bool) error {
 	if !ok {
 		return logError("domain %s failed to get vmlist", domainName)
 	}
-	if vmis.mtype == IsMetaReplicaSet {
-		err := StopReplicaSetContainer(kubeconfig, vmis.name)
-		return err
+	if vmis.mtype == IsMetaReplicaPod {
+		err = StopReplicaPodContainer(kubeconfig, vmis.name)
+	} else if vmis.mtype == IsMetaReplicaVMI {
+		err = StopReplicaVMI(kubeconfig, vmis.name)
 	} else {
-		virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
-		if err != nil {
-			logrus.Errorf("couldn't get the kubernetes client API config: %v", err)
-			return err
-		}
+		return logError("Stop domain %s wrong type", domainName)
+	}
 
-		// Stop the VM
-		err = virtClient.VirtualMachineInstance(kubeapi.EVEKubeNameSpace).Delete(context.Background(), vmis.name, &metav1.DeleteOptions{})
-		if err != nil {
-			logrus.Errorf("Stop error %v\n", err)
-			return err
-		}
+	if err != nil {
+		return err
 	}
 
 	delete(ctx.vmiList, domainName)
@@ -582,27 +606,16 @@ func (ctx kubevirtContext) Delete(domainName string) (result error) {
 	if !ok {
 		return logError("delete domain %s failed to get vmlist", domainName)
 	}
-	if vmis.mtype == IsMetaReplicaSet {
-		err := StopReplicaSetContainer(kubeconfig, vmis.name)
-		return err
+	if vmis.mtype == IsMetaReplicaPod {
+		err = StopReplicaPodContainer(kubeconfig, vmis.name)
+	} else if vmis.mtype == IsMetaReplicaVMI {
+		err = StopReplicaVMI(kubeconfig, vmis.name)
 	} else {
-		virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
+		return logError("delete domain %s wrong type", domainName)
+	}
 
-		if err != nil {
-			logrus.Errorf("couldn't get the kubernetes client API config: %v", err)
-			return err
-		}
-
-		// Stop the VM
-		err = virtClient.VirtualMachineInstance(kubeapi.EVEKubeNameSpace).Delete(context.Background(), vmis.name, &metav1.DeleteOptions{})
-
-		// May be already deleted during Stop action, so its not an error if does not exist
-		if errors.IsNotFound(err) {
-			logrus.Infof("Domain already deleted: %v", domainName)
-		} else {
-			fmt.Printf("Delete error %v\n", err)
-			return err
-		}
+	if err != nil {
+		return err
 	}
 
 	// Delete the state dir
@@ -621,9 +634,32 @@ func (ctx kubevirtContext) Delete(domainName string) (result error) {
 	return nil
 }
 
+func StopReplicaVMI(kubeconfig *rest.Config, repVmiName string) error {
+	virtClient, err := kubecli.GetKubevirtClientFromRESTConfig(kubeconfig)
+	if err != nil {
+		logrus.Errorf("couldn't get the kubernetes client API config: %v", err)
+		return err
+	}
+
+	// Stop the VMI ReplicaSet
+	err = virtClient.ReplicaSet(kubeapi.EVEKubeNameSpace).Delete(repVmiName, &metav1.DeleteOptions{})
+	if errors.IsNotFound(err) {
+		logrus.Infof("Stop VMI Replicaset, Domain already deleted: %v", repVmiName)
+	} else {
+		logrus.Errorf("Stop VMI Replicaset error %v\n", err)
+		return err
+	}
+
+	return nil
+}
+
 func (ctx kubevirtContext) Info(domainName string) (int, types.SwState, error) {
 
 	logrus.Debugf("Info called for Domain: %s", domainName)
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		return 0, types.BROKEN, logError("Failed to get nodeName")
+	}
 
 	var res string
 	var err error
@@ -635,10 +671,10 @@ func (ctx kubevirtContext) Info(domainName string) (int, types.SwState, error) {
 	if !ok {
 		return 0, types.HALTED, logError("info domain %s failed to get vmlist", domainName)
 	}
-	if vmis.mtype == IsMetaReplicaSet {
+	if vmis.mtype == IsMetaReplicaPod {
 		res, err = InfoReplicaSetContainer(ctx, vmis.name)
 	} else {
-		res, err = getVMIStatus(vmis.name)
+		res, err = getVMIStatus(vmis.name, nodeName)
 	}
 	if err != nil {
 		return 0, types.BROKEN, logError("domain %s failed to get info: %v", domainName, err)
@@ -659,19 +695,25 @@ func (ctx kubevirtContext) Cleanup(domainName string) error {
 	if err := ctx.ctrdContext.Cleanup(domainName); err != nil {
 		return fmt.Errorf("couldn't cleanup task %s: %v", domainName, err)
 	}
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		return logError("Cleanup: Failed to get nodeName")
+	}
 
 	var err error
 	vmis, ok := ctx.vmiList[domainName]
 	if !ok {
 		return logError("cleanup domain %s failed to get vmlist", domainName)
 	}
-	if vmis.mtype == IsMetaReplicaSet {
+	if vmis.mtype == IsMetaReplicaPod {
 		_, err = InfoReplicaSetContainer(ctx, vmis.name)
 		if err == nil {
 			err = ctx.Delete(domainName)
 		}
+	} else if vmis.mtype == IsMetaReplicaVMI {
+		err = waitForVMI(vmis.name, nodeName, false)
 	} else {
-		err = waitForVMI(vmis.name, false)
+		err = logError("cleanup domain %s wrong type", domainName)
 	}
 	if err != nil {
 		return fmt.Errorf("waitforvmi failed  %s: %v", domainName, err)
@@ -696,7 +738,7 @@ func convertToKubernetesFormat(b int) string {
 	return fmt.Sprintf("%.1fYi", bf)
 }
 
-func getVMIStatus(vmiName string) (string, error) {
+func getVMIStatus(repVmiName, nodeName string) (string, error) {
 
 	kubeconfig, err := kubeapi.GetKubeConfig()
 	if err != nil {
@@ -709,20 +751,42 @@ func getVMIStatus(vmiName string) (string, error) {
 		return "", logError("couldn't get the Kube client Config: %v", err)
 	}
 
-	// Get the VMI info
-	vmi, err := virtClient.VirtualMachineInstance(kubeapi.EVEKubeNameSpace).Get(context.Background(), vmiName, &metav1.GetOptions{})
-
+	// List VMIs with a label selector that matches the replicaset name
+	vmiList, err := virtClient.VirtualMachineInstance(kubeapi.EVEKubeNameSpace).List(context.Background(), &metav1.ListOptions{})
 	if err != nil {
-		return "", logError("domain %s failed to get VMI info %s", vmiName, err)
+		return "", logError("getVMIStatus: domain %s failed to get VMI info %s", repVmiName, err)
+	}
+	if len(vmiList.Items) == 0 {
+		return "", logError("getVMIStatus: No VMI found with the given replicaset name %s", repVmiName)
 	}
 
-	res := fmt.Sprintf("%v", vmi.Status.Phase)
-
+	// Use the first VMI in the list
+	var foundNonlocal bool
+	var targetVMI *v1.VirtualMachineInstance
+	for _, vmi := range vmiList.Items {
+		if vmi.Status.NodeName == nodeName {
+			if vmi.GenerateName == repVmiName {
+				targetVMI = &vmi
+				break
+			}
+		} else {
+			if vmi.GenerateName == repVmiName {
+				foundNonlocal = true
+			}
+		}
+	}
+	if targetVMI == nil {
+		if foundNonlocal {
+			return "NonLocal", nil
+		}
+		return "", logError("getVMIStatus: No VMI %s found with the given nodeName %s", repVmiName, nodeName)
+	}
+	res := fmt.Sprintf("%v", targetVMI.Status.Phase)
 	return res, nil
 }
 
 // Inspired from kvm.go
-func waitForVMI(vmiName string, available bool) error {
+func waitForVMI(vmiName, nodeName string, available bool) error {
 	maxDelay := time.Minute * 5 // 5mins ?? lets keep it for now
 	delay := time.Second
 	var waited time.Duration
@@ -734,8 +798,7 @@ func waitForVMI(vmiName string, available bool) error {
 			waited += delay
 		}
 
-		state, err := getVMIStatus(vmiName)
-
+		state, err := getVMIStatus(vmiName, nodeName)
 		if err != nil {
 
 			if available {
@@ -769,10 +832,14 @@ func waitForVMI(vmiName string, available bool) error {
 func (ctx kubevirtContext) GetDomsCPUMem() (map[string]types.DomainMetric, error) {
 	logrus.Debugf("GetDomsCPUMem: enter")
 
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		return nil, nil
+	}
 	res := make(kubevirtMetrics, len(ctx.vmiList))
-	virtIP, err := getVirtHandlerIPAddr(&ctx)
+	virtIP, err := getVirtHandlerIPAddr(&ctx, nodeName)
 	if err != nil {
-		logrus.Errorf("GetDomsCPUMem get virthandler ip error %v", err)
+		logrus.Debugf("GetDomsCPUMem get virthandler ip error %v", err)
 		return nil, err
 	}
 
@@ -807,6 +874,7 @@ func (ctx kubevirtContext) GetDomsCPUMem() (map[string]types.DomainMetric, error
 		return nil, err
 	}
 
+	// It seems the virt-handler metrics only container the VMIs running on this node
 	scanner := bufio.NewScanner(strings.NewReader(string(body)))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -851,7 +919,7 @@ func (ctx kubevirtContext) GetDomsCPUMem() (map[string]types.DomainMetric, error
 
 			var domainName string
 			for n, vmis := range ctx.vmiList {
-				if vmis.name == vmiName {
+				if strings.HasPrefix(vmiName, vmis.name) { // handle the VMI ReplicaSet
 					domainName = n
 					if _, ok := res[domainName]; !ok {
 						res[domainName] = types.DomainMetric{
@@ -894,13 +962,13 @@ func (ctx kubevirtContext) GetDomsCPUMem() (map[string]types.DomainMetric, error
 	}
 
 	hasEmptyRes := len(ctx.vmiList) - len(res)
-	checkReplicaSetMetrics(ctx, res, hasEmptyRes)
+	checkReplicaPodMetrics(ctx, res, hasEmptyRes)
 
 	logrus.Debugf("GetDomsCPUMem: %d VMs: %+v, podnum %d", len(ctx.vmiList), res, hasEmptyRes)
 	return res, nil
 }
 
-func getVirtHandlerIPAddr(ctx *kubevirtContext) (string, error) {
+func getVirtHandlerIPAddr(ctx *kubevirtContext, nodeName string) (string, error) {
 	if ctx.virthandlerIPAddr != "" {
 		return ctx.virthandlerIPAddr, nil
 	}
@@ -919,6 +987,9 @@ func getVirtHandlerIPAddr(ctx *kubevirtContext) (string, error) {
 
 	var vmiPod *k8sv1.Pod
 	for _, pod := range pods.Items {
+		if nodeName != pod.Spec.NodeName {
+			continue
+		}
 		if strings.HasPrefix(pod.ObjectMeta.Name, "virt-handler-") {
 			vmiPod = &pod
 			break
@@ -926,7 +997,7 @@ func getVirtHandlerIPAddr(ctx *kubevirtContext) (string, error) {
 	}
 
 	if vmiPod == nil {
-		return "", fmt.Errorf("can not find virt-handler pod")
+		return "", fmt.Errorf("getVirtHandlerIPAddr: can not find virt-handler pod")
 	}
 	ctx.virthandlerIPAddr = vmiPod.Status.PodIP
 	return ctx.virthandlerIPAddr, nil
@@ -959,18 +1030,18 @@ func assignToInt64(parsedValue interface{}) int64 {
 	return intValue
 }
 
-func (ctx kubevirtContext) CreateReplicaSetConfig(domainName string, config types.DomainConfig, status types.DomainStatus,
+func (ctx kubevirtContext) CreateReplicaPodConfig(domainName string, config types.DomainConfig, status types.DomainStatus,
 	diskStatusList []types.DiskStatus, aa *types.AssignableAdapters, file *os.File) error {
 
 	kubeName := base.GetAppKubeName(config.DisplayName, config.UUIDandVersion.UUID)
 	if config.KubeImageName == "" {
 		err := fmt.Errorf("domain config kube image name empty")
-		logrus.Errorf("CreateReplicaSetConfig: %v", err)
+		logrus.Errorf("CreateReplicaPodConfig: %v", err)
 		return err
 	}
 	ociName := config.KubeImageName
 
-	logrus.Infof("CreateReplicaSetConfig: domainName %s, kubeName %s, nodeName %d", domainName, kubeName, len(ctx.nodeNameMap))
+	logrus.Infof("CreateReplicaPodConfig: domainName %s, kubeName %s, nodeName %d", domainName, kubeName, len(ctx.nodeNameMap))
 	nodeName, ok := ctx.nodeNameMap["nodename"]
 	if !ok {
 		return logError("Failed to get nodeName")
@@ -996,7 +1067,7 @@ func (ctx kubevirtContext) CreateReplicaSetConfig(domainName string, config type
 			// Check if the NAD is created in the cluster, return error if not
 			err := kubeapi.CheckEtherPassThroughNAD(nadName)
 			if err != nil {
-				logrus.Errorf("CreateReplicaSetConfig: check ether NAD failed, %v", err)
+				logrus.Errorf("CreateReplicaPodConfig: check ether NAD failed, %v", err)
 				return err
 			}
 		}
@@ -1007,9 +1078,9 @@ func (ctx kubevirtContext) CreateReplicaSetConfig(domainName string, config type
 		annotations = map[string]string{
 			"k8s.v1.cni.cncf.io/networks": encodeSelections(netSelections),
 		}
-		logrus.Infof("CreateReplicaSetConfig: annotations %+v", annotations)
+		logrus.Infof("CreateReplicaPodConfig: annotations %+v", annotations)
 	} else {
-		err := fmt.Errorf("CreateReplicaSetConfig: no network selections, exit")
+		err := fmt.Errorf("CreateReplicaPodConfig: no network selections, exit")
 		return err
 	}
 
@@ -1095,7 +1166,7 @@ func (ctx kubevirtContext) CreateReplicaSetConfig(domainName string, config type
 			},
 		},
 	}
-	logrus.Infof("CreateReplicaSetConfig: replicaset %+v", replicaSet)
+	logrus.Infof("CreateReplicaPodConfig: replicaset %+v", replicaSet)
 
 	// Add pod non-image volume disks
 	if len(diskStatusList) > 1 {
@@ -1135,20 +1206,20 @@ func (ctx kubevirtContext) CreateReplicaSetConfig(domainName string, config type
 						//ClaimName: ds.VolumeKey,
 					},
 				}
-				logrus.Infof("CreateReplicaSetConfig:(%d) mount[i] %+v, volumes[i] %+v", i, mounts[i], volumes[i])
+				logrus.Infof("CreateReplicaPodConfig:(%d) mount[i] %+v, volumes[i] %+v", i, mounts[i], volumes[i])
 				i++
 			}
 			replicaSet.Spec.Template.Spec.Containers[0].VolumeMounts = mounts
 			replicaSet.Spec.Template.Spec.Volumes = volumes
 		}
 	}
-	logrus.Infof("CreateReplicaSetConfig: replicaset setup %+v", replicaSet)
+	logrus.Infof("CreateReplicaPodConfig: replicaset setup %+v", replicaSet)
 
 	// Now we have VirtualMachine Instance object, save it to config file for debug purposes
 	// and save it in context which will be used to start VM in Start() call
 	meta := vmiMetaData{
-		replica:  replicaSet,
-		mtype:    IsMetaReplicaSet,
+		repPod:   replicaSet,
+		mtype:    IsMetaReplicaPod,
 		name:     kubeName,
 		domainID: int(rand.Uint32()),
 	}
@@ -1162,14 +1233,14 @@ func (ctx kubevirtContext) CreateReplicaSetConfig(domainName string, config type
 	return nil
 }
 
-func StartReplicaSetContiner(ctx kubevirtContext, rep *appsv1.ReplicaSet) error {
+func StartReplicaPodContiner(ctx kubevirtContext, rep *appsv1.ReplicaSet) error {
 	err := getConfig(&ctx)
 	if err != nil {
 		return err
 	}
 	clientset, err := kubernetes.NewForConfig(ctx.kubeConfig)
 	if err != nil {
-		logrus.Errorf("StartReplicaSetContiner: can't get clientset %v", err)
+		logrus.Errorf("StartReplicaPodContiner: can't get clientset %v", err)
 		return err
 	}
 
@@ -1177,42 +1248,42 @@ func StartReplicaSetContiner(ctx kubevirtContext, rep *appsv1.ReplicaSet) error 
 	result, err := clientset.AppsV1().ReplicaSets(kubeapi.EVEKubeNameSpace).Create(context.TODO(), rep, metav1.CreateOptions{})
 	if err != nil {
 		if !errors.IsAlreadyExists(err) {
-			logrus.Errorf("StartReplicaSetContiner: replicaset create failed: %v", err)
+			logrus.Errorf("StartReplicaPodContiner: replicaset create failed: %v", err)
 			return err
 		} else {
 			opStr = "already exists"
 		}
 	}
 
-	logrus.Infof("StartReplicaSetContiner: Rep %s %s, result %v", rep.ObjectMeta.Name, opStr, result)
+	logrus.Infof("StartReplicaPodContiner: Rep %s %s, result %v", rep.ObjectMeta.Name, opStr, result)
 
-	err = checkForReplicaSet(ctx, rep.ObjectMeta.Name)
+	err = checkForReplicaPod(ctx, rep.ObjectMeta.Name)
 	if err != nil {
-		logrus.Errorf("StartReplicaSetContiner: check for pod status error %v", err)
+		logrus.Errorf("StartReplicaPodContiner: check for pod status error %v", err)
 		return err
 	}
-	logrus.Infof("StartReplicaSetContiner: Pod %s running", rep.ObjectMeta.Name)
+	logrus.Infof("StartReplicaPodContiner: Pod %s running", rep.ObjectMeta.Name)
 	return nil
 }
 
-func checkForReplicaSet(ctx kubevirtContext, repName string) error {
+func checkForReplicaPod(ctx kubevirtContext, repName string) error {
 	var i int
 	var status string
 	var err error
 	for {
 		i++
-		logrus.Infof("checkForReplicaSet: check(%d) wait 15 sec, %v", i, repName)
+		logrus.Infof("checkForReplicaPod: check(%d) wait 15 sec, %v", i, repName)
 		time.Sleep(15 * time.Second)
 
 		status, err = InfoReplicaSetContainer(ctx, repName)
 		if err != nil {
-			logrus.Infof("checkForReplicaSet: repName %s, %v", repName, err)
+			logrus.Infof("checkForReplicaPod: repName %s, %v", repName, err)
 		} else {
 			if status == "Running" || status == "NonLocal" {
-				logrus.Infof("checkForReplicaSet: (%d) status %s, good", i, status)
+				logrus.Infof("checkForReplicaPod: (%d) status %s, good", i, status)
 				return nil
 			} else {
-				logrus.Errorf("checkForReplicaSet(%d): get podName info status %v (not running)", i, status)
+				logrus.Errorf("checkForReplicaPod(%d): get podName info status %v (not running)", i, status)
 			}
 		}
 		if i > waitForPodCheckCounter {
@@ -1220,7 +1291,7 @@ func checkForReplicaSet(ctx kubevirtContext, repName string) error {
 		}
 	}
 
-	return fmt.Errorf("checkForReplicaSet: timed out, statuus %s, err %v", status, err)
+	return fmt.Errorf("checkForReplicaPod: timed out, statuus %s, err %v", status, err)
 }
 
 func InfoReplicaSetContainer(ctx kubevirtContext, repName string) (string, error) {
@@ -1282,7 +1353,7 @@ func InfoReplicaSetContainer(ctx kubevirtContext, repName string) (string, error
 	return "", logError("InfoReplicaSetContainer: pod not ready")
 }
 
-func checkReplicaSetMetrics(ctx kubevirtContext, res map[string]types.DomainMetric, emptySlot int) {
+func checkReplicaPodMetrics(ctx kubevirtContext, res map[string]types.DomainMetric, emptySlot int) {
 
 	err := getConfig(&ctx)
 	if err != nil {
@@ -1291,25 +1362,25 @@ func checkReplicaSetMetrics(ctx kubevirtContext, res map[string]types.DomainMetr
 	kubeconfig := ctx.kubeConfig
 	podclientset, err := kubernetes.NewForConfig(kubeconfig)
 	if err != nil {
-		logrus.Errorf("checkReplicaSetMetrics: can not get pod client %v", err)
+		logrus.Errorf("checkReplicaPodMetrics: can not get pod client %v", err)
 		return
 	}
 
 	clientset, err := metricsv.NewForConfig(kubeconfig)
 	if err != nil {
-		logrus.Errorf("checkReplicaSetMetrics: can't get clientset %v", err)
+		logrus.Errorf("checkReplicaPodMetrics: can't get clientset %v", err)
 		return
 	}
 
 	nodeName, ok := ctx.nodeNameMap["nodename"]
 	if !ok {
-		logrus.Errorf("checkReplicaSetMetrics: can't get node name") // XXX may remove
+		logrus.Errorf("checkReplicaPodMetrics: can't get node name") // XXX may remove
 		return
 	}
 
 	count := 0
 	for n, vmis := range ctx.vmiList {
-		if vmis.mtype != IsMetaReplicaSet {
+		if vmis.mtype != IsMetaReplicaPod {
 			continue
 		}
 		count++
@@ -1318,7 +1389,7 @@ func checkReplicaSetMetrics(ctx kubevirtContext, res map[string]types.DomainMetr
 			LabelSelector: fmt.Sprintf("app=%s", repName),
 		})
 		if err != nil {
-			logrus.Errorf("checkReplicaSetMetrics: can't get pod %v", err)
+			logrus.Errorf("checkReplicaPodMetrics: can't get pod %v", err)
 			continue
 		}
 
@@ -1328,14 +1399,14 @@ func checkReplicaSetMetrics(ctx kubevirtContext, res map[string]types.DomainMetr
 				if count <= emptySlot {
 					res[n] = *dm
 				}
-				logrus.Infof("checkReplicaSetMetrics: dm %+v, res %v", dm, res)
+				logrus.Infof("checkReplicaPodMetrics: dm %+v, res %v", dm, res)
 
 				ctx.vmiList[n] = vmis // update for the last seen metrics
 			}
 		}
 	}
 
-	logrus.Infof("checkReplicaSetMetrics: done with vmiList")
+	logrus.Infof("checkReplicaPodMetrics: done with vmiList")
 }
 
 func getPodMetrics(clientset *metricsv.Clientset, pod k8sv1.Pod, vmis *vmiMetaData,
@@ -1351,7 +1422,7 @@ func getPodMetrics(clientset *metricsv.Clientset, pod k8sv1.Pod, vmis *vmiMetaDa
 
 	metrics, err := clientset.MetricsV1beta1().PodMetricses(kubeapi.EVEKubeNameSpace).Get(context.TODO(), podName, metav1.GetOptions{})
 	if err != nil {
-		logrus.Errorf("checkReplicaSetMetrics: get pod metrics error %v", err)
+		logrus.Errorf("getPodMetrics: get pod metrics error %v", err)
 		return nil
 	}
 
@@ -1396,22 +1467,22 @@ func getPodMetrics(clientset *metricsv.Clientset, pod k8sv1.Pod, vmis *vmiMetaDa
 	return dm
 }
 
-func StopReplicaSetContainer(kubeconfig *rest.Config, repName string) error {
+func StopReplicaPodContainer(kubeconfig *rest.Config, repName string) error {
 
 	clientset, err := kubernetes.NewForConfig(kubeconfig)
 	if err != nil {
-		logrus.Errorf("StopReplicaSetContainer: can't get clientset %v", err)
+		logrus.Errorf("StopReplicaPodContainer: can't get clientset %v", err)
 		return err
 	}
 
 	err = clientset.AppsV1().ReplicaSets(kubeapi.EVEKubeNameSpace).Delete(context.TODO(), repName, metav1.DeleteOptions{})
 	if err != nil {
 		// Handle error
-		logrus.Errorf("StopReplicaSetContainer: deleting pod: %v", err)
+		logrus.Errorf("StopReplicaPodContainer: deleting pod: %v", err)
 		return err
 	}
 
-	logrus.Infof("StopReplicaSetContainer: Pod %s deleted", repName)
+	logrus.Infof("StopReplicaPodContainer: Pod %s deleted", repName)
 	return nil
 }
 
@@ -1471,96 +1542,6 @@ func InfoPodContainer(ctx kubevirtContext, podName string) (string, error) {
 	logrus.Infof("InfoPodContainer: pod %s, nodeName %v, status %s", podName, pod.Spec.NodeName, res)
 
 	return res, nil
-}
-
-func checkPodMetrics(ctx kubevirtContext, res map[string]types.DomainMetric, emptySlot int) {
-
-	err := getConfig(&ctx)
-	if err != nil {
-		return
-	}
-	kubeconfig := ctx.kubeConfig
-	podclientset, err := kubernetes.NewForConfig(kubeconfig)
-	if err != nil {
-		logrus.Errorf("checkPodMetrics: can not get pod client %v", err)
-		return
-	}
-
-	clientset, err := metricsv.NewForConfig(kubeconfig)
-	if err != nil {
-		logrus.Errorf("checkPodMetrics: can't get clientset %v", err)
-		return
-	}
-
-	nodeName, ok := ctx.nodeNameMap["nodename"]
-	if !ok {
-		logrus.Errorf("checkPodMetrics: can't get node name") // XXX may remove
-		return
-	}
-
-	count := 0
-	for n, vmis := range ctx.vmiList {
-		if vmis.mtype != IsMetaPod {
-			continue
-		}
-		count++
-		podName := vmis.name
-		pod, err := podclientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).Get(context.TODO(), podName, metav1.GetOptions{})
-		if err != nil {
-			logrus.Errorf("checkPodMetrics: can't get pod %v", err)
-			continue
-		}
-		memoryLimits := pod.Spec.Containers[0].Resources.Limits.Memory()
-
-		metrics, err := clientset.MetricsV1beta1().PodMetricses(kubeapi.EVEKubeNameSpace).Get(context.TODO(), podName, metav1.GetOptions{})
-		if err != nil {
-			logrus.Errorf("checkPodMetrics: get pod metrics error %v", err)
-			continue
-		}
-
-		if nodeName != pod.Spec.NodeName { // cluster, pod from other nodes
-			continue
-		}
-
-		cpuTotalNs := metrics.Containers[0].Usage[k8sv1.ResourceCPU]
-		cpuTotalNsAsFloat64 := cpuTotalNs.AsApproximateFloat64() * float64(time.Second) // get nanoseconds
-		totalCPU := uint64(cpuTotalNsAsFloat64)
-
-		//allocatedMemory := metrics.Containers[0].Usage[k8sv1.ResourceMemory]
-		usedMemory := metrics.Containers[0].Usage[k8sv1.ResourceMemory]
-		maxMemory := uint32(usedMemory.Value())
-		if vmis.maxmem < maxMemory {
-			vmis.maxmem = maxMemory
-		} else {
-			maxMemory = vmis.maxmem
-		}
-
-		available := uint32(memoryLimits.Value())
-		if uint32(usedMemory.Value()) < available {
-			available = available - uint32(usedMemory.Value())
-		}
-		usedMemoryPercent := calculateMemoryUsagePercent(usedMemory.Value(), memoryLimits.Value())
-		BytesInMegabyte := uint32(1024 * 1024)
-
-		realCPUTotal := vmis.cputotal + totalCPU
-		vmis.cputotal = realCPUTotal
-		dm := types.DomainMetric{
-			CPUTotalNs:        realCPUTotal,
-			CPUScaled:         1,
-			AllocatedMB:       uint32(memoryLimits.Value()) / BytesInMegabyte,
-			UsedMemory:        uint32(usedMemory.Value()) / BytesInMegabyte,
-			MaxUsedMemory:     maxMemory / BytesInMegabyte,
-			AvailableMemory:   available / BytesInMegabyte,
-			UsedMemoryPercent: usedMemoryPercent,
-			NodeName:          pod.Spec.NodeName,
-		}
-		if count <= emptySlot {
-			res[n] = dm
-		}
-		logrus.Infof("checkPodMetrics: dm %+v, res %v", dm, res)
-
-		ctx.vmiList[n] = vmis // update for the last seen metrics
-	}
 }
 
 // Helper function to calculate the memory usage percentage
