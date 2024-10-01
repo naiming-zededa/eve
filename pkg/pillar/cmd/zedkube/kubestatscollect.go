@@ -77,10 +77,15 @@ func collectKubeStats(ctx *zedkubeContext) {
 		}
 
 		// Publish the cluster info, first w/ nodes and app pods and VMIs
+		ksi, err := kubeapi.PopulateKSI()
+		if err != nil {
+			log.Errorf("collectKubeStats: can't get KSI %v", err)
+		}
 		clusterInfo := types.KubeClusterInfo{
 			Nodes:   nodesInfo,
 			AppPods: podsInfo,
 			AppVMIs: vmisInfo,
+			Storage: ksi,
 		}
 		ctx.pubKubeClusterInfo.Publish("global", clusterInfo)
 	}
