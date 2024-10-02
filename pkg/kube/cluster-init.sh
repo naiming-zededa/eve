@@ -962,7 +962,7 @@ if [ ! -f /var/lib/all_components_initialized ]; then
         # instead of waiting forever
         start_time=$(date +%s)
         while [ $(($(date +%s) - start_time)) -lt 120 ]; do
-            node_count_ready=$(kubectl get node | grep -w $HOSTNAME | grep -w Ready | wc -l)
+            node_count_ready=$(kubectl get "node/${HOSTNAME}" | grep -cw Ready )
             if [ $node_count_ready -ne 1 ]; then
                 sleep 10
                 continue
@@ -1083,7 +1083,7 @@ else
         if ! check_start_k3s; then
                 start_time=$(date +%s)
                 while [ $(($(date +%s) - start_time)) -lt 120 ]; do
-                    node_count_ready=$(kubectl get node | grep -w $HOSTNAME | grep -w Ready | wc -l)
+                    node_count_ready=$(kubectl get "node/${HOSTNAME}" | grep -cw Ready )
                     if [ $node_count_ready -ne 1 ]; then
                         sleep 10
                         pgrep -f "k3s server" > /dev/null 2>&1
