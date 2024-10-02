@@ -3,6 +3,7 @@
 # Copyright (c) 2024 Zededa, Inc.
 # SPDX-License-Identifier: Apache-2.0
 K3S_VERSION=v1.28.5+k3s1
+EdgeNodeInfoPath="/persist/status/zedagent/EdgeNodeInfo/global.json"
 
 #
 # Handle any migrations needed due to updated cluster-init.sh
@@ -148,6 +149,19 @@ Update_RunDescheduler() {
     fi
     # Only run once per boot
     if [ -f /tmp/descheduler-ran ]; then
+        return
+    fi
+
+    if [ ! -f $EdgeNodeInfoPath ]; then
+        return
+    fi
+    # is api ready
+    if ! update_isClusterReady; then
+        return
+    fi
+    node=$(jq -r '.DeviceName' < $EdgeNodeInfoPath | tr -d '\n' | tr '[:upper:]' '[:lower:]')
+    node_count_ready=$(kubectl get "node/${node}" | grep -cw Ready )
+    if [ "$node_count_ready" -ne 1 ]; then
         return
     fi
     # Job lives persistently in cluster, cleanup after old runs
