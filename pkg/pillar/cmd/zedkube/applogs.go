@@ -152,7 +152,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 	options := metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("spec.nodeName=%s", ctx.nodeName),
 	}
-	pods, err := clientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.Background(), options)
+	pods, err := clientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), options)
 	if err != nil {
 		log.Errorf("checkAppsStatus: can't get pods %v", err)
 		return
@@ -175,7 +175,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		for _, pod := range pods.Items {
 			contVMIName := "virt-launcher-" + contName
 			log.Functionf("checkAppsStatus: pod %s, cont %s", pod.Name, contName)
-			if strings.HasPrefix(pod.Name, contName) || pod.Name == contVMIName {
+			if strings.HasPrefix(pod.Name, contName) || strings.HasPrefix(pod.Name, contVMIName) {
 				encAppStatus.ScheduledOnThisNode = true
 				if pod.Status.Phase == corev1.PodRunning {
 					encAppStatus.StatusRunning = true
@@ -209,7 +209,7 @@ func getnodeNameAndUUID(ctx *zedkubeContext) error {
 			return err
 		}
 		enInfo := NodeInfo.(types.EdgeNodeInfo)
-		ctx.nodeName = enInfo.DeviceName
+		ctx.nodeName = strings.ToLower(enInfo.DeviceName)
 		ctx.nodeuuid = enInfo.DeviceID.String()
 	}
 	return nil

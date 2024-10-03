@@ -3660,7 +3660,7 @@ func getnodeNameAndUUID(ctx *domainContext) error {
 			return err
 		}
 		enInfo := NodeInfo.(types.EdgeNodeInfo)
-		ctx.nodeName = enInfo.DeviceName
+		ctx.nodeName = strings.ToLower(enInfo.DeviceName)
 		log.Noticef("**getnodeNameAndUUID: devicename, NodeInfo %v", NodeInfo) // XXX
 	}
 	return nil
