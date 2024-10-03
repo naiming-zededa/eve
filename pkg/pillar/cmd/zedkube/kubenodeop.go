@@ -15,6 +15,7 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/base"
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	v1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/kubectl/pkg/drain"
@@ -27,7 +28,7 @@ const (
 	drainCompletionLogKey = "kubevirt_node_drain_completion_time_seconds"
 )
 
-func getLocalNode(ctx *zedkubeContext) (*v1.Node, error) {
+func getLocalNode(nodeuuid string) (*v1.Node, error) {
 	config, err := kubeapi.GetKubeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("getLocalNode: can't get kubeconfig %v", err)
@@ -38,39 +39,45 @@ func getLocalNode(ctx *zedkubeContext) (*v1.Node, error) {
 		return nil, fmt.Errorf("getLocalNode: can't get clientset %v", err)
 	}
 
-	log.Noticef("getLocalNode with nodeuuid:%s", ctx.nodeuuid)
-	labelSelector := metav1.LabelSelector{MatchLabels: map[string]string{"node-uuid": ctx.nodeuuid}}
+	log.Noticef("getLocalNode with nodeuuid:%s", nodeuuid)
+	labelSelector := metav1.LabelSelector{MatchLabels: map[string]string{"node-uuid": nodeuuid}}
 	options := metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(&labelSelector)}
 	nodes, err := clientset.CoreV1().Nodes().List(context.Background(), options)
 	if err != nil {
-		return nil, fmt.Errorf("getLocalNode: can't get nodes %v, on uuid %s", err, ctx.nodeuuid)
+		return nil, fmt.Errorf("getLocalNode: can't get nodes %v, on uuid %s", err, nodeuuid)
 	}
 	if len(nodes.Items) == 0 {
-		return nil, fmt.Errorf("getLocalNode: can't find node with node-uuid:%s", ctx.nodeuuid)
+		return nil, fmt.Errorf("getLocalNode: can't find node with node-uuid:%s", nodeuuid)
 	}
-	log.Noticef("getLocalNode with nodeuuid:%s found node:%s unschedulable:%v", ctx.nodeuuid, nodes.Items[0].ObjectMeta.Name, nodes.Items[0].Spec.Unschedulable)
+	log.Noticef("getLocalNode with nodeuuid:%s found node:%s unschedulable:%v", nodeuuid, nodes.Items[0].ObjectMeta.Name, nodes.Items[0].Spec.Unschedulable)
 	return &nodes.Items[0], nil
 }
 
-func isNodeCordoned(ctx *zedkubeContext) (bool, error) {
-	log.Noticef("isNodeCordoned nodeuuid:%s", ctx.nodeuuid)
-	node, err := getLocalNode(ctx)
+func isNodeCordoned(nodeuuid string) (bool, error) {
+	log.Noticef("isNodeCordoned nodeuuid:%s", nodeuuid)
+	node, err := getLocalNode(nodeuuid)
 	if err != nil {
 		return false, fmt.Errorf("isNodeCordoned getLocalNode err:%v", err)
 	}
-	// For some odd reason, at some points the api has not yet set 'Unschedulable' but
-	// Does correctly have the taint listed.  Since the taint seems more reliable, use it.
-	log.Noticef("isNodeCordoned nodeuuid:%s unschedulable:%v", ctx.nodeuuid, node.Spec.Unschedulable)
+	// Competing docs on how to check if a node is cordoned
+
+	// Check the spec for the taint first
 	for _, taint := range node.Spec.Taints {
-		log.Noticef("isNodeCordoned nodeuuid:%s taint_key:%s", ctx.nodeuuid, taint.Key)
-		if taint.Key == "node.kubernetes.io/unreachable" {
+		if taint.Key == "node.kubernetes.io/unschedulable" && taint.Effect == "NoSchedule" {
+			log.Noticef("isNodeCordoned nodeuuid:%s unschedulable via taint:%v", nodeuuid, taint)
 			return true, nil
 		}
 	}
+
+	// Then check the spec for the unschedulable flag
+	if node.Spec.Unschedulable {
+		return true, nil
+	}
+
 	return false, nil
 }
 
-func cordonNode(ctx *zedkubeContext, cordon bool) error {
+func cordonNode(nodeuuid string, cordon bool) error {
 	config, err := kubeapi.GetKubeConfig()
 	if err != nil {
 		return fmt.Errorf("cordonNode: can't get kubeconfig %v", err)
@@ -81,11 +88,11 @@ func cordonNode(ctx *zedkubeContext, cordon bool) error {
 		return fmt.Errorf("cordonNode: can't get clientset %v", err)
 	}
 
-	labelSelector := metav1.LabelSelector{MatchLabels: map[string]string{"node-uuid": ctx.nodeuuid}}
+	labelSelector := metav1.LabelSelector{MatchLabels: map[string]string{"node-uuid": nodeuuid}}
 	options := metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(&labelSelector)}
 	nodes, err := clientset.CoreV1().Nodes().List(context.Background(), options)
 	if err != nil {
-		return fmt.Errorf("cordonNode: can't get nodes %v, on uuid %s", err, ctx.nodeuuid)
+		return fmt.Errorf("cordonNode: can't get nodes %v, on uuid %s", err, nodeuuid)
 	}
 	if len(nodes.Items) == 0 {
 		return fmt.Errorf("cordonNode: can't find node")
@@ -97,8 +104,53 @@ func cordonNode(ctx *zedkubeContext, cordon bool) error {
 	if err != nil {
 		return fmt.Errorf("Failed to cordon node:%s err:%v\n", node.ObjectMeta.Name, err)
 	}
-	log.Noticef("cordonNode node:%s node:%s unschedulable:%v complete", ctx.nodeuuid, node.ObjectMeta.Name, cordon)
+	log.Noticef("cordonNode node-uuid:%s node:%s unschedulable:%v complete", nodeuuid, node.ObjectMeta.Name, cordon)
 	return nil
+}
+
+func getNodeUptime(nodeuuid string) (time.Duration, error) {
+	node, err := getLocalNode(nodeuuid)
+	if err != nil {
+		return time.Duration(0), fmt.Errorf("getNodeUptime getLocalNode err:%v", err)
+	}
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == "Ready" {
+			return time.Since(condition.LastTransitionTime.Time), nil
+		}
+	}
+	return time.Duration(0), fmt.Errorf("getNodeUptime: can't find Ready condition")
+}
+
+// Narrowly check for an extended time of contiguous 'apiserver not ready' responses from kubernetes
+//
+//	To allow us to short circuit the drain process for a node where k3s is firmly down
+//	This is an experimental option
+func isExtendedKubeApiServiceUnavailable(duration time.Duration) (bool, error) {
+	config, err := kubeapi.GetKubeConfig()
+	if err != nil {
+		return false, fmt.Errorf("getLocalNode: can't get kubeconfig %v", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return false, fmt.Errorf("getLocalNode: can't get clientset %v", err)
+	}
+
+	start_time := time.Now()
+	for time.Since(start_time) < duration {
+		_, err = clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+		if err == nil {
+			return false, fmt.Errorf("api is available")
+		}
+		if err != nil {
+			if !k8serrors.IsServiceUnavailable(err) {
+				return false, fmt.Errorf("Non-ServiceUnavailable error: %v", err)
+			}
+			log.Warnf("isKubeApiNotReady: err:%v", err)
+		}
+		time.Sleep(5 * time.Second)
+	}
+	return true, nil
 }
 
 func cordonAndDrainNode(ctx *zedkubeContext) {
@@ -106,9 +158,20 @@ func cordonAndDrainNode(ctx *zedkubeContext) {
 	publishNodeDrainStatus(ctx, kubeapi.STARTING)
 
 	//
+	// 1. Attempt to safely handle the case where the kube api is down
+	//	for an extended period of time, maybe move to a config option later
+	//
+	unavail, err := isExtendedKubeApiServiceUnavailable(time.Second * 180)
+	if unavail && (err == nil) {
+		log.Notice("cordonAndDrainNode nodedrain-step:drain-complete due to extended kube api service unavailability")
+		publishNodeDrainStatus(ctx, kubeapi.COMPLETE)
+		return
+	}
+
+	//
 	// 1. Is the Node Cordoned
 	//
-	cordoned, err := isNodeCordoned(ctx)
+	cordoned, err := isNodeCordoned(ctx.nodeuuid)
 	if err != nil {
 		log.Errorf("cordonAndDrainNode can't read local node cordon state, err:%v", err)
 	}
@@ -120,7 +183,7 @@ func cordonAndDrainNode(ctx *zedkubeContext) {
 		cordonTry := 0
 		for cordonTry < cordonTriesMax {
 			log.Functionf("cordonAndDrainNode try:%d", cordonTry)
-			err := cordonNode(ctx, true)
+			err := cordonNode(ctx.nodeuuid, true)
 			if err == nil {
 				break
 			}

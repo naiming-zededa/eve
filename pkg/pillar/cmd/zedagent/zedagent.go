@@ -2081,11 +2081,13 @@ func handleClusterUpdateStatusImpl(ctxArg interface{}, key string,
 	statusArg interface{}, oldStatusArg interface{}) {
 	ctx, ok := ctxArg.(*zedagentContext)
 	if !ok {
-		log.Fatalf("handleClusterUpdateStatusImpl invalid type in ctxArg: %v", ctxArg)
+		log.Errorf("handleClusterUpdateStatusImpl invalid type in ctxArg: %v", ctxArg)
+		return
 	}
 	req, ok := statusArg.(kubeapi.KubeClusterUpdateStatus)
 	if !ok {
-		log.Fatalf("handleClusterUpdateStatusImpl invalid type in configArg: %v", statusArg)
+		log.Errorf("handleClusterUpdateStatusImpl invalid type in configArg: %v", statusArg)
+		return
 	}
 	log.Noticef("handleClusterUpdateStatusImpl key:%s obj:%v", key, req)
 

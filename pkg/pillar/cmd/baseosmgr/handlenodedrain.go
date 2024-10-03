@@ -23,11 +23,13 @@ func handleNodeDrainStatusImpl(ctxArg interface{}, _ string,
 	configArg interface{}, _ interface{}) {
 	newStatus, ok := configArg.(kubeapi.NodeDrainStatus)
 	if !ok {
-		log.Fatalf("handleNodeDrainStatusImpl invalid type in configArg: %v", configArg)
+		log.Errorf("handleNodeDrainStatusImpl invalid type in configArg: %v", configArg)
+		return
 	}
 	ctx, ok := ctxArg.(*baseOsMgrContext)
 	if !ok {
-		log.Fatalf("handleNodeDrainStatusImpl invalid type in ctxArg: %v", ctxArg)
+		log.Errorf("handleNodeDrainStatusImpl invalid type in ctxArg: %v", ctxArg)
+		return
 	}
 
 	if newStatus.RequestedBy != kubeapi.UPDATE {
@@ -101,10 +103,12 @@ func shouldDeferForNodeDrain(ctx *baseOsMgrContext, id string, config *types.Bas
 
 	log.Noticef("shouldDeferForNodeDrain drainCheck id:%s state:%d baseOsConfig:%v baseOsStatus:%v drainStatus:%d",
 		id, status.State, config, status, drainStatus.Status)
-	if drainStatus.Status == kubeapi.NOTREQUESTED {
+	if drainStatus.Status == kubeapi.NOTREQUESTED ||
+		drainStatus.Status == kubeapi.FAILEDCORDON ||
+		drainStatus.Status == kubeapi.FAILEDDRAIN {
 		ctx.deferredBaseOsID = id
 		log.Noticef("shouldDeferForNodeDrain nodedrain-step:request requester:eve-os-update ctx:%s", id)
-		err := kubeapi.RequestNodeDrain(ctx.pubNodeDrainRequest, kubeapi.UPDATE)
+		err := kubeapi.RequestNodeDrain(ctx.pubNodeDrainRequest, kubeapi.UPDATE, id)
 		if err != nil {
 			log.Errorf("shouldDeferForNodeDrain: can't request node drain: %v", err)
 		}
@@ -113,9 +117,7 @@ func shouldDeferForNodeDrain(ctx *baseOsMgrContext, id string, config *types.Bas
 	if drainStatus.Status == kubeapi.REQUESTED ||
 		drainStatus.Status == kubeapi.STARTING ||
 		drainStatus.Status == kubeapi.CORDONED ||
-		drainStatus.Status == kubeapi.FAILEDCORDON ||
-		drainStatus.Status == kubeapi.DRAINRETRYING ||
-		drainStatus.Status == kubeapi.FAILEDDRAIN {
+		drainStatus.Status == kubeapi.DRAINRETRYING {
 		log.Functionf("shouldDeferForNodeDrain drain in-progress or in error, still defer")
 		return true
 	}

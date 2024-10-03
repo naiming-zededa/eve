@@ -67,11 +67,11 @@ func handleNodeDrainRequestImpl(ctxArg interface{}, key string,
 	configArg interface{}, oldConfigArg interface{}) {
 	ctx, ok := ctxArg.(*zedkubeContext)
 	if !ok {
-		log.Fatalf("handleNodeDrainRequestImpl invalid type in ctxArg: %v", ctxArg)
+		log.Errorf("handleNodeDrainRequestImpl invalid type in ctxArg: %v", ctxArg)
 	}
 	req, ok := configArg.(kubeapi.NodeDrainRequest)
 	if !ok {
-		log.Fatalf("handleNodeDrainRequestImpl invalid type in configArg: %v", configArg)
+		log.Errorf("handleNodeDrainRequestImpl invalid type in configArg: %v", configArg)
 	}
 	ccList := ctx.subEdgeNodeClusterConfig.GetAll()
 	if len(ccList) == 0 {

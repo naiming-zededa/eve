@@ -141,6 +141,23 @@ Update_CheckClusterComponents() {
     wait_for_item "update_cluster_post"
 }
 
+Update_RunDescheduler() {
+    # Don't run unless it has been installed
+    if [ ! -f /var/lib/descheduler_initialized ]; then
+        return
+    fi
+    # Only run once per boot
+    if [ -f /tmp/descheduler-ran ]; then
+        return
+    fi
+    # Job lives persistently in cluster, cleanup after old runs
+    if kubectl -n kube-system get job/descheduler-job; then
+        kubectl -n kube-system delete job/descheduler-job
+    fi
+    kubectl apply -f /etc/descheduler-job.yaml
+    touch /tmp/descheduler-ran
+}
+
 update_isClusterReady() {
     if ! kubectl cluster-info; then
         return 1

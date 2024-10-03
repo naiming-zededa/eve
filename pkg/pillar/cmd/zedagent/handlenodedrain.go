@@ -19,7 +19,8 @@ func handleNodeDrainStatusImpl(ctxArg interface{}, key string,
 	configArg interface{}, oldConfigArg interface{}) {
 	newStatus, ok := configArg.(kubeapi.NodeDrainStatus)
 	if !ok {
-		log.Fatalf("handleNodeDrainStatusImpl invalid type in configArg: %v", configArg)
+		log.Errorf("handleNodeDrainStatusImpl invalid type in configArg: %v", configArg)
+		return
 	}
 
 	if newStatus.RequestedBy != kubeapi.DEVICEOP {
