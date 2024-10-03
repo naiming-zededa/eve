@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	dg "github.com/lf-edge/eve-libs/depgraph"
 	"github.com/lf-edge/eve-libs/reconciler"
 	"github.com/lf-edge/eve/pkg/pillar/base"
@@ -40,10 +42,15 @@ import (
 // |   |              NetworkIO               |    |                Global              |   |
 // |   |                                      |    |                                    |   |
 // |   | +-----------+    +------------+      |    | +-------------+   +-------------+  |   |
-// |   | | NetIO     |    | NetIO      |      |    | | ResolvConf  |   | LocalIPRule |  |   |
-// |   | | (external)|    | (external) | ...  |    | | (singleton) |   | (singleton) |  |   |
+// |   | | NetIO     |    | NetIO      |      |    | | ResolvConf  |   |   IPRule    |  |   |
+// |   | | (external)|    | (external) | ...  |    | | (singleton) |   | (Local RT)  |  |   |
 // |   | +-----------+    +------------+      |    | +-------------+   +-------------+  |   |
-// |   +--------------------------------------+    +------------------------------------+   |
+// |   +--------------------------------------+    | +-------------------+              |   |
+// |                                               | |      IPRule       | ...          |   |
+// |                                               | | (for HV=kubevirt) |              |   |
+// |                                               | +-------------------+              |   |
+// |                                               +------------------------------------+   |
+// |                                                                                        |
 // |                                                                                        |
 // |   +-----------------+  +------------------+   +-------------------------------------+  |
 // |   |  PhysicalIfs    |  |  LogicalIO (L2)  |   |             Wireless                |  |
@@ -62,9 +69,9 @@ import (
 // |  |                                               +-------------------------------+  |  |
 // |  |                                               |            IPRules            |  |  |
 // |  |  +----------------------------------------+   |                               |  |  |
-// |  |  |               Adapters                 |   | +---------+  +----------+     |  |  |
-// |  |  |                                        |   | |SrcIPRule|  |SrcIPRule | ... |  |  |
-// |  |  | +---------+      +---------+           |   | +---------+  +----------+     |  |  |
+// |  |  |               Adapters                 |   | +-------+  +--------+         |  |  |
+// |  |  |                                        |   | |IPRule |  | IPRule | ...     |  |  |
+// |  |  | +---------+      +---------+           |   | +-------+  +--------+         |  |  |
 // |  |  | | Adapter |      | Adapter | ...       |   +-------------------------------+  |  |
 // |  |  | +---------+      +---------+           |                                      |  |
 // |  |  | +------------+   +------------+        |   +-------------------------------+  |  |
@@ -146,14 +153,11 @@ const (
 	intendedStateFile = "/run/nim-intended-state.dot"
 )
 
-const (
-	// Network bridge used by Kubernetes CNI.
-	// Currently, this is hardcoded for the Flannel CNI plugin.
-	kubeCNIBridge = "cni0"
+var (
 	// CIDR used for IP allocation for K3s pods.
-	kubePodCIDR = "10.42.0.0/16"
+	_, kubePodCIDR, _ = net.ParseCIDR("10.42.0.0/16")
 	// CIDR used for IP allocation for K3s services.
-	kubeSvcCIDR = "10.43.0.0/16"
+	_, kubeSvcCIDR, _ = net.ParseCIDR("10.43.0.0/16")
 )
 
 // LinuxDpcReconciler is a DPC-reconciler for Linux network stack,
@@ -178,9 +182,6 @@ type LinuxDpcReconciler struct {
 	PubCipherBlockStatus pubsub.Publication
 	CipherMetrics        *cipher.AgentMetrics
 	PubWwanConfig        pubsub.Publication
-
-	// Cluster status
-	SubEdgeNodeClusterStatus pubsub.Subscription
 
 	currentState  dg.Graph
 	intendedState dg.Graph
@@ -303,7 +304,8 @@ func (r *LinuxDpcReconciler) watcher(netEvents <-chan netmonitor.Event) {
 					}
 				}
 				if ev.Deleted {
-					changed := r.updateCurrentRoutes(r.lastArgs.DPC)
+					changed := r.updateCurrentRoutes(r.lastArgs.DPC,
+						r.lastArgs.ClusterStatus)
 					if changed {
 						r.addPendingReconcile(
 							L3SG, "interface delete triggered route change", true)
@@ -314,13 +316,14 @@ func (r *LinuxDpcReconciler) watcher(netEvents <-chan netmonitor.Event) {
 				if changed {
 					r.addPendingReconcile(L3SG, "address change", true)
 				}
-				changed = r.updateCurrentRoutes(r.lastArgs.DPC)
+				changed = r.updateCurrentRoutes(r.lastArgs.DPC, r.lastArgs.ClusterStatus)
 				if changed {
 					r.addPendingReconcile(L3SG, "address change triggered route change", true)
 				}
 
 			case netmonitor.DNSInfoChange:
-				newGlobalCfg := r.getIntendedGlobalCfg(r.lastArgs.DPC)
+				newGlobalCfg := r.getIntendedGlobalCfg(r.lastArgs.DPC,
+					r.lastArgs.ClusterStatus)
 				prevGlobalCfg := r.intendedState.SubGraph(GlobalSG)
 				if len(prevGlobalCfg.DiffItems(newGlobalCfg)) > 0 {
 					r.addPendingReconcile(GlobalSG, "DNS info change", true)
@@ -413,6 +416,10 @@ func (r *LinuxDpcReconciler) Reconcile(ctx context.Context, args Args) Reconcile
 		if r.flowlogStateChanged(args.FlowlogEnabled) {
 			r.addPendingReconcile(ACLsSG, "Flowlog state change", false)
 		}
+		if r.clusterStatusChanged(args.ClusterStatus) {
+			// Reconcile all items.
+			r.addPendingReconcile(GraphName, "Cluster status change", false)
+		}
 	}
 	if r.pendingReconcile.isPending {
 		reconcileSG = r.pendingReconcile.forSubGraph
@@ -444,7 +451,7 @@ func (r *LinuxDpcReconciler) Reconcile(ctx context.Context, args Args) Reconcile
 		var intSG dg.Graph
 		switch reconcileSG {
 		case GlobalSG:
-			intSG = r.getIntendedGlobalCfg(args.DPC)
+			intSG = r.getIntendedGlobalCfg(args.DPC, args.ClusterStatus)
 		case NetworkIoSG:
 			intSG = r.getIntendedNetworkIO(args.DPC)
 		case PhysicalIfsSG:
@@ -455,11 +462,12 @@ func (r *LinuxDpcReconciler) Reconcile(ctx context.Context, args Args) Reconcile
 			intSG = r.getIntendedLogicalIO(args.DPC)
 		case L3SG:
 			r.rebuildMTUMap(args.DPC)
-			intSG = r.getIntendedL3Cfg(args.DPC)
+			intSG = r.getIntendedL3Cfg(args.DPC, args.ClusterStatus)
 		case WirelessSG:
 			intSG = r.getIntendedWirelessCfg(args.DPC, args.AA, args.RS)
 		case ACLsSG:
-			intSG = r.getIntendedACLs(args.DPC, args.GCP, args.FlowlogEnabled)
+			intSG = r.getIntendedACLs(args.DPC, args.ClusterStatus, args.GCP,
+				args.FlowlogEnabled)
 		default:
 			// Only these top-level subgraphs are used for selective-reconcile for now.
 			r.Log.Fatalf("Unexpected SG select for reconcile: %s", reconcileSG)
@@ -671,6 +679,14 @@ func (r *LinuxDpcReconciler) flowlogStateChanged(flowlogEnabled bool) bool {
 	return r.lastArgs.FlowlogEnabled != flowlogEnabled
 }
 
+func (r *LinuxDpcReconciler) clusterStatusChanged(
+	newStatus types.EdgeNodeClusterStatus) bool {
+	// DPCReconciler cares only about the networking-related fields of the ClusterStatus.
+	return r.lastArgs.ClusterStatus.ClusterInterface != newStatus.ClusterInterface ||
+		!netutils.EqualIPNets(r.lastArgs.ClusterStatus.ClusterIPPrefix,
+			newStatus.ClusterIPPrefix)
+}
+
 func (r *LinuxDpcReconciler) updateCurrentState(args Args) (changed bool) {
 	if r.currentState == nil {
 		// Initialize only subgraphs with external items.
@@ -689,7 +705,7 @@ func (r *LinuxDpcReconciler) updateCurrentState(args Args) (changed bool) {
 	if addrsChanged := r.updateCurrentAdapterAddrs(args.DPC); addrsChanged {
 		changed = true
 	}
-	if routesChanged := r.updateCurrentRoutes(args.DPC); routesChanged {
+	if routesChanged := r.updateCurrentRoutes(args.DPC, args.ClusterStatus); routesChanged {
 		changed = true
 	}
 	return changed
@@ -778,20 +794,10 @@ func (r *LinuxDpcReconciler) updateCurrentAdapterAddrs(
 	return false
 }
 
-func (r *LinuxDpcReconciler) updateCurrentRoutes(dpc types.DevicePortConfig) (changed bool) {
+func (r *LinuxDpcReconciler) updateCurrentRoutes(dpc types.DevicePortConfig,
+	clusterStatus types.EdgeNodeClusterStatus) (changed bool) {
 	sgPath := dg.NewSubGraphPath(L3SG, RoutesSG)
 	currentRoutes := dg.New(dg.InitArgs{Name: RoutesSG})
-	cniIfIndex := -1
-	if r.HVTypeKube {
-		ifIndex, found, err := r.NetworkMonitor.GetInterfaceIndex(kubeCNIBridge)
-		if err != nil {
-			r.Log.Errorf("getIntendedRoutes: failed to get ifIndex for %s: %v",
-				kubeCNIBridge, err)
-		}
-		if err == nil && found {
-			cniIfIndex = ifIndex
-		}
-	}
 	for _, port := range dpc.Ports {
 		if port.IfName == "" || port.InvalidConfig {
 			continue
@@ -816,6 +822,20 @@ func (r *LinuxDpcReconciler) updateCurrentRoutes(dpc types.DevicePortConfig) (ch
 			r.Log.Errorf("updateCurrentRoutes: ListRoutes failed for ifIndex %d: %v",
 				ifIndex, err)
 		}
+		if r.HVTypeKube && clusterStatus.ClusterInterface == port.Logicallabel {
+			k3sSvcRoutes, err := r.NetworkMonitor.ListRoutes(netmonitor.RouteFilters{
+				FilterByTable: true,
+				Table:         devicenetwork.KubeSvcRT,
+				FilterByIf:    true,
+				IfIndex:       ifIndex,
+			})
+			if err == nil {
+				routes = append(routes, k3sSvcRoutes...)
+			} else {
+				r.Log.Errorf("updateCurrentRoutes: ListRoutes failed for ifIndex %d "+
+					"and the KubeSvc table: %v", ifIndex, err)
+			}
+		}
 		for _, rt := range routes {
 			currentRoutes.PutItem(linux.Route{
 				Route:         rt.Data.(netlink.Route),
@@ -825,38 +845,6 @@ func (r *LinuxDpcReconciler) updateCurrentRoutes(dpc types.DevicePortConfig) (ch
 				State:         reconciler.ItemStateCreated,
 				LastOperation: reconciler.OperationCreate,
 			})
-		}
-
-		if cniIfIndex != -1 {
-			cniRoutes, err := r.NetworkMonitor.ListRoutes(netmonitor.RouteFilters{
-				FilterByTable: true,
-				Table:         table,
-				FilterByIf:    true,
-				IfIndex:       cniIfIndex,
-			})
-			if err != nil {
-				r.Log.Errorf("updateCurrentRoutes: ListRoutes failed for ifIndex %d: %v",
-					cniIfIndex, err)
-			}
-			for _, rt := range cniRoutes {
-				// Make it a /16 route for cluster IP range.
-				routeTmp := rt.Data.(netlink.Route)
-				_, tmpRoute, err := net.ParseCIDR(kubePodCIDR)
-				if err != nil {
-					r.Log.Errorf("updateCurrentRoutes: failed to parse CIDR %s: %v",
-						kubePodCIDR, err)
-					continue
-				}
-				routeTmp.Dst = tmpRoute
-				currentRoutes.PutItem(linux.Route{
-					Route:         routeTmp,
-					UnmanagedLink: true,
-				}, &reconciler.ItemStateData{
-					State:         reconciler.ItemStateCreated,
-					LastOperation: reconciler.OperationCreate,
-				})
-			}
-
 		}
 	}
 	prevSG := dg.GetSubGraph(r.currentState, sgPath)
@@ -873,23 +861,44 @@ func (r *LinuxDpcReconciler) updateIntendedState(args Args) {
 		Description: "Device Connectivity provided using Linux network stack",
 	}
 	r.intendedState = dg.New(graphArgs)
-	r.intendedState.PutSubGraph(r.getIntendedGlobalCfg(args.DPC))
+	r.intendedState.PutSubGraph(r.getIntendedGlobalCfg(args.DPC, args.ClusterStatus))
 	r.intendedState.PutSubGraph(r.getIntendedNetworkIO(args.DPC))
 	r.intendedState.PutSubGraph(r.getIntendedPhysicalIfs(args.DPC))
 	r.intendedState.PutSubGraph(r.getIntendedLogicalIO(args.DPC))
-	r.intendedState.PutSubGraph(r.getIntendedL3Cfg(args.DPC))
+	r.intendedState.PutSubGraph(r.getIntendedL3Cfg(args.DPC, args.ClusterStatus))
 	r.intendedState.PutSubGraph(r.getIntendedWirelessCfg(args.DPC, args.AA, args.RS))
-	r.intendedState.PutSubGraph(r.getIntendedACLs(args.DPC, args.GCP, args.FlowlogEnabled))
+	r.intendedState.PutSubGraph(r.getIntendedACLs(args.DPC, args.ClusterStatus, args.GCP,
+		args.FlowlogEnabled))
 }
 
-func (r *LinuxDpcReconciler) getIntendedGlobalCfg(dpc types.DevicePortConfig) dg.Graph {
+func (r *LinuxDpcReconciler) getIntendedGlobalCfg(dpc types.DevicePortConfig,
+	clusterStatus types.EdgeNodeClusterStatus) dg.Graph {
 	graphArgs := dg.InitArgs{
 		Name:        GlobalSG,
 		Description: "Global configuration",
 	}
 	intendedCfg := dg.New(graphArgs)
 	// Move IP rule that matches local destined packets below network instance rules.
-	intendedCfg.PutItem(linux.LocalIPRule{Priority: devicenetwork.PbrLocalDestPrio}, nil)
+	intendedCfg.PutItem(linux.IPRule{
+		Priority: devicenetwork.PbrLocalDestPrio,
+		Table:    unix.RT_TABLE_LOCAL,
+	}, nil)
+	if r.HVTypeKube {
+		intendedCfg.PutItem(linux.IPRule{
+			Dst:      kubePodCIDR,
+			Priority: devicenetwork.PbrKubeNetworkPrio,
+			Table:    unix.RT_TABLE_MAIN,
+		}, nil)
+		tableForKubeSvc := unix.RT_TABLE_MAIN
+		if clusterStatus.ClusterInterface != "" {
+			tableForKubeSvc = devicenetwork.KubeSvcRT
+		}
+		intendedCfg.PutItem(linux.IPRule{
+			Dst:      kubeSvcCIDR,
+			Priority: devicenetwork.PbrKubeNetworkPrio,
+			Table:    tableForKubeSvc,
+		}, nil)
+	}
 	if len(dpc.Ports) == 0 {
 		return intendedCfg
 	}
@@ -1074,20 +1083,22 @@ func (r *LinuxDpcReconciler) getIntendedLogicalIO(dpc types.DevicePortConfig) dg
 	return intendedIO
 }
 
-func (r *LinuxDpcReconciler) getIntendedL3Cfg(dpc types.DevicePortConfig) dg.Graph {
+func (r *LinuxDpcReconciler) getIntendedL3Cfg(dpc types.DevicePortConfig,
+	clusterStatus types.EdgeNodeClusterStatus) dg.Graph {
 	graphArgs := dg.InitArgs{
 		Name:        L3SG,
 		Description: "Network Layer3 configuration",
 	}
 	intendedL3 := dg.New(graphArgs)
-	intendedL3.PutSubGraph(r.getIntendedAdapters(dpc))
+	intendedL3.PutSubGraph(r.getIntendedAdapters(dpc, clusterStatus))
 	intendedL3.PutSubGraph(r.getIntendedSrcIPRules(dpc))
-	intendedL3.PutSubGraph(r.getIntendedRoutes(dpc))
+	intendedL3.PutSubGraph(r.getIntendedRoutes(dpc, clusterStatus))
 	intendedL3.PutSubGraph(r.getIntendedArps(dpc))
 	return intendedL3
 }
 
-func (r *LinuxDpcReconciler) getIntendedAdapters(dpc types.DevicePortConfig) dg.Graph {
+func (r *LinuxDpcReconciler) getIntendedAdapters(dpc types.DevicePortConfig,
+	clusterStatus types.EdgeNodeClusterStatus) dg.Graph {
 	graphArgs := dg.InitArgs{
 		Name:        AdaptersSG,
 		Description: "L3 configuration assigned to network interfaces",
@@ -1103,6 +1114,13 @@ func (r *LinuxDpcReconciler) getIntendedAdapters(dpc types.DevicePortConfig) dg.
 		if !port.IsL3Port || port.IfName == "" || port.InvalidConfig {
 			continue
 		}
+		var staticIPs []*net.IPNet
+		if r.HVTypeKube {
+			if port.Logicallabel == clusterStatus.ClusterInterface &&
+				clusterStatus.ClusterIPPrefix != nil {
+				staticIPs = append(staticIPs, clusterStatus.ClusterIPPrefix)
+			}
+		}
 		adapter := linux.Adapter{
 			LogicalLabel: port.Logicallabel,
 			IfName:       port.IfName,
@@ -1110,6 +1128,7 @@ func (r *LinuxDpcReconciler) getIntendedAdapters(dpc types.DevicePortConfig) dg.
 			WirelessType: port.WirelessCfg.WType,
 			DhcpType:     port.Dhcp,
 			MTU:          r.intfMTU[port.Logicallabel],
+			StaticIPs:    staticIPs,
 		}
 		intendedAdapters.PutItem(adapter, nil)
 		if port.Dhcp != types.DhcpTypeNone &&
@@ -1162,19 +1181,18 @@ func (r *LinuxDpcReconciler) getIntendedSrcIPRules(dpc types.DevicePortConfig) d
 			continue
 		}
 		for _, ipAddr := range ipAddrs {
-			intendedRules.PutItem(linux.SrcIPRule{
-				AdapterLL:     port.Logicallabel,
-				AdapterIfName: port.IfName,
-				IPAddr:        ipAddr.IP,
-				Priority:      devicenetwork.PbrLocalOrigPrio,
-				Table:         devicenetwork.DPCBaseRTIndex + ifIndex,
+			intendedRules.PutItem(linux.IPRule{
+				Src:      netutils.HostSubnet(ipAddr.IP),
+				Priority: devicenetwork.PbrLocalOrigPrio,
+				Table:    devicenetwork.DPCBaseRTIndex + ifIndex,
 			}, nil)
 		}
 	}
 	return intendedRules
 }
 
-func (r *LinuxDpcReconciler) getIntendedRoutes(dpc types.DevicePortConfig) dg.Graph {
+func (r *LinuxDpcReconciler) getIntendedRoutes(dpc types.DevicePortConfig,
+	clusterStatus types.EdgeNodeClusterStatus) dg.Graph {
 	graphArgs := dg.InitArgs{
 		Name:        RoutesSG,
 		Description: "IP routes",
@@ -1182,66 +1200,6 @@ func (r *LinuxDpcReconciler) getIntendedRoutes(dpc types.DevicePortConfig) dg.Gr
 	intendedRoutes := dg.New(graphArgs)
 	// Routes are copied from the main table.
 	srcTable := syscall.RT_TABLE_MAIN
-	var cniRoutes []netmonitor.Route
-	var svcRoute *netlink.Route
-	var encConfig *types.EdgeNodeClusterStatus
-	if r.HVTypeKube {
-		ifIndex, found, err := r.NetworkMonitor.GetInterfaceIndex(kubeCNIBridge)
-		if err != nil {
-			r.Log.Errorf("getIntendedRoutes: failed to get ifIndex for %s: %v",
-				kubeCNIBridge, err)
-		}
-		if err == nil && found {
-			cniRoutes, err = r.NetworkMonitor.ListRoutes(netmonitor.RouteFilters{
-				FilterByTable: true,
-				Table:         srcTable,
-				FilterByIf:    true,
-				IfIndex:       ifIndex,
-			})
-			if err != nil {
-				r.Log.Errorf("getIntendedRoutes: ListRoutes failed for ifIndex %d: %v",
-					ifIndex, err)
-			}
-		}
-
-		// set up the kube SVC route towards the cluster interface with nexthop being the
-		// cluster prefix IP address of the node. Get the EdgeNodeClusterStatus from the
-		// zedkube to get the interface, prefix.
-		// the main reason of this route is due to in cluster mode, the cluster interface
-		// can be dedicated only for kube, and may not have a default route to resolve
-		// the 10.43/16 service CIDR.
-		sub := r.SubEdgeNodeClusterStatus
-		if sub != nil {
-			items := sub.GetAll()
-			for _, item := range items {
-				s := item.(types.EdgeNodeClusterStatus)
-				encConfig = &s
-				break
-			}
-			if encConfig != nil {
-				link, err := netlink.LinkByName(encConfig.ClusterInterface)
-				if err != nil {
-					r.Log.Errorf("getIntendedRoutes: failed to get cluster link for %s: %v",
-						encConfig.ClusterInterface, err)
-				}
-				if err == nil && link != nil {
-					_, dst, _ := net.ParseCIDR(kubeSvcCIDR)
-					gw := encConfig.ClusterIPPrefix.IP
-					routes, err := netlink.RouteGet(gw)
-					if err == nil && len(routes) > 0 {
-						svcRoute = &netlink.Route{
-							LinkIndex: link.Attrs().Index,
-							Dst:       dst,
-							Table:     srcTable,
-							Gw:        gw,
-							Family:    netlink.FAMILY_V4,
-						}
-					}
-				}
-			}
-			r.Log.Noticef("getIntendedRoutes: CNI routes: %v, svc %v", cniRoutes, svcRoute) // XXX
-		}
-	}
 	for _, port := range dpc.Ports {
 		if port.IfName == "" || port.InvalidConfig {
 			continue
@@ -1276,23 +1234,28 @@ func (r *LinuxDpcReconciler) getIntendedRoutes(dpc types.DevicePortConfig) dg.Gr
 				AdapterLL:     port.Logicallabel,
 			}, nil)
 		}
-		for _, rt := range cniRoutes {
-			rtCopy := rt.Data.(netlink.Route)
-			rtCopy.Table = dstTable
-			r.prepareRouteForCopy(&rtCopy)
+		if r.HVTypeKube && clusterStatus.ClusterInterface == port.Logicallabel &&
+			clusterStatus.ClusterIPPrefix != nil {
+			// Ensure that packets destined for K3s services do not use the default route,
+			// but are instead routed through the cluster port. This guarantees that traffic
+			// handled by kube-proxy is properly SNATed to the cluster IP. That's the theory
+			// at least. We're not entirely certain. Without this route, however,
+			// some Longhorn pods fail to access K3s services when the cluster IP is configured
+			// on a non-default port.
 			intendedRoutes.PutItem(linux.Route{
-				Route:         rtCopy,
-				UnmanagedLink: true,
+				Route: netlink.Route{
+					LinkIndex: ifIndex,
+					Family:    netlink.FAMILY_V4,
+					Scope:     netlink.SCOPE_UNIVERSE,
+					Protocol:  unix.RTPROT_STATIC,
+					Type:      unix.RTN_UNICAST,
+					Dst:       kubeSvcCIDR,
+					Gw:        clusterStatus.ClusterIPPrefix.IP,
+					Table:     devicenetwork.KubeSvcRT,
+				},
+				AdapterIfName: port.IfName,
+				AdapterLL:     port.Logicallabel,
 			}, nil)
-		}
-
-		// add the svc route to the intended routes
-		if svcRoute != nil && encConfig != nil && encConfig.ClusterInterface == port.IfName {
-			intendedRoutes.PutItem(linux.Route{
-				Route:         *svcRoute,
-				UnmanagedLink: true,
-			}, nil)
-			r.Log.Noticef("getIntendedRoutes: svcRoute, port %v, dsttable %v, routes %v", port.IfName, dstTable, svcRoute) // XXX
 		}
 	}
 	return intendedRoutes
@@ -1595,8 +1558,9 @@ func (r *LinuxDpcReconciler) getIntendedWwanConfig(dpc types.DevicePortConfig,
 	return generic.Wwan{Config: config}
 }
 
-func (r *LinuxDpcReconciler) getIntendedACLs(
-	dpc types.DevicePortConfig, gcp types.ConfigItemValueMap, withFlowlog bool) dg.Graph {
+func (r *LinuxDpcReconciler) getIntendedACLs(dpc types.DevicePortConfig,
+	clusterStatus types.EdgeNodeClusterStatus, gcp types.ConfigItemValueMap,
+	withFlowlog bool) dg.Graph {
 	graphArgs := dg.InitArgs{
 		Name:        ACLsSG,
 		Description: "Device-wide ACLs",
@@ -1679,7 +1643,7 @@ func (r *LinuxDpcReconciler) getIntendedACLs(
 		}
 	}
 
-	r.getIntendedFilterRules(gcp, dpc, intendedIPv4ACLs, intendedIPv6ACLs)
+	r.getIntendedFilterRules(gcp, dpc, clusterStatus, intendedIPv4ACLs, intendedIPv6ACLs)
 	if withFlowlog {
 		r.getIntendedMarkingRules(dpc, intendedIPv4ACLs, intendedIPv6ACLs)
 	}
@@ -1687,7 +1651,8 @@ func (r *LinuxDpcReconciler) getIntendedACLs(
 }
 
 func (r *LinuxDpcReconciler) getIntendedFilterRules(gcp types.ConfigItemValueMap,
-	dpc types.DevicePortConfig, intendedIPv4ACLs, intendedIPv6ACLs dg.Graph) {
+	dpc types.DevicePortConfig, clusterStatus types.EdgeNodeClusterStatus, intendedIPv4ACLs,
+	intendedIPv6ACLs dg.Graph) {
 	// Prepare filter/INPUT rules.
 	var inputV4Rules, inputV6Rules []iptables.Rule
 
@@ -1817,6 +1782,69 @@ func (r *LinuxDpcReconciler) getIntendedFilterRules(gcp types.ConfigItemValueMap
 	icmpV6Rule := icmpRule // copy
 	icmpV6Rule.MatchOpts = []string{"-p", "ipv6-icmp"}
 	inputV6Rules = append(inputV6Rules, icmpV6Rule)
+
+	clusterPort := dpc.LookupPortByLogicallabel(clusterStatus.ClusterInterface)
+	if r.HVTypeKube && clusterPort != nil && !clusterPort.InvalidConfig &&
+		clusterPort.IfName != "" && clusterStatus.ClusterIPPrefix != nil {
+		// LookupExtInterface in k3s/pkg/agent/flannel/flannel.go will pick
+		// whatever the first IP address is returned by netlink for the cluster
+		// interface. This means that VXLAN tunnel may be configured with EVE
+		// mgmt/app-shared IP instead of the cluster IP and we have to allow it.
+		// Therefore, we do not use "-d" filter for the VXLAN rule.
+		vxlanRule := iptables.Rule{
+			RuleLabel: "Allow VXLAN",
+			MatchOpts: []string{"-p", "udp", "-i", clusterPort.IfName,
+				"--dport", "8472"},
+			Target: "ACCEPT",
+			Description: "Allow VXLAN-encapsulated traffic to enter the device " +
+				"via cluster interface",
+		}
+		etcdRule := iptables.Rule{
+			RuleLabel: "Allow etcd traffic",
+			MatchOpts: []string{"-p", "tcp", "-i", clusterPort.IfName,
+				"-d", clusterStatus.ClusterIPPrefix.IP.String(), "--dport", "2379:2380"},
+			Target:      "ACCEPT",
+			Description: "Allow etcd client and server-to-server communication",
+		}
+		k3sMetricsRule := iptables.Rule{
+			RuleLabel: "Allow K3s metrics",
+			MatchOpts: []string{"-p", "tcp", "-i", clusterPort.IfName,
+				"-d", clusterStatus.ClusterIPPrefix.IP.String(), "--dport", "10250"},
+			Target: "ACCEPT",
+			Description: "Allow traffic carrying K3s metrics to enter the device " +
+				"via cluster interface",
+		}
+		k3sAPIServerRule := iptables.Rule{
+			RuleLabel: "Allow K3s API requests",
+			MatchOpts: []string{"-p", "tcp", "-i", clusterPort.IfName,
+				"-d", clusterStatus.ClusterIPPrefix.IP.String(), "--dport", "6443"},
+			Target: "ACCEPT",
+			Description: "Allow K3s API requests to enter the device " +
+				"via cluster interface",
+		}
+		clusterPubSub := iptables.Rule{
+			RuleLabel: "Allow access to Cluster PubSub",
+			MatchOpts: []string{"-p", "tcp", "-i", clusterPort.IfName,
+				"-d", clusterStatus.ClusterIPPrefix.IP.String(), "--dport", "12345"},
+			Target:      "ACCEPT",
+			Description: "Allow access to Cluster PubSub via cluster interface",
+		}
+		clusterStatusRule := iptables.Rule{
+			RuleLabel: "Allow access to Cluster Status",
+			MatchOpts: []string{"-p", "tcp", "-i", clusterPort.IfName,
+				"-d", clusterStatus.ClusterIPPrefix.IP.String(), "--dport", "12346"},
+			Target:      "ACCEPT",
+			Description: "Allow access to Cluster Status via cluster interface",
+		}
+		forIPv6 := clusterStatus.ClusterIPPrefix.IP.To4() == nil
+		if forIPv6 {
+			inputV6Rules = append(inputV6Rules, vxlanRule, etcdRule,
+				k3sMetricsRule, k3sAPIServerRule, clusterStatusRule, clusterPubSub)
+		} else {
+			inputV4Rules = append(inputV4Rules, vxlanRule, etcdRule,
+				k3sMetricsRule, k3sAPIServerRule, clusterStatusRule, clusterPubSub)
+		}
+	}
 
 	// Allow all traffic that belongs to an already established connection.
 	allowEstablishedConn := iptables.Rule{
@@ -1981,118 +2009,9 @@ func (r *LinuxDpcReconciler) getIntendedMarkingRules(dpc types.DevicePortConfig,
 		TargetOpts:  []string{"--set-mark", controlProtoMark("in_dhcp")},
 		Description: "Mark ingress DHCP traffic",
 	}
-	// Mark all traffic from Kubernetes pods to Kubernetes services.
-	// Note that traffic originating from another node is already D-NATed
-	// and will get marked with the kube_pod mark.
-	markKubeSvc := iptables.Rule{
-		RuleLabel:   "Kubernetes service mark",
-		MatchOpts:   []string{"-i", kubeCNIBridge, "-s", kubePodCIDR, "-d", kubeSvcCIDR},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("kube_svc")},
-		Description: "Mark traffic from Kubernetes pods to Kubernetes services",
-	}
-	// Mark all traffic forwarded between Kubernetes pods.
-	markKubePod := iptables.Rule{
-		RuleLabel:   "Kubernetes pod mark",
-		MatchOpts:   []string{"-s", kubePodCIDR, "-d", kubePodCIDR},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("kube_pod")},
-		Description: "Mark all traffic directly forwarded between Kubernetes pods",
-	}
-	// Mark all DNS requests made from the Kubernetes network.
-	markKubeDNS := iptables.Rule{
-		RuleLabel:     "Kubernetes DNS mark",
-		MatchOpts:     []string{"-s", kubePodCIDR, "-p", "udp", "--dport", "domain"},
-		Target:        "CONNMARK",
-		TargetOpts:    []string{"--set-mark", controlProtoMark("kube_dns")},
-		AppliedBefore: []string{markKubeSvc.RuleLabel, markKubePod.RuleLabel},
-		Description:   "Mark DNS requests made from the Kubernetes network",
-	}
-
-	// XXX some kube cluster rules
-	markK3s := iptables.Rule{
-		RuleLabel:   "K3s mark",
-		MatchOpts:   []string{"-p", "tcp", "--dport", "6443"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_k3s")},
-		Description: "Mark K3S API server traffic for kubernetes",
-	}
-
-	markEtcd := iptables.Rule{
-		RuleLabel:   "Etcd mark",
-		MatchOpts:   []string{"-p", "tcp", "--dport", "2379:2381"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_etcd")},
-		Description: "Mark K3S HA with embedded etcd traffic for kubernetes",
-	}
-
-	markFlannel := iptables.Rule{
-		RuleLabel:   "Flannel mark",
-		MatchOpts:   []string{"-p", "udp", "--dport", "8472"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_flannel")},
-		Description: "Mark K3S with Flannel VxLan traffic for kubernetes",
-	}
-
-	markMetrics := iptables.Rule{
-		RuleLabel:   "Metrics mark",
-		MatchOpts:   []string{"-p", "tcp", "--dport", "10250"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_metrics")},
-		Description: "Mark K3S metrics traffic for kubernetes",
-	}
-
-	markLongHornWebhook := iptables.Rule{
-		RuleLabel:   "Longhorn Webhook",
-		MatchOpts:   []string{"-p", "tcp", "--dport", "9501:9503"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_lhweb")},
-		Description: "Mark K3S HA with longhorn webhook for kubernetes",
-	}
-	markLongHornInstMgr := iptables.Rule{
-		RuleLabel:   "Longhorn Instance Manager",
-		MatchOpts:   []string{"-p", "tcp", "--dport", "8500:8501"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_lhinstmgr")},
-		Description: "Mark K3S HA with longhorn instance manager for kubernetes",
-	}
-	markIscsi := iptables.Rule{
-		RuleLabel:   "Iscsi",
-		MatchOpts:   []string{"-p", "tcp", "--dport", "3260"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_iscsi")},
-		Description: "Mark K3S HA with longhorn iscsi for kubernetes",
-	}
-	markNFS := iptables.Rule{
-		RuleLabel:   "NFS",
-		MatchOpts:   []string{"-p", "tcp", "--dport", "2049"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_nfs")},
-		Description: "Mark K3S HA with longhorn nfs for kubernetes",
-	}
-	markEncPub := iptables.Rule{ // XXX EncPubSub
-		RuleLabel:   "EncPubSub",
-		MatchOpts:   []string{"-p", "tcp", "--dport", "12345"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_encpubsub")},
-		Description: "Mark EdgeNode PubSub traffic",
-	}
-
-	markEncBootstrap := iptables.Rule{ // XXX EncPubSub bootstrap status
-		RuleLabel:   "EncBootstrap",
-		MatchOpts:   []string{"-p", "tcp", "--dport", "12346"},
-		Target:      "CONNMARK",
-		TargetOpts:  []string{"--set-mark", controlProtoMark("in_encbootstrap")},
-		Description: "Mark EdgeNode Cluster bootstrap status traffic",
-	}
 
 	protoMarkV4Rules := []iptables.Rule{
 		markSSHAndGuacamole, markVnc, markIcmpV4, markDhcp,
-	}
-	if r.HVTypeKube {
-		protoMarkV4Rules = append(protoMarkV4Rules, markKubeDNS, markKubeSvc, markKubePod,
-			markK3s, markEtcd, markFlannel, markMetrics, markLongHornWebhook, markLongHornInstMgr,
-			markIscsi, markNFS, markEncPub, markEncBootstrap)
 	}
 	protoMarkV6Rules := []iptables.Rule{
 		markSSHAndGuacamole, markVnc, markIcmpV6,
@@ -2222,206 +2141,6 @@ func (r *LinuxDpcReconciler) getIntendedMarkingRules(dpc types.DevicePortConfig,
 		intendedIPv4ACLs.PutItem(markRule, nil)
 		markRule.ForIPv6 = true
 		intendedIPv6ACLs.PutItem(markRule, nil)
-	}
-
-	// XXX I know this part is removed, but leave it here for now before refactoring
-	// XXX
-	// Deny traffic forwarding between device ports (e.g. from eth0 to eth1).
-	// Simply drop all non-application forwarded traffic.
-	// Zero application mark means that the matched flow is not from/to application.
-	nonAppMark := fmt.Sprintf("0/%d", iptables.AppIDMask)
-	denyNonAppForwarding := iptables.Rule{
-		RuleLabel: "Drop traffic forwarded between ports",
-		Table:     "mangle",
-		ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-		MatchOpts: []string{"--match", "connmark", "--mark", nonAppMark},
-		Target:    "DROP",
-		Description: "Rule to ensure that forwarding between device ports is not allowed " +
-			"(device cannot be used as a router to hop from one network to another)",
-	}
-	denyNonAppForwarding.ForIPv6 = false
-	intendedIPv4ACLs.PutItem(denyNonAppForwarding, nil)
-	denyNonAppForwarding.ForIPv6 = true
-	intendedIPv6ACLs.PutItem(denyNonAppForwarding, nil)
-	// Allow forwarding of all DHCP traffic.
-	// Application-initiated DHCP requests can match the same conntrack entry
-	// as was created for DHCP requests sent by the DHCP client of EVE.
-	// This is because source/destination IPs are undefined or broadcast:
-	//  [72]: udp 17 src=0.0.0.0 dst=255.255.255.255 sport=68 dport=67
-	//        src=255.255.255.255 dst=0.0.0.0 sport=67 dport=68 mark=0xa
-	// However, this means that the application DHCP traffic may get mark "in_dhcp"
-	// (as opposed to "app_dhcp") and denyNonAppForwarding would match it with
-	// the nonAppMark filter and forbid forwarding (which is problem particularly
-	// for switch NI).
-	allowDHCPForwarding := iptables.Rule{
-		RuleLabel: "Allow DHCP forwarding",
-		Table:     "mangle",
-		ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-		MatchOpts: []string{"--match", "connmark", "--mark",
-			controlProtoMark("in_dhcp")},
-		Target:        "ACCEPT",
-		AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-		Description:   "Allow forwarding of all DHCP traffic",
-	}
-	intendedIPv4ACLs.PutItem(allowDHCPForwarding, nil)
-	if r.HVTypeKube {
-		// Kubernetes network is an exception where we allow forwarding
-		// for most of the traffic.
-		allowKubeDNSForwarding := iptables.Rule{
-			RuleLabel: "Allow Kubernetes DNS forwarding",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("kube_dns")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of DNS traffic inside the Kubernetes network",
-		}
-		intendedIPv4ACLs.PutItem(allowKubeDNSForwarding, nil)
-		allowKubeSvcForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding to Kubernetes services",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("kube_svc")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description: "Allow forwarding of all traffic from Kubernetes pods " +
-				"to Kubernetes services",
-		}
-		intendedIPv4ACLs.PutItem(allowKubeSvcForwarding, nil)
-		allowKubePodForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between Kubernetes pods",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("kube_pod")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between Kubernetes pods",
-		}
-		intendedIPv4ACLs.PutItem(allowKubePodForwarding, nil)
-
-		// cluster additions
-		allowK3sForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between K3s api server",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_k3s")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between K3s api server",
-		}
-		intendedIPv4ACLs.PutItem(allowK3sForwarding, nil)
-
-		allowEtcdForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between K3s etcd server",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_etcd")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between K3s etcd server",
-		}
-		intendedIPv4ACLs.PutItem(allowEtcdForwarding, nil)
-
-		allowFlannelForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between K3s flannel server",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_flannel")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between K3s flannel server",
-		}
-		intendedIPv4ACLs.PutItem(allowFlannelForwarding, nil)
-
-		allowMetricsForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between K3s metrics traffic",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_metrics")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between K3s metrics traffic",
-		}
-		intendedIPv4ACLs.PutItem(allowMetricsForwarding, nil)
-
-		allowLhWebHookForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between longhorn webhook",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_lhweb")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between longhorn webhook",
-		}
-		intendedIPv4ACLs.PutItem(allowLhWebHookForwarding, nil)
-
-		allowLhInstMgrForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between longhorn instance manager",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_lhinstmgr")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between longhorn instance manager",
-		}
-		intendedIPv4ACLs.PutItem(allowLhInstMgrForwarding, nil)
-
-		allowIscsiForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between longhorn iscsi",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_iscsi")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between longhorn iscsi",
-		}
-		intendedIPv4ACLs.PutItem(allowIscsiForwarding, nil)
-
-		allowNFSForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between longhorn nfs",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_nfs")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between longhorn nfs",
-		}
-		intendedIPv4ACLs.PutItem(allowNFSForwarding, nil)
-
-		allowEncPubForwarding := iptables.Rule{
-			RuleLabel: "Allow forwarding between EdgeNode PubSub traffic",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_encpubsub")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between EdgeNode PubSub traffic",
-		}
-		intendedIPv4ACLs.PutItem(allowEncPubForwarding, nil)
-
-		allowEncBootstrap := iptables.Rule{
-			RuleLabel: "Allow forwarding between EdgeNode Cluster bootstrap traffic",
-			Table:     "mangle",
-			ChainName: "FORWARD" + iptables.DeviceChainSuffix,
-			MatchOpts: []string{"--match", "connmark", "--mark",
-				controlProtoMark("in_encbootstrap")},
-			Target:        "ACCEPT",
-			AppliedBefore: []string{denyNonAppForwarding.RuleLabel},
-			Description:   "Allow forwarding of all traffic between EdgeNode Cluster bootstrap traffic",
-		}
-		intendedIPv4ACLs.PutItem(allowEncBootstrap, nil)
 	}
 
 	// Mark all un-marked local traffic generated by local services.

@@ -2589,7 +2589,7 @@ func handleEdgeNodeConfigItem(ctx *zedagentContext, gcp *types.ConfigItemValueMa
 		ClusterName:           encApiConfig.ClusterName,
 		ClusterID:             clusterUUID,
 		ClusterInterface:      encApiConfig.ClusterInterface,
-		ClusterIPPrefix:       *ipNet,
+		ClusterIPPrefix:       ipNet,
 		IsWorkerNode:          encApiConfig.IsWorkerNode,
 		JoinServerIP:          joinServerIP,
 		BootstrapNode:         isJoinNode,

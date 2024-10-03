@@ -26,7 +26,7 @@ type EdgeNodeClusterConfig struct {
 	ClusterName           string
 	ClusterID             UUIDandVersion
 	ClusterInterface      string
-	ClusterIPPrefix       net.IPNet
+	ClusterIPPrefix       *net.IPNet
 	IsWorkerNode          bool
 	JoinServerIP          net.IP
 	BootstrapNode         bool
@@ -51,7 +51,8 @@ type EdgeNodeClusterStatus struct {
 	ClusterName           string
 	ClusterID             UUIDandVersion
 	ClusterInterface      string
-	ClusterIPPrefix       net.IPNet
+	ClusterIPPrefix       *net.IPNet
+	ClusterIPIsReady      bool
 	IsWorkerNode          bool
 	JoinServerIP          net.IP
 	BootstrapNode         bool

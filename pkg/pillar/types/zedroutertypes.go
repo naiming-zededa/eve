@@ -1358,4 +1358,10 @@ const (
 	// MACGeneratorGloballyScoped generates MAC addresses which are with high probability
 	// unique globally, i.e. across entire fleet of devices.
 	MACGeneratorGloballyScoped = 2
+	// MACGeneratorClusterDeterministic generates the same MAC address for a given
+	// app interface on every node in the cluster.
+	// Additionally, the probability of MAC address conflict with other devices inside
+	// and outside the cluster is very low (same property that MACGeneratorGloballyScoped
+	// provides).
+	MACGeneratorClusterDeterministic = 3
 )

@@ -118,7 +118,7 @@ func startupNotifyPeers(ctx *zedkubeContext) {
 }
 
 func checkNotifyPeer(ctx *zedkubeContext) {
-	if ctx.encNodeIPAddress == nil {
+	if !ctx.clusterIPIsReady {
 		return
 	}
 
@@ -146,8 +146,7 @@ func handleEncPubToRemoteData(ctx *zedkubeContext, header *types.EncPubHeader, b
 }
 
 func getClusterNodes(ctx *zedkubeContext) ([]string, bool, error) {
-	myNodeIP := ctx.encNodeIPAddress
-	if myNodeIP == nil {
+	if !ctx.clusterIPIsReady {
 		return nil, true, nil
 	}
 
@@ -171,10 +170,11 @@ func getClusterNodes(ctx *zedkubeContext) ([]string, bool, error) {
 	}
 
 	// get all the nodes internal ip addresses except for my own
+	clusterIPStr := ctx.clusterConfig.ClusterIPPrefix.IP.String()
 	var hosts []string
 	for _, node := range nodes.Items {
 		for _, addr := range node.Status.Addresses {
-			if addr.Type == corev1.NodeInternalIP && addr.Address != myNodeIP.String() {
+			if addr.Type == corev1.NodeInternalIP && addr.Address != clusterIPStr {
 				hosts = append(hosts, addr.Address)
 			}
 		}

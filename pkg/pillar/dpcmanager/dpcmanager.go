@@ -94,6 +94,7 @@ type DpcManager struct {
 	enableLastResort bool
 	devUUID          uuid.UUID
 	flowlogEnabled   bool
+	clusterStatus    types.EdgeNodeClusterStatus
 	// Boot-time configuration
 	dpclPresentAtBoot bool
 
@@ -188,17 +189,19 @@ const (
 	commandUpdateDevUUID
 	commandProcessWwanStatus
 	commandUpdateFlowlogState
+	commandUpdateClusterStatus
 )
 
 type inputCommand struct {
 	cmd            command
-	dpc            types.DevicePortConfig   // for commandAddDPC and commandDelDPC
-	gcp            types.ConfigItemValueMap // for commandUpdateGCP
-	aa             types.AssignableAdapters // for commandUpdateAA
-	rs             types.RadioSilence       // for commandUpdateRS
-	devUUID        uuid.UUID                // for commandUpdateDevUUID
-	wwanStatus     types.WwanStatus         // for commandProcessWwanStatus
-	flowlogEnabled bool                     // for commandUpdateFlowlogState
+	dpc            types.DevicePortConfig      // for commandAddDPC and commandDelDPC
+	gcp            types.ConfigItemValueMap    // for commandUpdateGCP
+	aa             types.AssignableAdapters    // for commandUpdateAA
+	rs             types.RadioSilence          // for commandUpdateRS
+	devUUID        uuid.UUID                   // for commandUpdateDevUUID
+	wwanStatus     types.WwanStatus            // for commandProcessWwanStatus
+	flowlogEnabled bool                        // for commandUpdateFlowlogState
+	clusterStatus  types.EdgeNodeClusterStatus // for commandUpdateClusterStatus
 }
 
 type dpcVerify struct {
@@ -273,6 +276,8 @@ func (m *DpcManager) run(ctx context.Context) {
 				m.processWwanStatus(ctx, inputCmd.wwanStatus)
 			case commandUpdateFlowlogState:
 				m.doUpdateFlowlogState(ctx, inputCmd.flowlogEnabled)
+			case commandUpdateClusterStatus:
+				m.doUpdateClusterStatus(ctx, inputCmd.clusterStatus)
 			}
 			m.resumeVerifyIfAsyncDone(ctx)
 
@@ -409,6 +414,7 @@ func (m *DpcManager) reconcilerArgs() dpcreconciler.Args {
 		AA:             m.adapters,
 		RS:             m.rsConfig,
 		FlowlogEnabled: m.flowlogEnabled,
+		ClusterStatus:  m.clusterStatus,
 	}
 	if m.currentDPC() != nil {
 		args.DPC = *m.currentDPC()
@@ -485,6 +491,14 @@ func (m *DpcManager) UpdateFlowlogState(flowlogEnabled bool) {
 	m.inputCommands <- inputCommand{
 		cmd:            commandUpdateFlowlogState,
 		flowlogEnabled: flowlogEnabled,
+	}
+}
+
+// UpdateClusterStatus : apply an updated cluster status.
+func (m *DpcManager) UpdateClusterStatus(status types.EdgeNodeClusterStatus) {
+	m.inputCommands <- inputCommand{
+		cmd:           commandUpdateClusterStatus,
+		clusterStatus: status,
 	}
 }
 
@@ -624,5 +638,11 @@ func (m *DpcManager) reinitNetdumper() {
 
 func (m *DpcManager) doUpdateFlowlogState(ctx context.Context, flowlogEnabled bool) {
 	m.flowlogEnabled = flowlogEnabled
+	m.reconcileStatus = m.DpcReconciler.Reconcile(ctx, m.reconcilerArgs())
+}
+
+func (m *DpcManager) doUpdateClusterStatus(ctx context.Context,
+	status types.EdgeNodeClusterStatus) {
+	m.clusterStatus = status
 	m.reconcileStatus = m.DpcReconciler.Reconcile(ctx, m.reconcilerArgs())
 }
