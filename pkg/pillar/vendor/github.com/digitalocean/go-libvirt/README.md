@@ -19,9 +19,6 @@ go-libvirt.
 
 [Pull requests are welcome](https://github.com/digitalocean/go-libvirt/blob/master/CONTRIBUTING.md)!
 
-Feel free to join us in [`#go-libvirt` on libera chat](https://web.libera.chat/)
-if you'd like to discuss the project.
-
 Running the Code Generators
 ---------------------------
 
