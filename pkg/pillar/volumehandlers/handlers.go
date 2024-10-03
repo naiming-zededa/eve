@@ -67,7 +67,8 @@ func GetVolumeHandler(log *base.LogObject, volumeManager VolumeMgr, status *type
 	common := commonVolumeHandler{volumeManager: volumeManager, status: status, log: log}
 
 	if base.IsHVTypeKube() {
-		if status.IsContainer() && status.IsNoHyper {
+
+		if status.IsContainer() && status.IsNativeContainer {
 			return &volumeHandlerContainer{common}
 		}
 		return NewCSIHandler(common, false) // kubevirt does not support vhost yet

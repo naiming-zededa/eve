@@ -144,8 +144,8 @@ type AppInstanceConfig struct {
 	// allow AppInstance to discover other AppInstances attached to its network instances
 	AllowToDiscover bool
 
-	// Cluster Designated Node Id
-	DesignatedNodeID uuid.UUID
+	// Am I Cluster Designated Node Id for this app
+	IsDesignatedNodeID bool
 }
 
 type AppInstanceOpsCmd struct {
@@ -272,6 +272,8 @@ type AppInstanceStatus struct {
 	SnapStatus SnapshottingStatus
 	// Estimated memory overhead for VM, counted in MB
 	MemOverhead uint64
+	// Am I Cluster Designated Node Id for this app
+	IsDesignatedNodeID bool
 }
 
 // AppCount is uint8 and it should be sufficient for the number of apps we can support

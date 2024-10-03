@@ -460,7 +460,9 @@ func doUpdateVol(ctx *volumemgrContext, status *types.VolumeStatus) (bool, bool)
 	log.Functionf("doUpdateVol(%s) name %s", status.Key(), status.DisplayName)
 
 	// Anything to do?
-	if status.State == types.CREATED_VOLUME {
+	// If its a replicated volume, just return
+	// But if it is a native container volume we still download it
+	if status.State == types.CREATED_VOLUME || (status.IsReplicated && !status.IsNativeContainer) {
 		log.Functionf("doUpdateVol(%s) name %s nothing to do",
 			status.Key(), status.DisplayName)
 		return false, true

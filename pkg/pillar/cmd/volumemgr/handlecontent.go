@@ -5,7 +5,6 @@ package volumemgr
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -15,18 +14,7 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/lf-edge/eve/pkg/pillar/utils"
 	"github.com/lf-edge/eve/pkg/pillar/vault"
-	uuid "github.com/satori/go.uuid"
 )
-
-// XXX hack for now to block and using hostname
-func handleContentTreeClusterForUs(config types.ContentTreeConfig) bool {
-	devUUIDStr, _ := os.Hostname()
-	if config.DesignatedNodeID != uuid.Nil && config.DesignatedNodeID.String() != devUUIDStr && !config.IsNoHyper {
-		log.Noticef("handleContentTreeClusterForUs(%s) not for us", config.Key())
-		return false
-	}
-	return true
-}
 
 func handleContentTreeCreate(ctxArg interface{}, key string,
 	configArg interface{}) {
@@ -35,10 +23,6 @@ func handleContentTreeCreate(ctxArg interface{}, key string,
 	config := configArg.(types.ContentTreeConfig)
 	ctx := ctxArg.(*volumemgrContext)
 
-	ok := handleContentTreeClusterForUs(config)
-	if !ok {
-		return
-	}
 	// we received content tree configuration
 	// clean of vault is not safe from now
 	// note that we wait for vault before start this handler
@@ -56,10 +40,11 @@ func handleContentTreeModify(ctxArg interface{}, key string,
 	log.Functionf("handleContentTreeModify(%s)", key)
 	config := configArg.(types.ContentTreeConfig)
 	ctx := ctxArg.(*volumemgrContext)
-	ok := handleContentTreeClusterForUs(config)
-	if !ok {
+	// Do nothing if this is non-local
+	if !config.IsLocal {
 		return
 	}
+
 	status := ctx.LookupContentTreeStatus(config.Key())
 	if status == nil {
 		log.Fatalf("Missing ContentTreeStatus for %s", config.Key())
@@ -74,10 +59,11 @@ func handleContentTreeDelete(ctxArg interface{}, key string,
 	log.Functionf("handleContentTreeDelete(%s)", key)
 	config := configArg.(types.ContentTreeConfig)
 	ctx := ctxArg.(*volumemgrContext)
-	ok := handleContentTreeClusterForUs(config)
-	if !ok {
+	// Do nothing if it is non-local
+	if !config.IsLocal {
 		return
 	}
+
 	status := ctx.LookupContentTreeStatus(config.Key())
 	if status == nil {
 		log.Fatalf("Missing ContentTreeStatus for %s", config.Key())
@@ -101,27 +87,6 @@ func publishContentTreeStatus(ctx *volumemgrContext, status *types.ContentTreeSt
 	pub := ctx.pubContentTreeStatus
 	pub.Publish(key, *status)
 	log.Tracef("publishContentTreeStatus(%s) Done", key)
-	// make sure we have a reference name if in native container
-	checkAndAddReferenceName(ctx, status)
-}
-
-func checkAndAddReferenceName(ctx *volumemgrContext, status *types.ContentTreeStatus) {
-	pub := ctx.pubVolumeStatus
-	allVolumeStatus := pub.GetAll()
-	for _, item := range allVolumeStatus {
-		volumeStatus := item.(types.VolumeStatus)
-		if !volumeStatus.IsNoHyper {
-			continue
-		}
-		if volumeStatus.ContentID == status.ContentID {
-			volrefStatus := lookupVolumeRefStatus(ctx, volumeStatus.Key())
-			if volrefStatus != nil && volrefStatus.ReferenceName == "" {
-				volrefStatus.ReferenceName = status.ReferenceID()
-				log.Functionf("checkAndAddReferenceName(%s): fillin referencename for %v", volumeStatus.Key(), volrefStatus.ReferenceName)
-				publishVolumeRefStatus(ctx, volrefStatus)
-			}
-		}
-	}
 }
 
 func unpublishContentTreeStatus(ctx *volumemgrContext, status *types.ContentTreeStatus) {
@@ -230,9 +195,23 @@ func createContentTreeStatus(ctx *volumemgrContext, config types.ContentTreeConf
 			State:             types.INITIAL,
 			Blobs:             []string{},
 			HVTypeKube:        base.IsHVTypeKube(),
+			IsLocal:           config.IsLocal,
 			// LastRefCountChangeTime: time.Now(),
 		}
 		populateDatastoreFields(ctx, config, status)
+
+		// If it is not a local content tree, just publish the status without blob info.
+		// Just set the state as REMOTELOADED.
+		// This could be a replica node in a cluster and will be handled differently in Zedmanager.
+		// This is the case of VM and non-local container. For native containers, contenttree is downloaded
+		// to all nodes in the cluster.
+		if !config.IsLocal {
+			// set content tree as REMOTELOADED for non-local content tree
+			status.State = types.REMOTELOADED
+			publishContentTreeStatus(ctx, status)
+			log.Functionf("createContentTreeStatus for %v Done for non-local contenttree", config.ContentID)
+			return status
+		}
 
 		// we only publish the BlobStatus if we have the hash for it; this
 		// might come later

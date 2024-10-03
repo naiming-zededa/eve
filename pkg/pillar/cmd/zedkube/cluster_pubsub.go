@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	zconfig "github.com/lf-edge/eve-api/go/config"
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	uuid "github.com/satori/go.uuid"
@@ -351,6 +352,8 @@ func resendPubAppInstConfigs(ctx *zedkubeContext, nodeuuid uuid.UUID) {
 	for key, item := range items {
 		config := item.(types.AppInstanceConfig)
 		log.Noticef("resendPubAppInstConfigs: (UUID: %s, config:%v)", key, config)
+		// HACK HACK
+		config.IsDesignatedNodeID = false
 		var buf bytes.Buffer
 		enc := gob.NewEncoder(&buf)
 		err := enc.Encode(config)
@@ -375,10 +378,14 @@ func resendPubVolumeConfigs(ctx *zedkubeContext, nodeuuid uuid.UUID) {
 	}
 	for key, item := range items {
 		config := item.(types.VolumeConfig)
-		if config.DesignatedNodeID == uuid.Nil {
+		if config.IsReplicated {
 			log.Noticef("resendPubVolumeConfigs: skip volume with nil DesignatedNodeID")
 			continue
 		}
+
+		// HACK HACK
+		config.IsReplicated = true
+
 		log.Noticef("resendPubVolumeConfigs: (UUID: %s, config:%v)", key, config)
 		var buf bytes.Buffer
 		enc := gob.NewEncoder(&buf)
@@ -433,11 +440,17 @@ func resendPubContentTreeConfigs(ctx *zedkubeContext, nodeuuid uuid.UUID) {
 	}
 	for key, item := range items {
 		config := item.(types.ContentTreeConfig)
-		if config.DesignatedNodeID == uuid.Nil {
+		if !config.IsLocal {
 			log.Noticef("resendPubContentTreeConfigs: skip content tree with nil DesignatedNodeID")
 			continue
 		}
 		log.Noticef("resendPubContentTreeConfigs: (UUID: %s, config:%v)", key, config)
+		// HACK HACK
+		if config.Format == zconfig.Format_CONTAINER {
+			config.IsLocal = true
+		} else {
+			config.IsLocal = false
+		}
 		var buf bytes.Buffer
 		enc := gob.NewEncoder(&buf)
 		err := enc.Encode(config)
@@ -528,6 +541,11 @@ func handleNetworkInstanceDelete(ctxArg interface{}, key string,
 // sendAndPubEncAppInstConfig send AppInstanceConfig to remote nodes
 func sendAndPubEncAppInstConfig(ctx *zedkubeContext, config *types.AppInstanceConfig, key string, op types.EncPubOpType) {
 
+	// HACK HACK Remote node is not a designated node id.
+	if config != nil {
+		config.IsDesignatedNodeID = false
+	}
+
 	buf, nodeuuid, err := getGobAndUUID(ctx, config)
 	if err != nil {
 		log.Errorf("sendAndPubEncAppInstConfig: %v", err)
@@ -573,12 +591,16 @@ func handleVolumeDelete(ctxArg interface{}, key string,
 }
 
 func sendAndPubEncVolumeConfig(ctx *zedkubeContext, config *types.VolumeConfig, key string, op types.EncPubOpType) {
-	if config != nil && config.DesignatedNodeID == uuid.Nil {
+	if config != nil && config.IsReplicated {
 		log.Noticef("sendAndPubEncVolumeConfig: skip volume with nil DesignatedNodeID")
 		return
 	}
 	if op == types.EncPubOpDelete { // reset the config to nil
 		config = nil
+	} else {
+
+		// HACK HACK If sending to remote node IsReplicated is always true
+		config.IsReplicated = true
 	}
 
 	buf, nodeuuid, err := getGobAndUUID(ctx, config)
@@ -684,12 +706,20 @@ func handleContentTreeDelete(ctxArg interface{}, key string,
 }
 
 func sendAndPubEncContentTreeConfig(ctx *zedkubeContext, config *types.ContentTreeConfig, key string, op types.EncPubOpType) {
-	if config != nil && config.DesignatedNodeID == uuid.Nil {
+	if config != nil && !config.IsLocal {
 		log.Noticef("sendAndPubEncContentTreeConfig: skip volume with nil DesignatedNodeID")
 		return
 	}
 	if op == types.EncPubOpDelete { // reset the config to nil
 		config = nil
+	} else {
+		if config.Format == zconfig.Format_CONTAINER {
+			config.IsLocal = true
+		} else {
+			config.IsLocal = false
+		}
+		// HACK HACK
+
 	}
 
 	buf, nodeuuid, err := getGobAndUUID(ctx, config)

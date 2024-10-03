@@ -173,25 +173,21 @@ func (handler *volumeHandlerCSI) CreateVolume() (string, error) {
 				return "", errors.New(errStr)
 			}
 
-			// if the container is native, skip converting to PVC
-			if !handler.status.IsNoHyper {
-				// Convert to PVC
-				pvcerr := kubeapi.RolloutDiskToPVC(createContext, handler.log, false, rawImgFile, pvcName, false)
+			pvcerr := kubeapi.RolloutDiskToPVC(createContext, handler.log, false, rawImgFile, pvcName, false)
 
-				// Since we succeeded or failed to create PVC above, no point in keeping the rawImgFile.
-				// Delete it to save space.
-				if err = os.RemoveAll(rawImgFile); err != nil {
-					errStr := fmt.Sprintf("CreateVolume: exception while deleting: %v. %v", rawImgFile, err)
-					handler.log.Error(errStr)
-					return pvcName, errors.New(errStr)
-				}
+			// Since we succeeded or failed to create PVC above, no point in keeping the rawImgFile.
+			// Delete it to save space.
+			if err = os.RemoveAll(rawImgFile); err != nil {
+				errStr := fmt.Sprintf("CreateVolume: exception while deleting: %v. %v", rawImgFile, err)
+				handler.log.Error(errStr)
+				return pvcName, errors.New(errStr)
+			}
 
-				if pvcerr != nil {
-					errStr := fmt.Sprintf("Error converting %s to PVC %s: %v",
-						rawImgFile, pvcName, pvcerr)
-					handler.log.Error(errStr)
-					return pvcName, errors.New(errStr)
-				}
+			if pvcerr != nil {
+				errStr := fmt.Sprintf("Error converting %s to PVC %s: %v",
+					rawImgFile, pvcName, pvcerr)
+				handler.log.Error(errStr)
+				return pvcName, errors.New(errStr)
 			}
 		} else {
 			qcowFile, err := handler.getVolumeFilePath()
@@ -227,8 +223,8 @@ func (handler *volumeHandlerCSI) CreateVolume() (string, error) {
 func (handler *volumeHandlerCSI) DestroyVolume() (string, error) {
 	pvcName := handler.status.GetPVCName()
 	handler.log.Noticef("DestroyVolume called for PVC %s", pvcName)
-	// if this is a native container, no need to delete PVC
-	if !handler.status.IsNoHyper {
+	// if this is a replicated volume, do not delete PVC on this node.
+	if !handler.status.IsReplicated {
 		err := kubeapi.DeletePVC(pvcName, handler.log)
 		if err != nil {
 			// Its OK if not found since PVC might have been deleted already
@@ -247,15 +243,36 @@ func (handler *volumeHandlerCSI) DestroyVolume() (string, error) {
 
 func (handler *volumeHandlerCSI) Populate() (bool, error) {
 	pvcName := handler.status.GetPVCName()
+	isReplicated := handler.status.IsReplicated
 	handler.log.Noticef("Populate called for PVC %s", pvcName)
-	_, err := kubeapi.FindPVC(pvcName, handler.log)
-	if err != nil {
-		// Its OK if not found since PVC might not be created yet.
-		if kerr.IsNotFound(err) {
-			handler.log.Noticef("PVC %s not found", pvcName)
-			return false, nil
-		} else {
-			return false, err
+	// A replicated volume is created on designated node, this node is supposed to be a replica volume.
+	// so wait until the replica is created. It could happen that the designated node did not even receive
+	// the configuration. This wait can be for long long time.
+	if isReplicated {
+		for {
+			// waitForPVCReady sleeps for 60 secs, so no need to sleep here.
+			err := kubeapi.WaitForPVCReady(pvcName, handler.log)
+			if err != nil {
+				if kerr.IsNotFound(err) {
+					handler.log.Noticef("PVC %s not found", pvcName)
+					continue
+				} else {
+					return false, nil
+				}
+			}
+			return true, nil
+		}
+	} else {
+		_, err := kubeapi.FindPVC(pvcName, handler.log)
+
+		if err != nil {
+			// Its OK if not found since PVC might not be created yet.
+			if kerr.IsNotFound(err) {
+				handler.log.Noticef("PVC %s not found", pvcName)
+				return false, nil
+			} else {
+				return false, err
+			}
 		}
 	}
 	return true, nil

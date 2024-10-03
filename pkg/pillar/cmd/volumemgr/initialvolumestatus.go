@@ -132,6 +132,10 @@ func gcVolumes(ctx *volumemgrContext, locations []string) {
 		if vs == nil {
 			log.Functionf("gcVolumes: Found unused volume %s. Deleting it.",
 				location)
+			// Do not GC a replicated volume.
+			if vs.IsReplicated {
+				continue
+			}
 			if _, err := volumehandlers.GetVolumeHandler(log, ctx, tempVolumeStatus).DestroyVolume(); err != nil {
 				log.Errorf("gcVolumes: destroyVolume '%s' failed: %v",
 					location, err)
