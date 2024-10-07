@@ -808,6 +808,21 @@ restore_var_lib() {
   fi
 }
 
+# get the OS-IMAGE name from the /run/eve-release
+get_eve_os_release() {
+        # Wait for /run/eve-release to appear
+        while [ ! -f /run/eve-release ]; do
+                sleep 1
+        done
+
+        # Read the original name from /run/eve-release
+        eve_image_name=$(cat /run/eve-release)
+
+        logmsg "EVE Release: $eve_image_name, write to /etc/os-release"
+        # Write the short name to /etc/os-release
+        echo "PRETTY_NAME=\"$eve_image_name\"" > /etc/os-release
+}
+
 # provision the config.yaml and bootstrap-config.yaml for cluster node, passing $1 as k3s needs initailizing
 provision_cluster_config_file() {
 # prepare the config.yaml and bootstrap-config.yaml on node
@@ -952,6 +967,9 @@ else # a restart case, found all_components_initialized
     fi
   fi
 fi
+
+# use part of the /run/eve-release to get the OS-IMAGE string
+get_eve_os_release
 
 #Forever loop every 15 secs
 while true;
