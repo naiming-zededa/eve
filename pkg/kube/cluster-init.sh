@@ -150,9 +150,19 @@ wait_for_default_route() {
         return 1
 }
 
+get_cluster_node_ip() {
+    if [ -z "$1" ]; then
+        enc_data=$(cat "$enc_status_file")
+        clusternodeip=$(echo "$enc_data" | jq -r '.ClusterIPPrefix.IP')
+        echo "$clusternodeip"
+    else
+        echo "$1"
+    fi
+}
+
 assign_multus_nodeip() {
   if [ -f /var/lib/edge-node-cluster-mode ]; then
-    NODE_IP=$1
+    NODE_IP=$(get_cluster_node_ip "$1")
     ip_prefix=$(ipcalc -n "$NODE_IP$ClusterPrefixMask" | cut -d "=" -f2)
     ip_prefix="$ip_prefix$ClusterPrefixMask"
     logmsg "Cluster Node IP prefix to multus: $ip_prefix with node-ip $NODE_IP"
@@ -225,7 +235,7 @@ apply_multus_cni() {
         if ! kubectl get namespace eve-kube-app > /dev/null 2>&1; then
                 kubectl create namespace eve-kube-app
         fi
-        logmsg "Apply Multus, Node-IP: $NODE_IP"
+        logmsg "Apply multus-daemonset-new.yaml"
         if ! kubectl apply -f /etc/multus-daemonset-new.yaml > /dev/null 2>&1; then
                 logmsg "Apply Multus, has failed, jump out now"
                 return 1
@@ -620,6 +630,7 @@ get_enc_status() {
     join_serverIP=$(echo "$enc_data" | jq -r '.JoinServerIP')
     cluster_token=$(echo "$enc_data" | jq -r '.EncryptedClusterToken')
     cluster_node_ip=$(echo "$enc_data" | jq -r '.ClusterIPPrefix.IP')
+    Node_IP=$cluster_node_ip
     cluster_node_ip_is_ready=$(echo "$enc_data" | jq -r '.ClusterIPIsReady')
     if [ -n "$cluster_intf" ] && [ -n "$join_serverIP" ] && [ -n "$cluster_token" ] &&\
        [ -n "$cluster_node_ip" ] && [ "$cluster_node_ip_is_ready" = "true" ] &&\
@@ -725,6 +736,7 @@ check_cluster_config_change() {
       FoundENCStatus=true
       if [ ! -f /var/lib/edge-node-cluster-mode ]; then
         logmsg "EdgeNodeClusterStatus file found, but the node does not have edge-node-cluster-mode"
+        logmsg "*** check_cluster_config_change, before while loop. cluster_node_ip: $cluster_node_ip" # XXX
         while true; do
           if get_enc_status; then
             logmsg "got the EdgeNodeClusterStatus successfully"

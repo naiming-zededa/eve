@@ -59,6 +59,7 @@ func applyClusterConfig(ctx *zedkubeContext, config, oldconfig *types.EdgeNodeCl
 		drainAndDeleteNode(ctx)
 		stopClusterStatusServer(ctx)
 		ctx.clusterConfig = types.EdgeNodeClusterConfig{}
+		return
 	} else {
 		clusterIPChanged := !netutils.EqualIPNets(ctx.clusterConfig.ClusterIPPrefix,
 			config.ClusterIPPrefix)
