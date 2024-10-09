@@ -48,6 +48,7 @@ const (
 	eveLabelKey            = "App-Domain-Name"
 	waitForPodCheckCounter = 5  // Check 5 times
 	waitForPodCheckTime    = 15 // Check every 15 seconds, don't wait for too long to cause watchdog
+	tolerateSec            = 30 // Pod/VMI reschedule delay after node unreachable seconds
 )
 
 type MetaDataType int
@@ -427,26 +428,13 @@ func (ctx kubevirtContext) CreateReplicaVMIConfig(domainName string, config type
 	}
 
 	// Set the affinity to this node the VMI is preferred to run on
-	affinity := &k8sv1.Affinity{
-		NodeAffinity: &k8sv1.NodeAffinity{
-			PreferredDuringSchedulingIgnoredDuringExecution: []k8sv1.PreferredSchedulingTerm{
-				{
-					Preference: k8sv1.NodeSelectorTerm{
-						MatchExpressions: []k8sv1.NodeSelectorRequirement{
-							{
-								Key:      "kubernetes.io/hostname",
-								Operator: "In",
-								Values:   []string{nodeName},
-							},
-						},
-					},
-					Weight: 100,
-				},
-			},
-		},
-	}
+	affinity := setKubeAffinity(nodeName)
+
+	// Set tolerations to handle node conditions
+	tolerations := setKubeToleration(int64(tolerateSec))
 
 	vmi.Spec.Affinity = affinity
+	vmi.Spec.Tolerations = tolerations
 	vmi.Labels = make(map[string]string)
 	vmi.Labels[eveLabelKey] = domainName
 
@@ -1091,12 +1079,8 @@ func (ctx kubevirtContext) CreateReplicaPodConfig(domainName string, config type
 	//memoryRequest := memoryLimit
 
 	var replicaNum int32
-	var tolerateSec int64
 	replicaNum = 1
-	//tolerateSec = 420 // try 7 minutes
-	tolerateSec = 30 // try half a minute to see
 	repNum := &replicaNum
-	tolSec := &tolerateSec
 	replicaSet := &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      kubeName,
@@ -1117,38 +1101,8 @@ func (ctx kubevirtContext) CreateReplicaPodConfig(domainName string, config type
 					Annotations: annotations,
 				},
 				Spec: k8sv1.PodSpec{
-					Tolerations: []k8sv1.Toleration{
-						{
-							Key:               "node.kubernetes.io/unreachable",
-							Operator:          "Exists",
-							Effect:            "NoExecute",
-							TolerationSeconds: tolSec,
-						},
-						{
-							Key:               "node.kubernetes.io/not-ready",
-							Operator:          "Exists",
-							Effect:            "NoExecute",
-							TolerationSeconds: tolSec,
-						},
-					},
-					Affinity: &k8sv1.Affinity{
-						NodeAffinity: &k8sv1.NodeAffinity{
-							PreferredDuringSchedulingIgnoredDuringExecution: []k8sv1.PreferredSchedulingTerm{
-								{
-									Preference: k8sv1.NodeSelectorTerm{
-										MatchExpressions: []k8sv1.NodeSelectorRequirement{
-											{
-												Key:      "kubernetes.io/hostname",
-												Operator: "In",
-												Values:   []string{nodeName},
-											},
-										},
-									},
-									Weight: 100,
-								},
-							},
-						},
-					},
+					Tolerations: setKubeToleration(int64(tolerateSec)),
+					Affinity:    setKubeAffinity(nodeName),
 					Containers: []k8sv1.Container{
 						{
 							Name:            kubeName,
@@ -1232,6 +1186,46 @@ func (ctx kubevirtContext) CreateReplicaPodConfig(domainName string, config type
 	file.WriteString(repStr)
 
 	return nil
+}
+
+func setKubeAffinity(nodeName string) *k8sv1.Affinity {
+	affinity := &k8sv1.Affinity{
+		NodeAffinity: &k8sv1.NodeAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []k8sv1.PreferredSchedulingTerm{
+				{
+					Preference: k8sv1.NodeSelectorTerm{
+						MatchExpressions: []k8sv1.NodeSelectorRequirement{
+							{
+								Key:      "kubernetes.io/hostname",
+								Operator: "In",
+								Values:   []string{nodeName},
+							},
+						},
+					},
+					Weight: 100,
+				},
+			},
+		},
+	}
+	return affinity
+}
+
+func setKubeToleration(timeOutSec int64) []k8sv1.Toleration {
+	tolerations := []k8sv1.Toleration{
+		{
+			Key:               "node.kubernetes.io/unreachable",
+			Operator:          k8sv1.TolerationOpExists,
+			Effect:            k8sv1.TaintEffectNoExecute,
+			TolerationSeconds: pointer.Int64Ptr(timeOutSec),
+		},
+		{
+			Key:               "node.kubernetes.io/not-ready",
+			Operator:          k8sv1.TolerationOpExists,
+			Effect:            k8sv1.TaintEffectNoExecute,
+			TolerationSeconds: pointer.Int64Ptr(timeOutSec),
+		},
+	}
+	return tolerations
 }
 
 func StartReplicaPodContiner(ctx kubevirtContext, rep *appsv1.ReplicaSet) error {

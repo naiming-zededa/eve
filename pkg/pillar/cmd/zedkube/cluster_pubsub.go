@@ -77,6 +77,10 @@ func startupHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeContext)
 
 // just start up and notify all the peer nodes, to resend any subs we missed
 func startupNotifyPeers(ctx *zedkubeContext) {
+	if !ctx.allowClusterPubSub {
+		return
+	}
+
 	log.Noticef("startupNotifyPeers")
 	hosts, notClusterMode, err := getClusterNodes(ctx)
 	if err != nil {
@@ -118,7 +122,7 @@ func startupNotifyPeers(ctx *zedkubeContext) {
 }
 
 func checkNotifyPeer(ctx *zedkubeContext) {
-	if !ctx.clusterIPIsReady {
+	if !ctx.clusterIPIsReady || !ctx.allowClusterPubSub {
 		return
 	}
 
@@ -146,7 +150,7 @@ func handleEncPubToRemoteData(ctx *zedkubeContext, header *types.EncPubHeader, b
 }
 
 func getClusterNodes(ctx *zedkubeContext) ([]string, bool, error) {
-	if !ctx.clusterIPIsReady {
+	if !ctx.clusterIPIsReady || !ctx.allowClusterPubSub {
 		return nil, true, nil
 	}
 
@@ -183,7 +187,9 @@ func getClusterNodes(ctx *zedkubeContext) ([]string, bool, error) {
 }
 
 func sendPubToRemoteNodes(ctx *zedkubeContext, header types.EncPubHeader, body []byte) {
-
+	if !ctx.allowClusterPubSub {
+		return
+	}
 	found := ctx.receiveMap.Find(header.TypeKey)
 	if found {
 		log.Noticef("sendPubToRemoteNodes: received pub %v, skip", header)
@@ -291,6 +297,9 @@ func getGobAndUUID(ctx *zedkubeContext, config interface{}) (bytes.Buffer, uuid.
 }
 
 func resendPubsToRemoteNodes(ctx *zedkubeContext) {
+	if !ctx.allowClusterPubSub {
+		return
+	}
 	log.Noticef("resendPubsToRemoteNodes: retrying")
 	err := getnodeNameAndUUID(ctx)
 	if err != nil {
@@ -471,6 +480,10 @@ func checkPubServerStatus(ctx *zedkubeContext) {
 
 func runClusterPubSubServer(ctx *zedkubeContext) {
 	// XXX hold until the gcp allowClusterPubSub configitem
+	if !ctx.allowClusterPubSub {
+		return
+	}
+
 	if ctx.pubServerCertFile == "" || ctx.pubServerKeyFile == "" {
 		_, err := os.Stat(pubServerCertFile)
 		_, err1 := os.Stat(pubServerKeyFile)

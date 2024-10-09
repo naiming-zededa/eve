@@ -104,6 +104,7 @@ type zedkubeContext struct {
 	pubServerCertFile        string
 	pubServerKeyFile         string
 	notifyPeerCount          int
+	allowClusterPubSub       bool
 	// Primarily to block 'uncordon' after running it once at bootup
 	onBootUncordonCheckComplete bool
 }
@@ -767,8 +768,8 @@ func handleGlobalConfigImpl(ctxArg interface{}, key string,
 	gcp := agentlog.HandleGlobalConfig(log, ctx.subGlobalConfig, agentName,
 		ctx.CLIParams().DebugOverride, ctx.Logger())
 	if gcp != nil {
-		allowClusterPubSub := gcp.GlobalValueBool(types.ENClusterPubSub)
-		if allowClusterPubSub && !ctx.clusterPubSubStarted {
+		ctx.allowClusterPubSub = gcp.GlobalValueBool(types.ENClusterPubSub)
+		if ctx.allowClusterPubSub && !ctx.clusterPubSubStarted {
 			log.Noticef("handleGlobalConfigImpl: starting cluster pubsub")
 
 			// Start the cluster pubsub server
