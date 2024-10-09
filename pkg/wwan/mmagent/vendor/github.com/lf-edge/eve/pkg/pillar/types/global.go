@@ -241,6 +241,8 @@ const (
 	EnableARPSnoop GlobalSettingKey = "network.switch.enable.arpsnoop"
 	// WwanQueryVisibleProviders : periodically query visible cellular service providers
 	WwanQueryVisibleProviders GlobalSettingKey = "wwan.query.visible.providers"
+	// XXX temp
+	ENClusterPubSub GlobalSettingKey = "edgenode.cluster.pubsub"
 
 	// TriState Items
 	// NetworkFallbackAnyEth global setting key
@@ -264,6 +266,10 @@ const (
 	SyslogLogLevel GlobalSettingKey = "debug.syslog.loglevel"
 	// KernelLogLevel global setting key
 	KernelLogLevel GlobalSettingKey = "debug.kernel.loglevel"
+	// XXX temp
+	// ENClusterConfig : cluster config for edge node, a json string containing EdgeNodeClusterConfig{}
+	// apply base64 encoding to the json string
+	ENClusterConfig GlobalSettingKey = "edgenode.cluster.config.base64"
 
 	// XXX Temporary flag to disable RFC 3442 classless static route usage
 	DisableDHCPAllOnesNetMask GlobalSettingKey = "debug.disable.dhcp.all-ones.netmask"
@@ -300,6 +306,8 @@ const (
 	// address, and MAC address change on EVE node upgrade (switch from old
 	// generation logic to new one) can cause problems with the guest network.
 	NetworkLocalLegacyMACAddress GlobalSettingKey = "network.local.legacy.mac.address"
+	// KubevirtDrainTimeout : how long in hours is allowed for a node drain before a failure is returned
+	KubevirtDrainTimeout GlobalSettingKey = "kubevirt.drain.timeout"
 )
 
 // AgentSettingKey - keys for per-agent settings
@@ -900,6 +908,7 @@ func NewConfigItemSpecMap() ConfigItemSpecMap {
 	configItemSpecMap.AddBoolItem(EnableARPSnoop, true)
 	configItemSpecMap.AddBoolItem(WwanQueryVisibleProviders, false)
 	configItemSpecMap.AddBoolItem(NetworkLocalLegacyMACAddress, false)
+	configItemSpecMap.AddBoolItem(ENClusterPubSub, false)
 
 	// Add TriState Items
 	configItemSpecMap.AddTriStateItem(NetworkFallbackAnyEth, TS_DISABLED)
@@ -911,6 +920,7 @@ func NewConfigItemSpecMap() ConfigItemSpecMap {
 	configItemSpecMap.AddStringItem(DefaultRemoteLogLevel, "info", validateLogrusLevel)
 	configItemSpecMap.AddStringItem(SyslogLogLevel, "info", validateSyslogKernelLevel)
 	configItemSpecMap.AddStringItem(KernelLogLevel, "info", validateSyslogKernelLevel)
+	configItemSpecMap.AddStringItem(ENClusterConfig, "", blankValidator)
 
 	// Add Agent Settings
 	configItemSpecMap.AddAgentSettingStringItem(LogLevel, "info", validateLogrusLevel)
@@ -923,6 +933,9 @@ func NewConfigItemSpecMap() ConfigItemSpecMap {
 	configItemSpecMap.AddIntItem(NetDumpTopicMaxCount, 10, 1, 0xFFFFFFFF)
 	configItemSpecMap.AddBoolItem(NetDumpDownloaderPCAP, false)
 	configItemSpecMap.AddBoolItem(NetDumpDownloaderHTTPWithFieldValue, false)
+
+	// Add Kubevirt Settings
+	configItemSpecMap.AddIntItem(KubevirtDrainTimeout, 24, 1, 0xFFFFFFFF)
 
 	return configItemSpecMap
 }
