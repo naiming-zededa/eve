@@ -1639,7 +1639,7 @@ func effectiveActivateCurrentProfile(config types.AppInstanceConfig, currentProf
 
 func getKubeAppActivateStatus(ctx *zedmanagerContext, aiConfig types.AppInstanceConfig, effectiveActivate bool) bool {
 
-	if !ctx.hvTypeKube || aiConfig.DesignatedNodeID == uuid.Nil {
+	if !ctx.hvTypeKube || aiConfig.IsDesignatedNodeID {
 		return effectiveActivate
 	}
 
@@ -1675,9 +1675,9 @@ func getKubeAppActivateStatus(ctx *zedmanagerContext, aiConfig types.AppInstance
 		}
 	}
 
-	log.Noticef("getKubeAppActivateStatus: ai %s, node %s, onTheDevice %v, statusRunning %v",
-		aiConfig.DesignatedNodeID.String(), ctx.nodeUUID, onTheDevice, statusRunning)
-	if aiConfig.DesignatedNodeID == ctx.nodeUUID {
+	log.Noticef("getKubeAppActivateStatus: isdesignated node  %v, node %s, onTheDevice %v, statusRunning %v",
+		aiConfig.IsDesignatedNodeID, ctx.nodeUUID, onTheDevice, statusRunning)
+	if aiConfig.IsDesignatedNodeID {
 		if statusRunning && !onTheDevice {
 			return false
 		}

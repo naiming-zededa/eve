@@ -30,12 +30,23 @@ func updateAIStatusUUID(ctx *zedmanagerContext, uuidStr string) {
 		removeAIStatus(ctx, status)
 		return
 	}
-	changed := doUpdate(ctx, *config, status)
-	if changed {
-		log.Functionf("updateAIStatusUUID status change %d for %s",
-			status.State, uuidStr)
-		publishAppInstanceStatus(ctx, status)
-		publishAppInstanceSummary(ctx)
+
+	if config.IsDesignatedNodeID {
+		changed := doUpdate(ctx, *config, status)
+		if changed {
+			log.Functionf("updateAIStatusUUID status change %d for %s",
+				status.State, uuidStr)
+			publishAppInstanceStatus(ctx, status)
+			publishAppInstanceSummary(ctx)
+		}
+	} else {
+		// doActivate
+		changed := doActivate(ctx, uuidStr, *config, status)
+		if changed {
+			log.Functionf("doActivate done for remote app %s status changed %v", uuidStr, status.State)
+			publishAppInstanceStatus(ctx, status)
+			publishAppInstanceSummary(ctx)
+		}
 	}
 }
 
@@ -674,6 +685,7 @@ func doActivate(ctx *zedmanagerContext, uuidStr string,
 	// Commit that we will be using memory and
 	// Track that we have cleanup work in case something fails
 	status.ActivateInprogress = true
+	status.IsDesignatedNodeID = config.IsDesignatedNodeID
 
 	// Make sure we have an AppNetworkConfig
 	MaybeAddAppNetworkConfig(ctx, config, status)

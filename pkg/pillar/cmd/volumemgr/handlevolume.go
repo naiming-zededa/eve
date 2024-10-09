@@ -5,24 +5,12 @@ package volumemgr
 
 import (
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/lf-edge/eve/pkg/pillar/vault"
 	"github.com/lf-edge/eve/pkg/pillar/volumehandlers"
-	uuid "github.com/satori/go.uuid"
 )
-
-// XXX hack for now to block and using hostname
-func handleVolumeClusterForUs(config types.VolumeConfig) bool {
-	devUUIDStr, _ := os.Hostname()
-	if config.DesignatedNodeID != uuid.Nil && config.DesignatedNodeID.String() != devUUIDStr && !config.IsNoHyper {
-		log.Noticef("handleVolumeClusterForUs(%s) not for us", config.Key())
-		return false
-	}
-	return true
-}
 
 func handleVolumeCreate(ctxArg interface{}, key string,
 	configArg interface{}) {
@@ -30,10 +18,6 @@ func handleVolumeCreate(ctxArg interface{}, key string,
 	log.Functionf("handleVolumeCreate(%s)", key)
 	config := configArg.(types.VolumeConfig)
 	ctx := ctxArg.(*volumemgrContext)
-	ok := handleVolumeClusterForUs(config)
-	if !ok {
-		return
-	}
 	// we received volume configuration
 	// clean of vault is not safe from now
 	// note that we wait for vault before start this handler
@@ -51,10 +35,7 @@ func handleVolumeModify(ctxArg interface{}, key string,
 	log.Functionf("handleVolumeModify(%s)", key)
 	config := configArg.(types.VolumeConfig)
 	ctx := ctxArg.(*volumemgrContext)
-	ok := handleVolumeClusterForUs(config)
-	if !ok {
-		return
-	}
+
 	if _, deferred := ctx.volumeConfigCreateDeferredMap[key]; deferred {
 		//update deferred creation if exists
 		ctx.volumeConfigCreateDeferredMap[key] = &config
@@ -97,10 +78,7 @@ func handleVolumeDelete(ctxArg interface{}, key string,
 	log.Functionf("handleVolumeDelete(%s)", key)
 	config := configArg.(types.VolumeConfig)
 	ctx := ctxArg.(*volumemgrContext)
-	ok := handleVolumeClusterForUs(config)
-	if !ok {
-		return
-	}
+
 	if _, deferred := ctx.volumeConfigCreateDeferredMap[key]; deferred {
 		//remove deferred creation if exists
 		delete(ctx.volumeConfigCreateDeferredMap, key)
@@ -140,7 +118,8 @@ func handleDeferredVolumeCreate(ctx *volumemgrContext, key string, config *types
 		LastRefCountChangeTime:  time.Now(),
 		LastUse:                 time.Now(),
 		State:                   types.INITIAL,
-		IsNoHyper:               config.IsNoHyper,
+		IsReplicated:            config.IsReplicated,
+		IsNativeContainer:       config.IsNativeContainer,
 	}
 	updateVolumeStatusRefCount(ctx, status)
 	log.Noticef("handleDeferredVolumeCreate(%s) setting contentFormat to %s", key, volumeFormat[status.Key()])

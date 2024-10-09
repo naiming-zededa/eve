@@ -652,6 +652,8 @@ func parseAppInstanceConfig(getconfigCtx *getconfigContext,
 		appinstancePrevConfigHash, configHash, Apps)
 	appinstancePrevConfigHash = configHash
 
+	devUUIDStr, _ := os.Hostname()
+
 	// First look for deleted ones
 	items := getconfigCtx.pubAppInstanceConfig.GetAll()
 	for uuidStr := range items {
@@ -764,8 +766,15 @@ func parseAppInstanceConfig(getconfigCtx *getconfigContext,
 		// Add config submitted via local profile server.
 		addLocalAppConfig(getconfigCtx, &appInstance)
 
-		// XXX add Designated ID to the appInstance
-		appInstance.DesignatedNodeID = devUUID
+		controllerDNID := cfgApp.GetDesignatedNodeId()
+
+		// If this node is designated node id set IsDesignatedNodeID to true else false.
+		// On single node eve either kvm or kubevirt based, this node will always be designated node.
+		if controllerDNID != "" && controllerDNID != devUUIDStr {
+			appInstance.IsDesignatedNodeID = false
+		} else {
+			appInstance.IsDesignatedNodeID = true
+		}
 
 		// Verify that it fits and if not publish with error
 		checkAndPublishAppInstanceConfig(getconfigCtx, appInstance)
