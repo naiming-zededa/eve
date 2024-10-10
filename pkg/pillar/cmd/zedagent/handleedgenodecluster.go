@@ -10,6 +10,7 @@ import (
 	"github.com/golang/protobuf/ptypes"
 	"github.com/lf-edge/eve-api/go/info"
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
+	"github.com/lf-edge/eve/pkg/pillar/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -87,6 +88,95 @@ func publishKubeClusterUpdateStatus(ctx *zedagentContext, dest destinationBitset
 	size := int64(proto.Size(UpdateStatusInfo))
 
 	log.Noticef("publishKubeClusterUpdateStatus to controller")
+	queueInfoToDest(ctx, dest, key, buf, size, bailOnHTTPErr, false, false,
+		info.ZInfoTypes_ZiKubeClusterUpdateStatus)
+}
+
+func kubeClusterInfoTask(ctxPtr *zedagentContext, triggerClusterInfo <-chan destinationBitset) {
+	topicSuffix := "clusterinfo"
+	wdName := agentName + topicSuffix
+
+	stillRunning := time.NewTicker(30 * time.Second)
+	ctxPtr.ps.StillRunning(wdName, warningTime, errorTime)
+	ctxPtr.ps.RegisterFileWatchdog(wdName)
+
+	for {
+		select {
+		case dest := <-triggerClusterInfo:
+			start := time.Now()
+			log.Notice("kubeClusterInfoTask got message")
+
+			publishKubeClusterInfo(ctxPtr, dest)
+			ctxPtr.iteration++
+			log.Notice("kubeClusterInfoTask done with message")
+			ctxPtr.ps.CheckMaxTimeTopic(wdName, topicSuffix, start,
+				warningTime, errorTime)
+		case <-stillRunning.C:
+		}
+		ctxPtr.ps.StillRunning(wdName, warningTime, errorTime)
+	}
+}
+
+// send ZInfoTypes_ZiKubeCluster message
+func publishKubeClusterInfo(ctx *zedagentContext, dest destinationBitset) {
+	items := ctx.subKubeClusterInfo.GetAll()
+	psKubeClusterInfoGlb, ok := items["global"].(types.KubeClusterInfo)
+	if !ok {
+		return
+	}
+	psObj, err := ctx.pubEdgeNodeClusterConfig.Get("global")
+	if err != nil || psObj == nil {
+		return
+	}
+	clusterCfg := psObj.(types.EdgeNodeClusterConfig)
+
+	// Setup Container
+	var infoMsg = &info.ZInfoMsg{}
+	key := devUUID.String() + "kubeclusterinfo"
+	bailOnHTTPErr := true
+	infoType := new(info.ZInfoTypes)
+	*infoType = info.ZInfoTypes_ZiKubeCluster
+	infoMsg.Ztype = *infoType
+	infoMsg.DevId = *proto.String(devUUID.String())
+	infoMsg.AtTimeStamp = ptypes.TimestampNow()
+	log.Noticef("publishKubeClusterInfo uuid %s", key)
+
+	// Translate the pubsub type to the proto type
+	kci := new(info.ZInfoKubeCluster)
+	for _, node := range psKubeClusterInfoGlb.Nodes {
+		kci.Nodes = append(kci.Nodes, node.ZKubeNodeInfo())
+	}
+	for _, pod := range psKubeClusterInfoGlb.AppPods {
+		kci.EveApps = append(kci.EveApps, pod.ZKubeEVEAppPodInfo())
+	}
+	for _, vmi := range psKubeClusterInfoGlb.AppVMIs {
+		kci.EveVmApps = append(kci.EveVmApps, vmi.ZKubeVMIInfo())
+	}
+	kci.Storage = psKubeClusterInfoGlb.Storage.ZKubeStorageInfo()
+	kci.ClusterId = clusterCfg.ClusterID.UUID.String()
+
+	// Put it in the info msg
+	infoMsg.InfoContent = new(info.ZInfoMsg_ClusterInfo)
+	if x, ok := infoMsg.GetInfoContent().(*info.ZInfoMsg_ClusterInfo); ok {
+		x.ClusterInfo = kci
+	}
+
+	// Send it on its way
+	log.Noticef("publishKubeClusterInfo sending %v", infoMsg)
+	data, err := proto.Marshal(infoMsg)
+	if err != nil {
+		log.Errorf("publishKubeClusterInfo proto marshaling error: %v", err)
+		return
+	}
+
+	buf := bytes.NewBuffer(data)
+	if buf == nil {
+		log.Errorf("publishKubeClusterInfo malloc error")
+		return
+	}
+	size := int64(proto.Size(infoMsg))
+
+	log.Noticef("publishKubeClusterInfo to controller")
 	queueInfoToDest(ctx, dest, key, buf, size, bailOnHTTPErr, false, false,
 		info.ZInfoTypes_ZiKubeClusterUpdateStatus)
 }

@@ -76,18 +76,37 @@ func collectKubeStats(ctx *zedkubeContext) {
 			vmisInfo = append(vmisInfo, *vmiInfo)
 		}
 
-		// Publish the cluster info, first w/ nodes and app pods and VMIs
 		ksi, err := kubeapi.PopulateKSI()
 		if err != nil {
 			log.Errorf("collectKubeStats: can't get KSI %v", err)
 		}
+
+		var podNsInfoList []types.KubePodNameSpaceInfo
+		allNs, err := getAllNs()
+		if err == nil {
+			for _, ns := range allNs {
+				nsInfo, err := getPodNsInfo(ns)
+				if err == nil {
+					podNsInfoList = append(podNsInfoList, nsInfo)
+				}
+			}
+		}
+		// Publish the cluster info
 		clusterInfo := types.KubeClusterInfo{
-			Nodes:   nodesInfo,
-			AppPods: podsInfo,
-			AppVMIs: vmisInfo,
-			Storage: ksi,
+			Nodes:     nodesInfo,
+			AppPods:   podsInfo,
+			AppVMIs:   vmisInfo,
+			Storage:   ksi,
+			PodNsInfo: podNsInfoList,
 		}
 		ctx.pubKubeClusterInfo.Publish("global", clusterInfo)
+	}
+	if !ctx.isKubeStatsLeader {
+		// Unpublish so that there isn't anything to send to the controller
+		items := ctx.pubKubeClusterInfo.GetAll()
+		if _, ok := items["global"].(types.KubeClusterInfo); ok {
+			ctx.pubKubeClusterInfo.Unpublish("global")
+		}
 	}
 }
 
