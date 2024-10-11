@@ -18,7 +18,7 @@ require (
 	github.com/google/go-tpm v0.9.1 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/leodido/go-urn v1.2.4 // indirect
-	github.com/lf-edge/eve-api/go v0.0.0-20240722173316-ed56da45126b // indirect
+	github.com/lf-edge/eve-api/go v0.0.0-20240927110703-60db10865cb6 // indirect
 	github.com/lf-edge/eve/pkg/kube/cnirpc v0.0.0-20240315102754-0f6d1f182e0d // indirect
 	github.com/satori/go.uuid v1.2.1-0.20180404165556-75cca531ea76 // indirect
 	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect

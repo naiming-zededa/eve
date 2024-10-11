@@ -17,7 +17,6 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/base"
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/types"
-	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,7 +58,7 @@ func collectAppLogs(ctx *zedkubeContext) {
 		if aiconfig.FixedResources.VirtualizationMode != types.NOHYPER {
 			continue
 		}
-		if aiconfig.DesignatedNodeID != uuid.Nil && aiconfig.DesignatedNodeID.String() != ctx.nodeuuid { // For now, only check DNiD, need to add migration part
+		if !aiconfig.IsDesignatedNodeID { // For now, only check DNiD, need to add migration part
 			continue
 		}
 		kubeName := base.GetAppKubeName(aiconfig.DisplayName, aiconfig.UUIDandVersion.UUID)
@@ -138,11 +137,6 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		return
 	}
 
-	u, err := uuid.FromString(ctx.nodeuuid)
-	if err != nil {
-		return
-	}
-
 	clientset, err := getKubeClientSet()
 	if err != nil {
 		log.Errorf("checkAppsStatus: can't get clientset %v", err)
@@ -163,12 +157,10 @@ func checkAppsStatus(ctx *zedkubeContext) {
 	var oldStatus *types.ENClusterAppStatus
 	for _, item := range items {
 		aiconfig := item.(types.AppInstanceConfig)
-		if aiconfig.DesignatedNodeID == uuid.Nil { // if not for cluster app, skip
-			continue
-		}
+
 		encAppStatus := types.ENClusterAppStatus{
 			AppUUID: aiconfig.UUIDandVersion.UUID,
-			IsDNSet: aiconfig.DesignatedNodeID == u,
+			IsDNSet: aiconfig.IsDesignatedNodeID,
 		}
 		contName := base.GetAppKubeName(aiconfig.DisplayName, aiconfig.UUIDandVersion.UUID)
 
@@ -196,8 +188,49 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		if oldStatus == nil || oldStatus.IsDNSet != encAppStatus.IsDNSet ||
 			oldStatus.ScheduledOnThisNode != encAppStatus.ScheduledOnThisNode || oldStatus.StatusRunning != encAppStatus.StatusRunning {
 			log.Noticef("checkAppsStatus: status differ, publish")
+			// If app scheduled on this node, could happen for 3 reasons.
+			// 1) I am designated node.
+			// 2) I am not designated node but failover happened.
+			// 3) I am deisgnated node but this is failback after failover.
+			// Get the list of volumes referenced by this app and delete the volume attachments from previous node.
+			// We need to do that becasue longhorn volumes are RWO and only one node can attach to those volumes.
+			// This will ensure at any given time only one node can write to those volumes, avoids corruptions.
+			// Basically if app is scheduled on this node, no other node should have volumeattachments.
+			if encAppStatus.ScheduledOnThisNode {
+				for _, vol := range aiconfig.VolumeRefConfigList {
+					pvcName := fmt.Sprintf("%s-pvc-%d", vol.VolumeID.String(), vol.GenerationCounter)
+					// Get the PV name for this PVC
+					pv, err := kubeapi.GetPVFromPVC(pvcName, log)
+					if err != nil {
+						log.Errorf("Error getting PV from PVC %v", err)
+						continue
+					}
+
+					va, remoteNodeName, err := kubeapi.GetVolumeAttachmentFromPV(pv, log)
+					if err != nil {
+						log.Errorf("Error getting volumeattachment PV %s err %v", pv, err)
+						continue
+					}
+					// If no volumeattachment found, continue
+					if va == "" {
+						continue
+					}
+
+					// Delete the attachment if not on this node.
+					if remoteNodeName != ctx.nodeName {
+						log.Noticef("Deleting volumeattachment %s on remote node %s", va, remoteNodeName)
+						err = kubeapi.DeleteVolumeAttachment(va, log)
+						if err != nil {
+							log.Errorf("Error deleting volumeattachment %s from PV %v", va, err)
+							continue
+						}
+					}
+
+				}
+			}
 			ctx.pubENClusterAppStatus.Publish(aiconfig.Key(), encAppStatus)
 		}
+
 	}
 }
 

@@ -106,39 +106,31 @@ func parseVolumeConfig(ctx *getconfigContext,
 		// Add config submitted via local profile server.
 		addLocalVolumeConfig(ctx, volumeConfig)
 
-		// XXX add Designated ID to the VolumeConfig
-		volumeConfig.DesignatedNodeID = devUUID
-		// XXX hack
-		if ctx.zedagentCtx.hvTypeKube {
-			appInstanceList := config.GetApps()
-			for _, ai := range appInstanceList {
-				if ai.Fixedresources.VirtualizationMode == zconfig.VmMode_NOHYPER {
-					for _, vr := range ai.VolumeRefList {
-						if vr.Uuid == volumeConfig.VolumeID.String() && volumeConfig.ContentID != uuid.Nil {
-							volumeConfig.IsNoHyper = true
-							log.Noticef("parseVolumeConfig: setting IsNoHyper for %s", volumeConfig.VolumeID.String())
-							break
-						}
+		controllerDNID := cfgVolume.GetDesignatedNodeId()
+		// If this node is designated node id set IsReplicated to false.
+		// On single node eve either kvm or kubevirt based, this node will always be designated node.
+
+		if controllerDNID != "" && controllerDNID != devUUID.String() {
+			volumeConfig.IsReplicated = true
+		} else {
+			volumeConfig.IsReplicated = false
+		}
+
+		// Iterate through appconfig and check if this volume belongs to a native container deployment.
+		// Looks for NOHYPER type in VirtualizationMode.
+
+		appInstanceList := config.GetApps()
+		for _, ai := range appInstanceList {
+			if ai.Fixedresources.VirtualizationMode == zconfig.VmMode_NOHYPER {
+				for _, vr := range ai.VolumeRefList {
+					if vr.Uuid == volumeConfig.VolumeID.String() && volumeConfig.ContentID != uuid.Nil {
+						volumeConfig.IsNativeContainer = true
+						log.Noticef("parseVolumeConfig: setting IsNativeContainer for %s", volumeConfig.VolumeID.String())
+						break
 					}
 				}
 			}
-
-			pub := ctx.pubContentTreeConfig
-			items := pub.GetAll()
-			for _, item := range items {
-				ct := item.(types.ContentTreeConfig)
-				origDNID := ct.DesignatedNodeID
-				if volumeConfig.DesignatedNodeID != uuid.Nil && ct.ContentID == volumeConfig.ContentID {
-					ct.DesignatedNodeID = volumeConfig.DesignatedNodeID
-					ct.IsNoHyper = volumeConfig.IsNoHyper
-				}
-				if origDNID != ct.DesignatedNodeID {
-					log.Noticef("parseVolumeConfig: pub content tree config update %s", ct.Key())
-					publishContentTreeConfig(ctx, ct)
-				}
-			}
 		}
-
 		publishVolumeConfig(ctx, *volumeConfig)
 	}
 

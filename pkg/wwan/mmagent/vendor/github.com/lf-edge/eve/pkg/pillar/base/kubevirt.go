@@ -4,6 +4,7 @@
 package base
 
 import (
+	"bufio"
 	"os"
 	"regexp"
 	"strings"
@@ -44,6 +45,41 @@ func IsHVTypeKube() bool {
 	return false
 }
 
+// XXX get local cluster ip address
+func GetLocalClusterIP(isHVKube bool) (string, error) {
+	if !isHVKube {
+		return "", nil
+	}
+	file, err := os.Open("/config/server")
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Scan()
+	firstLine := scanner.Text()
+
+	if strings.Contains(firstLine, "zedcloud.local.zededa.net") {
+		hostsFile, err := os.Open("/config/hosts")
+		if err != nil {
+			return "", nil // return empty string if hosts file is not there
+		}
+		defer hostsFile.Close()
+
+		hostsScanner := bufio.NewScanner(hostsFile)
+		for hostsScanner.Scan() {
+			line := hostsScanner.Text()
+			if strings.Contains(line, "zedcloud.local.zededa.net") {
+				ipAddress := strings.Fields(line)[0] // get the first field (IP address)
+				return ipAddress, nil
+			}
+		}
+	}
+
+	return "", nil // return empty string if no matching line is found
+}
+
 var (
 	kubeNameForbiddenChars = regexp.MustCompile("[^a-zA-Z0-9-.]")
 	kubeNameSeparators     = regexp.MustCompile("[.-]+")
@@ -74,8 +110,29 @@ func GetVMINameFromVirtLauncher(podName string) (vmiName string, isVirtLauncher 
 	}
 	vmiName = strings.TrimPrefix(podName, VMIPodNamePrefix)
 	lastSep := strings.LastIndex(vmiName, "-")
-	if lastSep != -1 {
-		vmiName = vmiName[:lastSep]
+	if lastSep == -1 || lastSep < 5 {
+		return "", false
 	}
+
+	// Check if the last part is 5 bytes long
+	if len(vmiName[lastSep+1:]) != 5 {
+		return "", false
+	}
+
+	// Use the index minus 5 bytes to get the VMI name to remove added
+	// replicaset suffix
+	vmiName = vmiName[:lastSep-5]
 	return vmiName, true
+}
+
+func GetReplicaPodName(displayName, podName string, uuid uuid.UUID) (kubeName string, isReplicaPod bool) {
+	kubeName = GetAppKubeName(displayName, uuid)
+	if !strings.HasPrefix(podName, kubeName) {
+		return "", false
+	}
+	suffix := strings.TrimPrefix(podName, kubeName)
+	if strings.HasPrefix(suffix, "-") && len(suffix[1:]) == 5 {
+		return kubeName, true
+	}
+	return "", false
 }

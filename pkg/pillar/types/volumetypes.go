@@ -28,10 +28,11 @@ type VolumeConfig struct {
 	HasNoAppReferences      bool
 	Target                  zconfig.Target
 	CustomMeta              string
-	// Cluster Designated Node Id
-	DesignatedNodeID uuid.UUID
-	// Volume is for nohyper container
-	IsNoHyper bool
+	// This is a replicated volume
+	IsReplicated bool
+	// This volume is container image for native container.
+	// We will find out from NOHYPER flag in appinstanceconfig
+	IsNativeContainer bool
 }
 
 // Key is volume UUID which will be unique
@@ -136,8 +137,11 @@ type VolumeStatus struct {
 	Target                  zconfig.Target
 	CustomMeta              string
 
-	// Volume is for nohyper container
-	IsNoHyper bool
+	// Is this a replicated volume
+	IsReplicated bool
+	// Is this volume actually a container image for native container deployment
+	// We find that info from NOHYPER flag set in appinstance.
+	IsNativeContainer bool
 
 	ErrorAndTimeWithSource
 }

@@ -307,7 +307,8 @@ func waitForNodeReady(client *kubernetes.Clientset, readyCh chan bool, devUUID s
 	}
 }
 
-func waitForPVCReady(ctx context.Context, log *base.LogObject, pvcName string) error {
+// WaitForPVCReady: Loop until PVC is ready for timeout
+func WaitForPVCReady(pvcName string, log *base.LogObject) error {
 	clientset, err := GetClientSet()
 	if err != nil {
 		log.Errorf("waitForPVCReady failed to get clientset err %v", err)
