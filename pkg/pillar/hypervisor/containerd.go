@@ -99,7 +99,7 @@ func (ctx ctrdContext) setupSpec(status *types.DomainStatus, config *types.Domai
 }
 
 func (ctx ctrdContext) Setup(status types.DomainStatus, config types.DomainConfig,
-	aa *types.AssignableAdapters, nodeName string, globalConfig *types.ConfigItemValueMap, file *os.File) error {
+	aa *types.AssignableAdapters, globalConfig *types.ConfigItemValueMap, file *os.File) error {
 	if status.OCIConfigDir == "" {
 		return logError("failed to run domain %s: not based on an OCI image", status.DomainName)
 	}
