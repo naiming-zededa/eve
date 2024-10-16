@@ -278,7 +278,7 @@ const (
 // Task represents any runnable entity on EVE
 type Task interface {
 	Setup(DomainStatus, DomainConfig, *AssignableAdapters,
-		string, *ConfigItemValueMap, *os.File) error
+		*ConfigItemValueMap, *os.File) error
 	VirtualTPMSetup(domainName, agentName string, ps *pubsub.PubSub, warnTime, errTime time.Duration) error
 	VirtualTPMTerminate(domainName string) error
 	VirtualTPMTeardown(domainName string) error
@@ -322,6 +322,9 @@ type DomainStatus struct {
 	VirtualTPM bool
 	// if this node is the DNiD of the App
 	IsDNidNode bool
+	// the device name is used for kube node name
+	// Need to pass in from domainmgr to hypervisor context commands
+	NodeName string
 }
 
 func (status DomainStatus) Key() string {

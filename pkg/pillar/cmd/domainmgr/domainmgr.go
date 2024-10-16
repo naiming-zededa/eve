@@ -1167,7 +1167,12 @@ func maybeRetryBoot(ctx *domainContext, status *types.DomainStatus) {
 		status.VirtualTPM = true
 	}
 
-	if err := hyper.Task(status).Setup(*status, *config, ctx.assignableAdapters, ctx.nodeName, nil, file); err != nil {
+	// pass nodeName to hypervisor call Setup
+	if status.NodeName == "" {
+		status.NodeName = ctx.nodeName
+	}
+
+	if err := hyper.Task(status).Setup(*status, *config, ctx.assignableAdapters, nil, file); err != nil {
 		//it is retry, so omit error
 		log.Errorf("Failed to create DomainStatus from %+v: %s",
 			config, err)
@@ -1727,8 +1732,13 @@ func doActivate(ctx *domainContext, config types.DomainConfig,
 		status.VirtualTPM = true
 	}
 
+	// pass nodeName to hypervisor call Setup
+	if status.NodeName == "" {
+		status.NodeName = ctx.nodeName
+	}
+
 	globalConfig := agentlog.GetGlobalConfig(log, ctx.subGlobalConfig)
-	if err := hyper.Task(status).Setup(*status, config, ctx.assignableAdapters, ctx.nodeName, globalConfig, file); err != nil {
+	if err := hyper.Task(status).Setup(*status, config, ctx.assignableAdapters, globalConfig, file); err != nil {
 		log.Errorf("Failed to create DomainStatus from %+v: %s",
 			config, err)
 		status.SetErrorNow(err.Error())

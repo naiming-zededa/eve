@@ -69,7 +69,7 @@ func (ctx nullContext) Task(status *types.DomainStatus) types.Task {
 }
 
 func (ctx nullContext) Setup(types.DomainStatus, types.DomainConfig,
-	*types.AssignableAdapters, string, *types.ConfigItemValueMap, *os.File) error {
+	*types.AssignableAdapters, *types.ConfigItemValueMap, *os.File) error {
 	return nil
 }
 

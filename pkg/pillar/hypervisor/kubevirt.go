@@ -202,14 +202,14 @@ func (ctx kubevirtContext) Task(status *types.DomainStatus) types.Task {
 
 // Use eve DomainConfig and DomainStatus and generate k3s VMI config or a Pod config
 func (ctx kubevirtContext) Setup(status types.DomainStatus, config types.DomainConfig,
-	aa *types.AssignableAdapters, nodeName string, globalConfig *types.ConfigItemValueMap, file *os.File) error {
+	aa *types.AssignableAdapters, globalConfig *types.ConfigItemValueMap, file *os.File) error {
 
 	diskStatusList := status.DiskStatusList
 	domainName := status.DomainName
 
 	logrus.Debugf("Setup called for Domain: %s, vmmode %v", domainName, config.VirtualizationMode)
 
-	getMyNodeUUID(&ctx, nodeName)
+	getMyNodeUUID(&ctx, status.NodeName)
 
 	if config.VirtualizationMode == types.NOHYPER {
 		if err := ctx.CreateReplicaPodConfig(domainName, config, status, diskStatusList, aa, file); err != nil {
