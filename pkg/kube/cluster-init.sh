@@ -33,10 +33,6 @@ CLUSTER_WAIT_FILE="/run/kube/cluster-change-wait-ongoing"
 # Source the utility script
 . /usr/bin/cluster-utils.sh
 
-# Include update interface
-# XXX comment out for later commit to main branch
-#. /usr/bin/cluster-update.sh
-
 # get cluster IP address from the cluster status file
 get_cluster_node_ip() {
     if [ -z "$1" ]; then
