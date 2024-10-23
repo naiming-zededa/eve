@@ -43,7 +43,12 @@ func applyDNS(ctx *zedkubeContext, dns types.DeviceNetworkStatus) {
 				stopClusterStatusServer(ctx)
 			}
 		}
-		publishKubeConfigStatus(ctx)
+		// NIM can publish network status due to cluster config
+		// removal, and we don't want to publish the dummy/empty
+		// cluster status in that case.
+		if ctx.clusterConfig.ClusterInterface != "" {
+			publishKubeConfigStatus(ctx)
+		}
 	}
 }
 
