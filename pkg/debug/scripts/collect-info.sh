@@ -455,7 +455,7 @@ ln -s /persist/status       "$DIR/persist-status"
 ln -s /persist/log          "$DIR/persist-log"
 ln -s /persist/netdump      "$DIR/persist-netdump"
 ln -s /persist/kcrashes     "$DIR/persist-kcrashes"
-ln -s /persist/kubelog      "$DIR/persist-kubelog"
+[ -d /persist/kubelog ] && ln -s /persist/kubelog "$DIR/persist-kubelog"
 [ -d /persist/memory-monitor/output ] && ln -s /persist/memory-monitor/output "$DIR/persist-memory-monitor-output"
 ln -s /run                  "$DIR/root-run"
 cp -r /sys/fs/cgroup/memory "$DIR/sys-fs-cgroup-memory" >/dev/null 2>&1
