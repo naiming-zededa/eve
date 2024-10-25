@@ -162,6 +162,9 @@ func runCommand(ps *pubsub.PubSub, command string, args []string) int {
 				DestinationKubeUpdateVersion: dest_kube_version,
 			}
 			if status == kubeapi.COMP_STATUS_FAILED {
+				if error_str == "" {
+					error_str = inlineCmdKubeClusterUpdateStatus + " " + strings.Join(args, " ")
+				}
 				upStatusObj.SetError(error_str, time.Now())
 			}
 			pubKubeClusterUpdateStatus.Publish("global", upStatusObj)

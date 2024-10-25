@@ -2117,19 +2117,13 @@ func handleClusterUpdateStatusImpl(ctxArg interface{}, key string,
 		log.Errorf("handleClusterUpdateStatusImpl invalid type in configArg: %v", statusArg)
 		return
 	}
-	log.Noticef("handleClusterUpdateStatusImpl key:%s obj:%v", key, req)
-
 	state := getDeviceState(ctx)
-	//if state != DEVICE_STATE_BASEOS_UPDATING {
-	// Ignore if not in baseos updating state
-	//	return
-	//}
-	log.Noticef("handleClusterUpdateStatusImpl devicestate:%s", state)
+	log.Noticef("handleClusterUpdateStatusImpl key:%s obj:%v devicestate:%s", key, req, state)
 	triggerPublishKubeClusterUpdateStatus(ctx)
 }
 
 func triggerPublishKubeClusterUpdateStatusToDest(ctxPtr *zedagentContext, dest destinationBitset) {
-	log.Notice("Triggered PublishKubeClusterUpdateStatus")
+	log.Function("Triggered PublishKubeClusterUpdateStatus")
 	select {
 	case ctxPtr.triggerClusterUpdateInfo <- dest:
 		// Do nothing more
@@ -2145,7 +2139,7 @@ func triggerPublishKubeClusterUpdateStatus(ctxPtr *zedagentContext) {
 }
 
 func triggerPublishKubeClusterInfoToDest(ctxPtr *zedagentContext, dest destinationBitset) {
-	log.Notice("Triggered PublishKubeClusterInfo")
+	log.Function("Triggered PublishKubeClusterInfo")
 	select {
 	case ctxPtr.triggerClusterInfo <- dest:
 		// Do nothing more
