@@ -369,6 +369,7 @@ func drainAndDeleteNode(ctx *zedkubeContext) {
 	_, err = clientset.CoreV1().Nodes().Update(context.Background(), node, metav1.UpdateOptions{})
 	if err != nil {
 		log.Errorf("drainAndDeleteNode: cordon node %s failed: %v, continue the delete", nodeName, err)
+		return
 	}
 
 	if err = deletePods(clientset, kubeapi.EVEKubeNameSpace, nodeName); err != nil {
@@ -376,13 +377,49 @@ func drainAndDeleteNode(ctx *zedkubeContext) {
 		return
 	}
 
-	if err = drainNode(ctx); err != nil {
-		log.Error(fmt.Errorf("drainAndDeleteNode: drain err:%v", err))
+	//
+	// This path will be passed through for both:
+	// - cluster delete
+	// - node delete (UI node replace)
+	//
+	// Some background: the motivation to drain a node is to give time for another
+	// node in the cluster to complete a replica rebuild where the only source data could
+	// reside on this local node.
+	// Example:
+	//	- node 1 outage, recovers, starts rebuilds
+	//  - node 2 outage before node 1 rebuilds complete, recovers, starts rebuilds
+	//  - both 1 and 2 are now rebuilding replicas off of data on node 3
+	//  - user requests node 3 replacement for some maintenance (fan replacement, memory upgrade, ...)
+	//
+	// - cluster delete: every node is leaving the cluster and rebooting, there are no rebuilds
+	//	to complete. Drain is not needed.
+	//
+	// - node delete (UI node replace): there are still nodes resident in the cluster which could
+	//  have data they need on this node to complete a replica rebuild.  Drain is required.
+	//
+
+	drainRequired := true
+	replicas, err := kubeapi.LonghornReplicaList(nodeName, "")
+	if err != nil {
+		log.Errorf("drainAndDeleteNode LonghornReplicaList:%v", err)
 		return
+	}
+	if (err == nil) && (len(replicas.Items) == 0) {
+		log.Noticef("drainAndDeleteNode found no replicas on this node, no rebuilds could need data here")
+		drainRequired = false
+	}
+
+	if drainRequired {
+		if err = drainNode(ctx); err != nil {
+			log.Error(fmt.Errorf("drainAndDeleteNode: drain err:%v", err))
+			return
+		}
 	}
 
 	if err := clientset.CoreV1().Nodes().Delete(context.Background(), nodeName, metav1.DeleteOptions{}); err != nil {
 		log.Errorf("drainAndDeleteNode: clientset.CoreV1().Nodes().Delete failed: %v", err)
+		return
 	}
 	log.Noticef("drainAndDeleteNode: node %s drained and deleted", nodeName)
+	return
 }

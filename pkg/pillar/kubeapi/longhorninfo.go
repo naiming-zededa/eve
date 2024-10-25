@@ -8,6 +8,7 @@ package kubeapi
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lf-edge/eve/pkg/pillar/types"
@@ -100,9 +101,7 @@ func PopulateKVIFromPVCName(kvi *types.KubeVolumeInfo) (*types.KubeVolumeInfo, e
 		kvi.State = types.StorageVolumeState_Deleting
 	}
 
-	replicas, err := lhClient.LonghornV1beta2().Replicas("longhorn-system").List(context.Background(), metav1.ListOptions{
-		LabelSelector: "longhornvolume=" + lhVolName,
-	})
+	replicas, err := LonghornReplicaList("", lhVolName)
 	if err != nil {
 		return kvi, fmt.Errorf("PopulateKVIFromPVCName pv:%s can't get replicas: %v", lhVolName, err)
 	}
@@ -274,4 +273,32 @@ func PopulateKSI() (types.KubeStorageInfo, error) {
 		ksi.Volumes = append(ksi.Volumes, *kvi)
 	}
 	return ksi, nil
+}
+
+func LonghornReplicaList(ownerNodeName string, longhornVolName string) (*lhv1beta2.ReplicaList, error) {
+	config, err := GetKubeConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	lhClient, err := versioned.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("LonghornReplicaList can't get versioned config: %v", err)
+	}
+
+	labelSelectors := []string{}
+	if ownerNodeName != "" {
+		labelSelectors = append(labelSelectors, "longhornnode="+ownerNodeName)
+	}
+	if longhornVolName != "" {
+		labelSelectors = append(labelSelectors, "longhornvolume="+longhornVolName)
+	}
+	replicas, err := lhClient.LonghornV1beta2().Replicas("longhorn-system").List(context.Background(), metav1.ListOptions{
+		LabelSelector: strings.Join(labelSelectors, ","),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("LonghornReplicaList labelSelector:%s can't get replicas: %v", strings.Join(labelSelectors, ","), err)
+	}
+
+	return replicas, nil
 }
