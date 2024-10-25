@@ -171,8 +171,8 @@ assign_multus_nodeip() {
       # Find the default route interface
       default_interface="$(ip route show default | head -n 1 | awk '/default/ {print $5}')"
 
-      # Get the IP address of the default route interface
-      NODE_IP="$(ip addr show dev "$default_interface" | awk '/inet / {print $2}' | cut -d "/" -f1)"
+      # Get the first IP address of the default route interface as the node IP
+      NODE_IP="$(ip addr show dev "$default_interface" | awk '/inet / {print $2}' | head -n 1 | cut -d "/" -f1)"
 
       [ -z "$NODE_IP" ] && sleep 1
     done
