@@ -709,7 +709,7 @@ func vmmOverhead(domainName string, domainUUID uuid.UUID, domainRAMSize int64, v
 
 // Setup sets up kvm
 func (ctx KvmContext) Setup(status types.DomainStatus, config types.DomainConfig,
-	aa *types.AssignableAdapters, nodeName string, globalConfig *types.ConfigItemValueMap, file *os.File) error {
+	aa *types.AssignableAdapters, globalConfig *types.ConfigItemValueMap, file *os.File) error {
 
 	diskStatusList := status.DiskStatusList
 	domainName := status.DomainName
