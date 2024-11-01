@@ -21,6 +21,33 @@ const (
 	COMPLETE                             // COMPLETE All node workloads removed from system
 )
 
+func (status DrainStatus) String() string {
+	switch status {
+	case UNKNOWN:
+		return "Unknown"
+	case NOTSUPPORTED:
+		return "Not Supported"
+	case NOTREQUESTED:
+		return "Not Requested"
+	case REQUESTED:
+		return "Requested"
+	case STARTING:
+		return "Starting"
+	case CORDONED:
+		return "Cordoned"
+	case FAILEDCORDON:
+		return "Failed Cordon"
+	case DRAINRETRYING:
+		return "Drain Retrying"
+	case FAILEDDRAIN:
+		return "Failed Drain"
+	case COMPLETE:
+		return "Complete"
+	default:
+		return "Unknown"
+	}
+}
+
 // DrainRequester is a user initiated edge-node operation from a pillar microservice
 type DrainRequester uint8
 
@@ -34,7 +61,6 @@ const (
 //
 //	Used by Reboots, Prepare-Shutdown, baseos updates
 type NodeDrainRequest struct {
-	Hostname    string
 	RequestedAt time.Time
 	RequestedBy DrainRequester
 	Context     string

@@ -34,7 +34,7 @@ func handleNodeDrainStatusImplNA(ctxArg interface{}, _ string,
 	// NodeDrainStatus Failures here should keep drainInProgress set.
 	//      As this will set DrainInProgress on NodeAgentStatus and keep zedagent from allowing
 	//  the deferred operation to continue.
-	if (newStatus.Status >= kubeapi.REQUESTED) && (newStatus.Status <= kubeapi.COMPLETE) {
+	if (newStatus.Status >= kubeapi.REQUESTED) && (newStatus.Status < kubeapi.COMPLETE) {
 		log.Noticef("handleNodeDrainStatusImplNA nodedrain-step:drain-inprogress-handler NodeDrainStatus:%v", newStatus)
 		ctx.drainInProgress = true
 		publishNodeAgentStatus(ctx)
