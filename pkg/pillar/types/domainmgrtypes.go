@@ -322,6 +322,10 @@ type DomainStatus struct {
 	VirtualTPM bool
 	// if this node is the DNiD of the App
 	IsDNidNode bool
+	// handle DomainConfig Delete
+	// For kubevirt Apps, there is no need to delete the domain from the
+	// kubernetes, unless the domain is removed from configuration.
+	DomainConfigDeleted bool
 	// the device name is used for kube node name
 	// Need to pass in from domainmgr to hypervisor context commands
 	NodeName string
