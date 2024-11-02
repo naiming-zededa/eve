@@ -1814,6 +1814,11 @@ func doActivateTail(ctx *domainContext, status *types.DomainStatus,
 			log.Noticef("doActivateTail(%v) we are not DNiD, skip delete app", status.DomainName)
 			return
 		}
+
+		if ctx.hvTypeKube && !status.DomainConfigDeleted {
+			log.Noticef("doActivateTail(%v) DomainConfig exists, skip delete app", status.DomainName)
+			return
+		}
 		// Delete
 		if err := hyper.Task(status).Delete(status.DomainName); err != nil {
 			log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
@@ -1848,6 +1853,11 @@ func doActivateTail(ctx *domainContext, status *types.DomainStatus,
 			log.Noticef("doActivateTail(%v) we are not DNiD, skip delete app", status.DomainName)
 			return
 		}
+		if ctx.hvTypeKube && !status.DomainConfigDeleted {
+			log.Noticef("doActivateTail(%v) DomainConfig exists, skip delete app", status.DomainName)
+			return
+		}
+
 		// Delete
 		if err := hyper.Task(status).Delete(status.DomainName); err != nil {
 			log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
@@ -1951,6 +1961,10 @@ func doInactivate(ctx *domainContext, status *types.DomainStatus, impatient bool
 	if status.DomainId != 0 {
 		if !status.IsDNidNode {
 			log.Noticef("doInactivate(%v) we are not DNiD, skip delete app", status.DomainName)
+			return
+		}
+		if ctx.hvTypeKube && !status.DomainConfigDeleted {
+			log.Noticef("doInactivate(%v) DomainConfig exists, skip delete app", status.DomainName)
 			return
 		}
 
@@ -2521,6 +2535,8 @@ func handleDelete(ctx *domainContext, key string, status *types.DomainStatus) {
 		log.Noticef("handleDelete(%v) we are not DNiD, skip delete app", status.DomainName)
 		return
 	}
+	status.DomainConfigDeleted = true
+	log.Noticef("handleDelete(%v) DomainConfigDeleted", status.DomainName)
 
 	err := hyper.Task(status).Delete(status.DomainName)
 	if err != nil {
