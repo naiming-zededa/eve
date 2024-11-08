@@ -235,6 +235,14 @@ publishUpdateStatus() {
     if [ ! -x $3 ]; then 
         errorstr=$3
     fi
+
+    # If gen==0, then we are in the initial boot not updating, just installing first versions at most-likely first
+    #   boot of the device.  Don't publish as this will trigger zedagent to claim baseos_updating.
+    cur_version=$(update_Version_Get)
+    if [ "$cur_version" = "0" ]; then
+        return
+    fi
+
     node=$(jq -r '.DeviceName' < /persist/status/zedagent/EdgeNodeInfo/global.json | tr -d '\n')
     logmsg "publishUpdateStatus() $node $component $status"
 
