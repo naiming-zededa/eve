@@ -1165,6 +1165,11 @@ func PublishAppInfoToZedCloud(ctx *zedagentContext, uuid string,
 			snapInfo.SnapErr = encodeErrorInfo(snap.Error)
 			ReportAppInfo.Snapshots = append(ReportAppInfo.Snapshots, snapInfo)
 		}
+
+		// For Clustered apps on HV=kubevirt, 'ClusterAppRunning' designates
+		// the app is running on the local node after some failover event.
+		ReportAppInfo.ClusterAppRunning = aiStatus.Activated
+
 	}
 
 	ReportInfo.InfoContent = new(info.ZInfoMsg_Ainfo)
