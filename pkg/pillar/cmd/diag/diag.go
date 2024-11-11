@@ -28,7 +28,6 @@ import (
 	"github.com/lf-edge/eve/pkg/pillar/base"
 	"github.com/lf-edge/eve/pkg/pillar/devicenetwork"
 	"github.com/lf-edge/eve/pkg/pillar/hardware"
-	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	fileutils "github.com/lf-edge/eve/pkg/pillar/utils/file"
@@ -383,25 +382,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	ctx.subDownloaderStatus = subDownloaderStatus
 	subDownloaderStatus.Activate()
 
-	// Sub the Status
-	subNodeDrainStatus, err := ps.NewSubscription(pubsub.SubscriptionOptions{
-		AgentName:     "zedkube",
-		MyAgentName:   agentName,
-		TopicImpl:     kubeapi.NodeDrainStatus{},
-		Persistent:    false,
-		Activate:      false,
-		Ctx:           &ctx,
-		CreateHandler: handleNodeDrainStatusCreate,
-		ModifyHandler: handleNodeDrainStatusModify,
-		DeleteHandler: handleNodeDrainStatusDelete,
-		WarningTime:   warningTime,
-		ErrorTime:     errorTime,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	ctx.subNodeDrainStatus = subNodeDrainStatus
-	ctx.subNodeDrainStatus.Activate()
+	initDrainSub(ps, &ctx)
 
 	cloudPingMetricPub, err := ps.NewPublication(
 		pubsub.PublicationOptions{
@@ -452,8 +433,8 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		case change := <-subDownloaderStatus.MsgChan():
 			subDownloaderStatus.ProcessChange(change)
 
-		case change := <-subNodeDrainStatus.MsgChan():
-			subNodeDrainStatus.ProcessChange(change)
+		case change := <-ctx.subNodeDrainStatus.MsgChan():
+			ctx.subNodeDrainStatus.ProcessChange(change)
 		}
 
 		// Is this the first time we have all the info to print?
@@ -1544,46 +1525,4 @@ func handleGlobalConfigDelete(ctxArg interface{}, key string,
 		ctx.CLIParams().DebugOverride, logger)
 	*ctx.globalConfig = *types.DefaultConfigItemValueMap()
 	log.Functionf("handleGlobalConfigDelete done for %s", key)
-}
-
-func handleNodeDrainStatusCreate(ctxArg interface{}, key string,
-	configArg interface{}) {
-	handleNodeDrainStatusImpl(ctxArg, key, configArg, nil)
-}
-
-func handleNodeDrainStatusModify(ctxArg interface{}, key string,
-	configArg interface{}, oldConfigArg interface{}) {
-	handleNodeDrainStatusImpl(ctxArg, key, configArg, oldConfigArg)
-}
-
-func handleNodeDrainStatusImpl(ctxArg interface{}, key string,
-	configArg interface{}, oldConfigArg interface{}) {
-	ctx := ctxArg.(*diagContext)
-	newStatus := configArg.(kubeapi.NodeDrainStatus)
-	printNodeDrainStatus(ctx, newStatus)
-}
-
-func printNodeDrainStatus(ctx *diagContext, newStatus kubeapi.NodeDrainStatus) {
-	ts := time.Now().Format(time.RFC3339Nano)
-	switch newStatus.Status {
-	case kubeapi.REQUESTED:
-		ctx.ph.Print("INFO: Node Drain -> Requested at %v\n", ts)
-	case kubeapi.STARTING:
-		ctx.ph.Print("INFO: Node Drain -> Starting at %v\n", ts)
-	case kubeapi.CORDONED:
-		ctx.ph.Print("INFO: Node Drain -> Cordoned at %v\n", ts)
-	case kubeapi.FAILEDCORDON:
-		ctx.ph.Print("ERROR: Node Drain -> Failed Cordon at %v\n", ts)
-	case kubeapi.DRAINRETRYING:
-		ctx.ph.Print("WARNING: Node Drain -> Retry Drain at %v\n", ts)
-	case kubeapi.FAILEDDRAIN:
-		ctx.ph.Print("ERROR: Node Drain -> Failed Drain at %v\n", ts)
-	case kubeapi.COMPLETE:
-		ctx.ph.Print("INFO: Node Drain -> Complete at %v\n", ts)
-	}
-	ctx.ph.Flush()
-}
-
-func handleNodeDrainStatusDelete(ctxArg interface{}, key string,
-	statusArg interface{}) {
 }

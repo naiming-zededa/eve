@@ -95,7 +95,7 @@ func initNodeDrainPubSub(ps *pubsub.PubSub, ctx *baseOsMgrContext) {
 
 // shouldDeferForNodeDrain will return true if this BaseOsStatus update will be handled later
 func shouldDeferForNodeDrain(ctx *baseOsMgrContext, id string, config *types.BaseOsConfig, status *types.BaseOsStatus) bool {
-	drainStatus := kubeapi.GetNodeDrainStatus(ctx.subNodeDrainStatus)
+	drainStatus := kubeapi.GetNodeDrainStatus(ctx.subNodeDrainStatus, log)
 	if drainStatus.Status == kubeapi.NOTSUPPORTED {
 		return false
 	}

@@ -485,6 +485,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	if err != nil {
 		log.Fatal(err)
 	}
+	kubeapi.CleanupDrainStatusOverride(log)
 	zedkubeCtx.subNodeDrainRequestZA.Activate()
 
 	// Sub the request
@@ -679,7 +680,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 			zedkubeCtx.subNodeDrainRequestBoM.ProcessChange(change)
 
 		case <-zedkubeCtx.drainOverrideTimer.C:
-			override := kubeapi.GetDrainStatusOverride()
+			override := kubeapi.GetDrainStatusOverride(log)
 			if override != nil {
 				zedkubeCtx.pubNodeDrainStatus.Publish("global", override)
 			}

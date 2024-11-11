@@ -3,6 +3,7 @@ package zedagent
 import (
 	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
+	"github.com/lf-edge/eve/pkg/pillar/types"
 )
 
 func handleNodeDrainStatusCreate(ctxArg interface{}, key string,
@@ -75,4 +76,41 @@ func initNodeDrainPubSub(ctx *zedagentContext) {
 	}
 	ctx.subNodeDrainStatus = subNodeDrainStatus
 	ctx.pubNodeDrainRequest = pubNodeDrainRequest
+}
+
+func shouldDeferForNodeDrain(ctx *zedagentContext, op types.DeviceOperation) bool {
+	drainStatus := kubeapi.GetNodeDrainStatus(ctx.subNodeDrainStatus, log)
+	switch drainStatus.Status {
+	case kubeapi.UNKNOWN:
+		log.Error("scheduleDeviceOperation EARLY boot request, zedkube not up yet")
+		return false
+	case kubeapi.NOTSUPPORTED:
+		log.Function("scheduleDeviceOperation drain not supported, skipping")
+		return false
+	case kubeapi.NOTREQUESTED:
+		fallthrough
+	case kubeapi.FAILEDCORDON:
+		fallthrough
+	case kubeapi.FAILEDDRAIN:
+		err := kubeapi.RequestNodeDrain(ctx.pubNodeDrainRequest, kubeapi.DEVICEOP, op.String())
+		if err != nil {
+			log.Errorf("scheduleDeviceOperation: can't request node drain: %v", err)
+		}
+		// Wait until drained
+		log.Notice("scheduleDeviceOperation drain requested defer")
+		return true
+	case kubeapi.REQUESTED:
+		fallthrough
+	case kubeapi.STARTING:
+		fallthrough
+	case kubeapi.DRAINRETRYING:
+		// Wait until drained
+		log.Function("scheduleDeviceOperation drain in-progress still defer")
+		return true
+	case kubeapi.COMPLETE:
+		//Finally...
+		log.Notice("scheduleDeviceOperation drain complete, goodbye")
+		return false
+	}
+	return false
 }

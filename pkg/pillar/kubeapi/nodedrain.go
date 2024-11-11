@@ -11,22 +11,21 @@ import (
 	"os"
 	"time"
 
+	"github.com/lf-edge/eve/pkg/pillar/base"
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
 )
 
+// An alternate path to force a drain status in the event of a drain issue.
+const forceNodeDrainPath string = "/persist/kube-status/force-NodeDrainStatus-global.json"
+
 // RequestNodeDrain generates the NodeDrainRequest object and publishes it
 func RequestNodeDrain(pubNodeDrainRequest pubsub.Publication, requester DrainRequester, context string) error {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return fmt.Errorf("RequestNodeDrain: can't get hostname %v", err)
-	}
 	drainReq := NodeDrainRequest{
-		Hostname:    hostname,
 		RequestedAt: time.Now(),
 		RequestedBy: requester,
 		Context:     context,
 	}
-	err = pubNodeDrainRequest.Publish("global", drainReq)
+	err := pubNodeDrainRequest.Publish("global", drainReq)
 	if err != nil {
 		return fmt.Errorf("RequestNodeDrain: error publishing drain request: %v", err)
 	}
@@ -34,23 +33,42 @@ func RequestNodeDrain(pubNodeDrainRequest pubsub.Publication, requester DrainReq
 }
 
 // GetDrainStatusOverride : an alternate way to set drain status for debug
-func GetDrainStatusOverride() *NodeDrainStatus {
-	// An alternate path to force a drain status in the event of a drain issue.
-	forceNodeDrainPath := "/persist/force-NodeDrainStatus-global.json"
-	if _, err := os.Stat(forceNodeDrainPath); err == nil {
-		b, err := os.ReadFile(forceNodeDrainPath)
-		if err == nil {
-			cfg := NodeDrainStatus{}
-			err = json.Unmarshal(b, &cfg)
-			if err == nil {
-				if cfg.Status == COMPLETE {
-					os.Remove(forceNodeDrainPath)
-				}
-				return &cfg
-			}
+func GetDrainStatusOverride(log *base.LogObject) *NodeDrainStatus {
+	if _, err := os.Stat(forceNodeDrainPath); err != nil {
+		return nil
+	}
+	b, err := os.ReadFile(forceNodeDrainPath)
+	if err != nil {
+		log.Warnf("Unable to read %s:%v", forceNodeDrainPath, err)
+		return nil
+	}
+	cfg := NodeDrainStatus{}
+	err = json.Unmarshal(b, &cfg)
+	if err != nil {
+		log.Warnf("Unable to Unmarshal %s to NodeDrainStatus: %v", forceNodeDrainPath, err)
+		return nil
+	}
+	if cfg.Status == COMPLETE {
+		err = os.Remove(forceNodeDrainPath)
+		if err != nil {
+			log.Warnf("could not remove %s: %v", forceNodeDrainPath, err)
 		}
 	}
-	return nil
+	return &cfg
+}
+
+// CleanupDrainStatusOverride is used at microservice startup to cleanup
+// a previously user written override file
+func CleanupDrainStatusOverride(log *base.LogObject) {
+	if _, err := os.Stat(forceNodeDrainPath); err != nil {
+		return
+	}
+	err := os.Remove(forceNodeDrainPath)
+	if err != nil {
+		log.Warnf("CleanupDrainStatusOverride could not remove %s: %v", forceNodeDrainPath, err)
+		return
+	}
+	return
 }
 
 // DrainStatusFaultInjection_Wait : while this file exists, wait in the drain status
@@ -65,8 +83,8 @@ func DrainStatus_FaultInjection_Wait() bool {
 // GetNodeDrainStatus is a wrapper to either return latest NodeDrainStatus
 //
 //	or return a forced status from /persist/force-NodeDrainStatus-global.json
-func GetNodeDrainStatus(subNodeDrainStatus pubsub.Subscription) *NodeDrainStatus {
-	override := GetDrainStatusOverride()
+func GetNodeDrainStatus(subNodeDrainStatus pubsub.Subscription, log *base.LogObject) *NodeDrainStatus {
+	override := GetDrainStatusOverride(log)
 	if override != nil {
 		return override
 	}
