@@ -56,6 +56,7 @@ type KubeNodeInfo struct {
 	ExternalIP         string
 	Schedulable        bool
 	Admission          NodeAdmission
+	NodeId             string
 }
 
 func (kni KubeNodeInfo) ZKubeNodeInfo() *info.KubeNodeInfo {
@@ -73,6 +74,7 @@ func (kni KubeNodeInfo) ZKubeNodeInfo() *info.KubeNodeInfo {
 	iKni.InternalIp = kni.InternalIP
 	iKni.Schedulable = kni.Schedulable
 	iKni.AdmissionStatus = kni.Admission.ZNodeAdmission()
+	iKni.NodeId = kni.NodeId
 	return iKni
 }
 
@@ -328,6 +330,7 @@ type KubeVolumeInfo struct {
 	PvcStatus          StorageVolumePvcStatus
 	Replicas           []KubeVolumeReplicaInfo
 	RobustnessSubstate StorageHealthStatus
+	VolumeId           string
 }
 
 func (kvi KubeVolumeInfo) ZKubeVolumeInfo() *info.KubeVolumeInfo {
@@ -343,6 +346,7 @@ func (kvi KubeVolumeInfo) ZKubeVolumeInfo() *info.KubeVolumeInfo {
 		iKvi.Replica = append(iKvi.Replica, rep.ZKubeVolumeReplicaInfo())
 	}
 	iKvi.RobustnessSubstate = info.StorageHealthStatus(kvi.RobustnessSubstate)
+	iKvi.VolumeId = kvi.VolumeId
 	return iKvi
 }
 
