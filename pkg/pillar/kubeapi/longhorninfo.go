@@ -269,6 +269,7 @@ func PopulateKSI() (types.KubeStorageInfo, error) {
 		if err != nil {
 			return ksi, fmt.Errorf("PopulateKSI can't get kvi: %v", err)
 		}
+		kvi.VolumeId, _ = strings.CutSuffix(kvi.Name, "-pvc-0")
 
 		ksi.Volumes = append(ksi.Volumes, *kvi)
 	}

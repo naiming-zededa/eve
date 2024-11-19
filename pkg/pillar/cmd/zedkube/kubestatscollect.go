@@ -201,6 +201,7 @@ func getKubeNodeInfo(node corev1.Node, ctx *zedkubeContext) *types.KubeNodeInfo 
 		ExternalIP:         externalIP,
 		Schedulable:        schedulable,
 		Admission:          admission,
+		NodeId:             node.Labels["node-uuid"],
 	}
 
 	return &nodeInfo
