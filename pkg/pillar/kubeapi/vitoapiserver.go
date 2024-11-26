@@ -318,24 +318,50 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
 
 	log.Noticef("virtctl args %v", args)
 
-	// Wait for long long time since some volumes could be in TBs
-	output, err := base.Exec(log, "/containers/services/kube/rootfs/usr/bin/virtctl", args...).
-		WithContext(ctx).WithUnlimitedTimeout(432000 * time.Second).CombinedOutput()
+	uploadTry := 0
+	maxRetries := 10
+	timeoutBaseSeconds := int64(300) // 5 min
+	volSizeGB := int64(volSize / 1024 / 1024 / 1024)
+	timeoutPer1GBSeconds := int64(120)
+	timeout := time.Duration(timeoutBaseSeconds + (volSizeGB * timeoutPer1GBSeconds))
+	log.Noticef("RolloutDiskToPVC calculated timeout to %d seconds due to volume size %d GB", timeout, volSizeGB)
 
-	if err != nil {
-		err = fmt.Errorf("RolloutDiskToPVC: Failed to convert qcow to PVC %s: %v", output, err)
-		log.Error(err)
-		return err
+	startTimeOverall := time.Now()
+
+	//
+	// CDI Upload is quick to fail upon short-lived k8s api errors during its own upload-wait status loop
+	// Try the upload again.
+	//
+	for uploadTry < maxRetries {
+		uploadTry++
+
+		startTimeThisUpload := time.Now()
+		output, err := base.Exec(log, "/containers/services/kube/rootfs/usr/bin/virtctl", args...).
+			WithContext(ctx).WithUnlimitedTimeout(timeout * time.Second).CombinedOutput()
+
+		uploadDuration := time.Since(startTimeThisUpload)
+		if err != nil {
+			err = fmt.Errorf("RolloutDiskToPVC: Failed after %f seconds to convert qcow to PVC %s: %v", uploadDuration.Seconds(), output, err)
+			log.Error(err)
+			time.Sleep(5)
+			continue
+		}
+
+		// Eventually the command should return something like:
+		// PVC 688b9728-6f21-4bb6-b2f7-4928813fefdc-pvc-0 already successfully imported/cloned/updated
+
+		overallDuration := time.Since(startTimeOverall)
+		log.Noticef("RolloutDiskToPVC image upload completed on try:%d after %f seconds, total elapsed time %f seconds", uploadTry, uploadDuration.Seconds(), overallDuration.Seconds())
+		err = waitForPVCUploadComplete(pvcName, log)
+		if err != nil {
+			err = fmt.Errorf("RolloutDiskToPVC: error wait for PVC %v", err)
+			log.Error(err)
+			return err
+		}
+		return nil
 	}
-	err = WaitForPVCReady(pvcName, log)
 
-	if err != nil {
-		err = fmt.Errorf("RolloutDiskToPVC: error wait for PVC %v", err)
-		log.Error(err)
-		return err
-	}
-
-	return nil
+	return fmt.Errorf("RolloutDiskToPVC attempts to upload image failed")
 }
 
 // GetPVFromPVC: Returns volume name (PV) from the PVC name
