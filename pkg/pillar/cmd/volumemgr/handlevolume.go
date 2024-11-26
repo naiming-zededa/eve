@@ -100,6 +100,10 @@ func handleDeferredVolumeCreate(ctx *volumemgrContext, key string, config *types
 	log.Tracef("handleDeferredVolumeCreate(%s)", key)
 	status := ctx.LookupVolumeStatus(config.Key())
 	if status != nil {
+		if config.IsReplicated {
+			// Objects are replicated across cluster nodes, just exit.
+			return
+		}
 		log.Fatalf("status exists at handleVolumeCreate for %s", config.Key())
 	}
 	status = &types.VolumeStatus{
