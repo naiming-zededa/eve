@@ -166,11 +166,20 @@ func checkAppsStatus(ctx *zedkubeContext) {
 
 		for _, pod := range pods.Items {
 			contVMIName := "virt-launcher-" + contName
-			log.Functionf("checkAppsStatus: pod %s, cont %s", pod.Name, contName)
+			log.Noticef("PRAMOD checkAppsStatus: pod %s, cont %s Phase %s", pod.Name, contName, pod.Status.Phase)
 			if strings.HasPrefix(pod.Name, contName) || strings.HasPrefix(pod.Name, contVMIName) {
 				encAppStatus.ScheduledOnThisNode = true
-				if pod.Status.Phase == corev1.PodRunning {
+				// We consider Pending as running since it got scheduled and about to start
+				if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
 					encAppStatus.StatusRunning = true
+				}
+
+				// PodFailed means that all containers in the pod have terminated, and at least one container has
+				// terminated in a failure (exited with a non-zero exit code or was stopped by the system).
+				// This would be the case during failover.
+				// PodSucceeded means all pods stopped gracefully.
+				if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+					encAppStatus.StatusStopped = true
 				}
 				break
 			}
@@ -185,8 +194,8 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		}
 		log.Noticef("checkAppsStatus: devname %s, pod (%d) status %+v, old %+v", ctx.nodeName, len(pods.Items), encAppStatus, oldStatus)
 
-		if oldStatus == nil || oldStatus.IsDNSet != encAppStatus.IsDNSet ||
-			oldStatus.ScheduledOnThisNode != encAppStatus.ScheduledOnThisNode || oldStatus.StatusRunning != encAppStatus.StatusRunning {
+		if oldStatus == nil || oldStatus.ScheduledOnThisNode != encAppStatus.ScheduledOnThisNode ||
+			oldStatus.StatusRunning != encAppStatus.StatusRunning || oldStatus.StatusStopped != encAppStatus.StatusStopped {
 			log.Noticef("checkAppsStatus: status differ, publish")
 			// If app scheduled on this node, could happen for 3 reasons.
 			// 1) I am designated node.
@@ -227,6 +236,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 					}
 
 				}
+				//ctx.pubENClusterAppStatus.Publish(aiconfig.Key(), encAppStatus)
 			}
 			ctx.pubENClusterAppStatus.Publish(aiconfig.Key(), encAppStatus)
 		}

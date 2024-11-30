@@ -1314,8 +1314,10 @@ func InfoReplicaSetContainer(ctx kubevirtContext, repName string) (string, error
 	if !ok {
 		return "", logError("Failed to get nodeName")
 	}
+
 	pods, err := podclientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", repName),
+		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
 	})
 	if err != nil {
 		return "", logError("InfoReplicaSetContainer: couldn't get the pods: %v", err)
@@ -1392,6 +1394,7 @@ func checkReplicaPodMetrics(ctx kubevirtContext, res map[string]types.DomainMetr
 		repName := vmis.name
 		pods, err := podclientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("app=%s", repName),
+			FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
 		})
 		if err != nil {
 			logrus.Errorf("checkReplicaPodMetrics: can't get pod %v", err)
