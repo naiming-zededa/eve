@@ -160,6 +160,13 @@ func handleDeferredVolumeCreate(ctx *volumemgrContext, key string, config *types
 			status.TotalSize = int64(actualSize)
 			status.CurrentSize = int64(actualSize)
 		}
+
+		// Fill the ReferenceName which will be used by domainmgr to launch native containers.
+		ctStatus := ctx.LookupContentTreeStatus(status.ContentID.String())
+
+		if ctStatus != nil {
+			status.ReferenceName = ctStatus.ReferenceID()
+		}
 		publishVolumeStatus(ctx, status)
 		updateVolumeRefStatus(ctx, status)
 		if err := createOrUpdateAppDiskMetrics(ctx, status); err != nil {

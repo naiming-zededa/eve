@@ -41,6 +41,7 @@ type ENClusterAppStatus struct {
 	IsDNSet             bool      // DesignatedNodeID is set for this node
 	ScheduledOnThisNode bool      // App is running on this device
 	StatusRunning       bool      // Status of the app in "Running" state
+	StatusStopped       bool      // App is in stopped state
 	IsVolumeDetached    bool      // Are volumes detached after failover ?
 }
 

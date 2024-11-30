@@ -731,12 +731,24 @@ func publishAppInstanceStatus(ctx *zedmanagerContext,
 	key := status.Key()
 	log.Tracef("publishAppInstanceStatus(%s)", key)
 	pub := ctx.pubAppInstanceStatus
-	if ctx.hvTypeKube {
+
+	// If I am not designated node id and there is a ENCClusterAppStatus
+	// that means remote app got scheduled here, publishAppInstanceStatus, else
+	// do nothing.
+	if ctx.hvTypeKube && !status.IsDesignatedNodeID {
 		sub := ctx.subENClusterAppStatus
 		st, _ := sub.Get(key)
+
+		// No ENCClusterAppStatus on non-designated node, nothing to publish
+		if st == nil {
+			log.Functionf("publishAppInstanceStatus(%s) not scheduled on this node, skip", key)
+			return
+		}
+
 		if st != nil {
 			clusterStatus := st.(types.ENClusterAppStatus)
 			if !clusterStatus.ScheduledOnThisNode {
+				// If its not scheduled on this node, do not publish anything
 				log.Functionf("publishAppInstanceStatus(%s) not scheduled on this node, skip", key)
 				return
 			}
@@ -1084,15 +1096,22 @@ func handleCreate(ctxArg interface{}, key string,
 	configArg interface{}) {
 	ctx := ctxArg.(*zedmanagerContext)
 	config := configArg.(types.AppInstanceConfig)
-
 	log.Functionf("handleCreate(%v) for %s",
+		config.UUIDandVersion, config.DisplayName)
+	handleCreateAppInstanceStatus(ctx, config)
+}
+
+func handleCreateAppInstanceStatus(ctx *zedmanagerContext, config types.AppInstanceConfig) {
+
+	log.Functionf("handleCreateAppInstanceStatus(%v) for %s",
 		config.UUIDandVersion, config.DisplayName)
 
 	status := types.AppInstanceStatus{
-		UUIDandVersion: config.UUIDandVersion,
-		DisplayName:    config.DisplayName,
-		FixedResources: config.FixedResources,
-		State:          types.INITIAL,
+		UUIDandVersion:     config.UUIDandVersion,
+		DisplayName:        config.DisplayName,
+		FixedResources:     config.FixedResources,
+		State:              types.INITIAL,
+		IsDesignatedNodeID: config.IsDesignatedNodeID,
 	}
 
 	// Calculate the moment when the application should start, taking into account the configured delay
@@ -1109,10 +1128,10 @@ func handleCreate(ctxArg interface{}, key string,
 	configCounter := int(config.PurgeCmd.Counter + config.LocalPurgeCmd.Counter)
 	if err == nil {
 		if persistedCounter == configCounter {
-			log.Functionf("handleCreate(%v) for %s found matching purge counter %d",
+			log.Functionf("handleCreateAppInstanceStatus(%v) for %s found matching purge counter %d",
 				config.UUIDandVersion, config.DisplayName, persistedCounter)
 		} else {
-			log.Warnf("handleCreate(%v) for %s found different purge counter %d vs. %d",
+			log.Warnf("handleCreateAppInstanceStatus(%v) for %s found different purge counter %d vs. %d",
 				config.UUIDandVersion, config.DisplayName, persistedCounter, configCounter)
 			status.PurgeInprogress = types.DownloadAndVerify
 			status.PurgeStartedAt = time.Now()
@@ -1121,7 +1140,7 @@ func handleCreate(ctxArg interface{}, key string,
 		}
 	} else {
 		// Save this PurgeCmd.Counter as the baseline
-		log.Functionf("handleCreate(%v) for %s saving purge counter %d",
+		log.Functionf("handleCreateAppInstanceStatus(%v) for %s saving purge counter %d",
 			config.UUIDandVersion, config.DisplayName, configCounter)
 		err = ctx.appToPurgeCounterMap.Assign(mapKey, configCounter, true)
 		if err != nil {
@@ -1184,7 +1203,7 @@ func handleCreate(ctxArg interface{}, key string,
 			config.DisplayName, config.UUIDandVersion.UUID)
 		publishAppInstanceStatus(ctx, &status)
 	}
-	log.Functionf("handleCreate done for %s", config.DisplayName)
+	log.Functionf("handleCreateAppInstanceStatus done for %s", config.DisplayName)
 }
 
 func handleModify(ctxArg interface{}, key string,
@@ -1194,6 +1213,12 @@ func handleModify(ctxArg interface{}, key string,
 	config := configArg.(types.AppInstanceConfig)
 	oldConfig := oldConfigArg.(types.AppInstanceConfig)
 	status := lookupAppInstanceStatus(ctx, key)
+	// It is possible there is no status for AppConfig if I am not designated node
+	if status == nil {
+		log.Noticef("handleModify(%v), no AppInstanceStatus", key)
+		return
+	}
+
 	log.Functionf("handleModify(%v) for %s",
 		config.UUIDandVersion, config.DisplayName)
 
@@ -1639,7 +1664,7 @@ func effectiveActivateCurrentProfile(config types.AppInstanceConfig, currentProf
 
 func getKubeAppActivateStatus(ctx *zedmanagerContext, aiConfig types.AppInstanceConfig, effectiveActivate bool) bool {
 
-	if !ctx.hvTypeKube || aiConfig.IsDesignatedNodeID {
+	if !ctx.hvTypeKube {
 		return effectiveActivate
 	}
 
