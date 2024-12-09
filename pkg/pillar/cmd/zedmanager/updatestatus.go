@@ -30,24 +30,14 @@ func updateAIStatusUUID(ctx *zedmanagerContext, uuidStr string) {
 		removeAIStatus(ctx, status)
 		return
 	}
-
-	if config.IsDesignatedNodeID {
-		changed := doUpdate(ctx, *config, status)
-		if changed {
-			log.Functionf("updateAIStatusUUID status change %d for %s",
-				status.State, uuidStr)
-			publishAppInstanceStatus(ctx, status)
-			publishAppInstanceSummary(ctx)
-		}
-	} else {
-		// doActivate
-		changed := doActivate(ctx, uuidStr, *config, status)
-		if changed {
-			log.Functionf("doActivate done for remote app %s status changed %v", uuidStr, status.State)
-			publishAppInstanceStatus(ctx, status)
-			publishAppInstanceSummary(ctx)
-		}
+	changed := doUpdate(ctx, *config, status)
+	if changed {
+		log.Functionf("updateAIStatusUUID status change %d for %s",
+			status.State, uuidStr)
+		publishAppInstanceStatus(ctx, status)
+		publishAppInstanceSummary(ctx)
 	}
+
 }
 
 // Remove this AppInstanceStatus and generate config removes for
@@ -173,9 +163,15 @@ func doUpdate(ctx *zedmanagerContext,
 	}
 	// The existence of Config is interpreted to mean the
 	// AppInstance should be INSTALLED. Activate is checked separately.
-	changed, done = doInstall(ctx, config, status)
-	if !done {
-		return changed
+
+	// Skip volume install if this is  not designated node id.
+	// Volumes are replicated for non-designated node id
+	// For single node eve installs designated node id is always set
+	if config.IsDesignatedNodeID {
+		changed, done = doInstall(ctx, config, status)
+		if !done {
+			return changed
+		}
 	}
 
 	// Are we doing a purge?
@@ -739,34 +735,6 @@ func doActivate(ctx *zedmanagerContext, uuidStr string,
 			return changed
 		}
 		// if the VM already active or in restarting/purging state - continue with the doActivate logic
-	}
-
-	// delay this if referencename is not set
-	if ctx.hvTypeKube && config.FixedResources.VirtualizationMode == types.NOHYPER {
-		var findcontainer bool
-		for _, vrc := range config.VolumeRefConfigList {
-			vrs := lookupVolumeRefStatus(ctx, vrc.Key())
-			if vrs == nil || !vrs.IsContainer() {
-				continue
-			}
-			findcontainer = true
-			if vrs.ReferenceName == "" {
-				log.Noticef("doActivate: waiting for referencename ")
-				if status.State != types.START_DELAYED {
-					status.State = types.START_DELAYED
-					return true
-				}
-				return changed
-			}
-		}
-		if !findcontainer {
-			log.Noticef("doActivate: no container found, wait")
-			if status.State != types.START_DELAYED {
-				status.State = types.START_DELAYED
-				return true
-			}
-			return changed
-		}
 	}
 
 	// Make sure we have a DomainConfig

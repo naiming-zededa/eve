@@ -155,6 +155,8 @@ func checkAppsStatus(ctx *zedkubeContext) {
 	pub := ctx.pubENClusterAppStatus
 	stItmes := pub.GetAll()
 	var oldStatus *types.ENClusterAppStatus
+
+	// Iterate appinstance config
 	for _, item := range items {
 		aiconfig := item.(types.AppInstanceConfig)
 
@@ -164,11 +166,13 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		}
 		contName := base.GetAppKubeName(aiconfig.DisplayName, aiconfig.UUIDandVersion.UUID)
 
+		// Iterate pods of this app
 		for _, pod := range pods.Items {
 			contVMIName := "virt-launcher-" + contName
-			log.Functionf("checkAppsStatus: pod %s, cont %s", pod.Name, contName)
+			log.Noticef("PRAMOD checkAppsStatus: pod %s, cont %s Phase %s", pod.Name, contName, pod.Status.Phase)
 			if strings.HasPrefix(pod.Name, contName) || strings.HasPrefix(pod.Name, contVMIName) {
 				encAppStatus.ScheduledOnThisNode = true
+
 				if pod.Status.Phase == corev1.PodRunning {
 					encAppStatus.StatusRunning = true
 				}
@@ -176,6 +180,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 			}
 		}
 
+		// Iterate over ENClusterAppStatus and see if we already published and store it as oldstatus
 		for _, st := range stItmes {
 			aiStatus := st.(types.ENClusterAppStatus)
 			if aiStatus.AppUUID == aiconfig.UUIDandVersion.UUID {
@@ -183,10 +188,21 @@ func checkAppsStatus(ctx *zedkubeContext) {
 				break
 			}
 		}
+
 		log.Noticef("checkAppsStatus: devname %s, pod (%d) status %+v, old %+v", ctx.nodeName, len(pods.Items), encAppStatus, oldStatus)
 
-		if oldStatus == nil || oldStatus.IsDNSet != encAppStatus.IsDNSet ||
-			oldStatus.ScheduledOnThisNode != encAppStatus.ScheduledOnThisNode || oldStatus.StatusRunning != encAppStatus.StatusRunning {
+		// If this is first time after zedkube started (oldstatus is nil) and I am DNid and the app is not shceduled
+		// on this node. This condition is seen for two reasons
+		// 1) We just got appinstanceconfig and domainmgr did not get chance to start it yet, timing issue, zedkube checked first
+		// 2) We are checking after app failover to other node, either this node network failed and came back or this just got rebooted
+
+		if oldStatus == nil && !encAppStatus.ScheduledOnThisNode && encAppStatus.IsDNSet {
+			log.Noticef("checkAppsStatus: app not yet scheduled on this node %v", encAppStatus)
+			continue
+		}
+
+		if oldStatus == nil || oldStatus.ScheduledOnThisNode != encAppStatus.ScheduledOnThisNode ||
+			oldStatus.StatusRunning != encAppStatus.StatusRunning {
 			log.Noticef("checkAppsStatus: status differ, publish")
 			// If app scheduled on this node, could happen for 3 reasons.
 			// 1) I am designated node.
@@ -227,6 +243,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 					}
 
 				}
+				//ctx.pubENClusterAppStatus.Publish(aiconfig.Key(), encAppStatus)
 			}
 			ctx.pubENClusterAppStatus.Publish(aiconfig.Key(), encAppStatus)
 		}
