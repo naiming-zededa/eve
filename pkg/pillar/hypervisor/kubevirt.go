@@ -1284,7 +1284,7 @@ func checkForReplicaPod(ctx kubevirtContext, repName string) error {
 		if err != nil {
 			logrus.Infof("checkForReplicaPod: repName %s, %v", repName, err)
 		} else {
-			if status == "Running" || status == "NonLocal" {
+			if status == "Running" {
 				logrus.Infof("checkForReplicaPod: (%d) status %s, good", i, status)
 				return nil
 			} else {
@@ -1314,20 +1314,16 @@ func InfoReplicaSetContainer(ctx kubevirtContext, repName string) (string, error
 	if !ok {
 		return "", logError("Failed to get nodeName")
 	}
+
 	pods, err := podclientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", repName),
+		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
 	})
 	if err != nil {
 		return "", logError("InfoReplicaSetContainer: couldn't get the pods: %v", err)
 	}
 
-	var foundNonlocal bool
 	for _, pod := range pods.Items {
-		if nodeName != pod.Spec.NodeName {
-			foundNonlocal = true
-			logrus.Infof("InfoReplicaSetContainer: rep %s, nodeName %v differ w/ hostname", repName, pod.Spec.NodeName)
-			continue
-		}
 
 		var res string
 		// https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/
@@ -1352,9 +1348,7 @@ func InfoReplicaSetContainer(ctx kubevirtContext, repName string) (string, error
 
 		return res, nil
 	}
-	if foundNonlocal {
-		return "NonLocal", nil
-	}
+
 	return "", logError("InfoReplicaSetContainer: pod not ready")
 }
 
@@ -1392,6 +1386,7 @@ func checkReplicaPodMetrics(ctx kubevirtContext, res map[string]types.DomainMetr
 		repName := vmis.name
 		pods, err := podclientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("app=%s", repName),
+			FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
 		})
 		if err != nil {
 			logrus.Errorf("checkReplicaPodMetrics: can't get pod %v", err)

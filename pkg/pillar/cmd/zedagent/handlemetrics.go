@@ -1057,6 +1057,7 @@ func PublishAppInfoToZedCloud(ctx *zedagentContext, uuid string,
 
 	ReportAppInfo.AppID = uuid
 	ReportAppInfo.SystemApp = false
+	ReportAppInfo.ClusterAppRunning = false
 
 	if aiStatus != nil {
 		ReportAppInfo.AppVersion = aiStatus.UUIDandVersion.Version

@@ -340,10 +340,10 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
 			WithContext(ctx).WithUnlimitedTimeout(timeout * time.Second).CombinedOutput()
 
 		uploadDuration := time.Since(startTimeThisUpload)
-		if err != nil {
+		if err != nil && !strings.Contains(err.Error(), "already successfully imported") {
 			err = fmt.Errorf("RolloutDiskToPVC: Failed after %f seconds to convert qcow to PVC %s: %v", uploadDuration.Seconds(), output, err)
 			log.Error(err)
-			time.Sleep(5)
+			time.Sleep(30 * time.Second) // 30 secs with 10 tries, 5 mins should be good enough even if k3s server restarts
 			continue
 		}
 
@@ -351,13 +351,14 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
 		// PVC 688b9728-6f21-4bb6-b2f7-4928813fefdc-pvc-0 already successfully imported/cloned/updated
 
 		overallDuration := time.Since(startTimeOverall)
-		log.Noticef("RolloutDiskToPVC image upload completed on try:%d after %f seconds, total elapsed time %f seconds", uploadTry, uploadDuration.Seconds(), overallDuration.Seconds())
+		//log.Noticef("RolloutDiskToPVC image upload completed on try:%d after %f seconds, total elapsed time %f seconds", uploadTry, uploadDuration.Seconds(), overallDuration.Seconds())
 		err = waitForPVCUploadComplete(pvcName, log)
 		if err != nil {
 			err = fmt.Errorf("RolloutDiskToPVC: error wait for PVC %v", err)
 			log.Error(err)
 			return err
 		}
+		log.Noticef("RolloutDiskToPVC image upload completed on try:%d after %f seconds, total elapsed time %f seconds", uploadTry, uploadDuration.Seconds(), overallDuration.Seconds())
 		return nil
 	}
 

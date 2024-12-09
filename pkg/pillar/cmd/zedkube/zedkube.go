@@ -32,6 +32,7 @@ const (
 	warningTime          = 40 * time.Second
 	stillRunningInterval = 25 * time.Second
 	logcollectInterval   = 30
+	appCheckInterval     = 120
 	// run VNC file
 	vmiVNCFileName    = "/run/zedkube/vmiVNC.run"
 	serverTLSDir      = "/persist/kube-save-var-lib/rancher/k3s/server/tls"
@@ -621,6 +622,13 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 
 	appLogTimer := time.NewTimer(logcollectInterval * time.Second)
 
+	// Its ok to have high appCheckInterval (120 secs) this also helps us overcome any timing issues
+	// between domainmgr scheduling app to zedkube looking for it.
+	// NOTE: We might take 120 secs to report status to controller that app is running
+	// on this node after failover, that is fine since app itself is actually running we just take
+	// more time to report it. Should not be an issue in eventual consistency model.
+	appStatusTimer := time.NewTimer(appCheckInterval * time.Second)
+
 	log.Notice("zedkube online")
 
 	for {
@@ -631,9 +639,13 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		case change := <-subAppInstanceConfig.MsgChan():
 			subAppInstanceConfig.ProcessChange(change)
 
+		case <-appStatusTimer.C:
+			checkAppsStatus(&zedkubeCtx)
+			appStatusTimer = time.NewTimer(appCheckInterval * time.Second)
+
 		case <-appLogTimer.C:
 			collectAppLogs(&zedkubeCtx)
-			checkAppsStatus(&zedkubeCtx)
+			//checkAppsStatus(&zedkubeCtx)
 			collectKubeStats(&zedkubeCtx)
 			checkPubServerStatus(&zedkubeCtx)
 			checkNotifyPeer(&zedkubeCtx)
