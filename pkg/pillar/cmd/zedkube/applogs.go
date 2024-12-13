@@ -274,7 +274,7 @@ func handleKubePodsGetError(ctx *zedkubeContext, items, stItems map[string]inter
 	if ctx.getKubePodsError.getKubePodsErrorTime == nil {
 		now := time.Now()
 		ctx.getKubePodsError.getKubePodsErrorTime = &now
-		log.Noticef("handleKubePodsGetError: can't get pods for %s, ", aiconfig.DisplayName)
+		log.Noticef("handleKubePodsGetError: can't get pods, set error time")
 	} else if time.Since(*ctx.getKubePodsError.getKubePodsErrorTime) > 2*time.Minute {
 		if ctx.getKubePodsError.processedErrorCondition == false {
 			ctx.getKubePodsError.processedErrorCondition = true
