@@ -157,10 +157,10 @@ func checkAppsStatus(ctx *zedkubeContext) {
 	ctx.getKubePodsError.getKubePodsErrorTime = nil
 	ctx.getKubePodsError.processedErrorCondition = false
 
-	var oldStatus *types.ENClusterAppStatus
-
 	// Iterate appinstance config
 	for _, item := range items {
+		var oldStatus *types.ENClusterAppStatus
+		var foundPod bool
 		aiconfig := item.(types.AppInstanceConfig)
 
 		encAppStatus := types.ENClusterAppStatus{
@@ -181,6 +181,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 				if pod.Status.Phase == corev1.PodRunning {
 					encAppStatus.StatusRunning = true
 				}
+				foundPod = true
 				break
 			}
 		}
@@ -194,7 +195,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 			}
 		}
 
-		log.Noticef("checkAppsStatus: devname %s, pod (%d) status %+v, old %+v", ctx.nodeName, len(pods.Items), encAppStatus, oldStatus)
+		log.Noticef("checkAppsStatus: devname %s, pod (%d) status %+v, old %+v, found %v", ctx.nodeName, len(pods.Items), encAppStatus, oldStatus, foundPod)
 
 		// If this is first time after zedkube started (oldstatus is nil) and I am DNid and the app is not shceduled
 		// on this node. This condition is seen for two reasons
