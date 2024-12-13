@@ -318,10 +318,17 @@ func createOrUpdateDiskMetrics(ctx *volumemgrContext, wdName string) {
 
 func createOrUpdateAppDiskMetrics(ctx *volumemgrContext, volumeStatus *types.VolumeStatus) error {
 	log.Functionf("createOrUpdateAppDiskMetrics(%s, %s)", volumeStatus.VolumeID, volumeStatus.FileLocation)
+
 	if volumeStatus.FileLocation == "" {
-		// Nothing we can do? XXX can we retrieve size from CAS?
-		return nil
+		if !ctx.hvTypeKube {
+			// Nothing we can do? XXX can we retrieve size from CAS?
+			return nil
+		} else {
+			// Kubevirt eve volumes have no location on /persist, they are PVCs
+			volumeStatus.FileLocation = volumeStatus.GetPVCName()
+		}
 	}
+
 	actualSize, maxSize, diskType, dirtyFlag, err := volumehandlers.GetVolumeHandler(log, ctx, volumeStatus).GetVolumeDetails()
 	if err != nil {
 		err = fmt.Errorf("createOrUpdateAppDiskMetrics(%s, %s): exception while getting volume size. %s",

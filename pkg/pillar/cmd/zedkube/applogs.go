@@ -202,7 +202,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		// 1) We just got appinstanceconfig and domainmgr did not get chance to start it yet, timing issue, zedkube checked first
 		// 2) We are checking after app failover to other node, either this node network failed and came back or this just got rebooted
 
-		if oldStatus == nil && !encAppStatus.ScheduledOnThisNode && encAppStatus.IsDNSet {
+		if oldStatus == nil && !encAppStatus.ScheduledOnThisNode && encAppStatus.IsDNSet && !foundPod {
 			log.Noticef("checkAppsStatus: app not yet scheduled on this node %v", encAppStatus)
 			continue
 		}

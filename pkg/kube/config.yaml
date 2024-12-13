@@ -7,8 +7,6 @@ log: "/persist/kubelog/k3s.log"
 egress-selector-mode: "disabled"
 # Use longhorn storage
 disable: local-storage
-disable: traefik
-disable: servicelb 
 etcd-arg:
   - "quota-backend-bytes=8589934592"
 etcd-expose-metrics: true
