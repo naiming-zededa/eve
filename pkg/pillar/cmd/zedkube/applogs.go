@@ -143,17 +143,20 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		return
 	}
 
-	options := metav1.ListOptions{
-		FieldSelector: fmt.Sprintf("spec.nodeName=%s", ctx.nodeName),
-	}
-	pods, err := clientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), options)
+	pub := ctx.pubENClusterAppStatus
+	stItems := pub.GetAll()
+
+	pods, err := clientset.CoreV1().Pods(kubeapi.EVEKubeNameSpace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		log.Errorf("checkAppsStatus: can't get pods %v", err)
+		// If we can't get pods, process the error and return
+		handleKubePodsGetError(ctx, items, stItems)
 		return
 	}
 
-	pub := ctx.pubENClusterAppStatus
-	stItmes := pub.GetAll()
+	ctx.getKubePodsError.getKubePodsErrorTime = nil
+	ctx.getKubePodsError.processedErrorCondition = false
+
 	var oldStatus *types.ENClusterAppStatus
 
 	// Iterate appinstance config
@@ -171,7 +174,9 @@ func checkAppsStatus(ctx *zedkubeContext) {
 			contVMIName := "virt-launcher-" + contName
 			log.Noticef("PRAMOD checkAppsStatus: pod %s, cont %s Phase %s", pod.Name, contName, pod.Status.Phase)
 			if strings.HasPrefix(pod.Name, contName) || strings.HasPrefix(pod.Name, contVMIName) {
-				encAppStatus.ScheduledOnThisNode = true
+				if pod.Spec.NodeName == ctx.nodeName {
+					encAppStatus.ScheduledOnThisNode = true
+				}
 
 				if pod.Status.Phase == corev1.PodRunning {
 					encAppStatus.StatusRunning = true
@@ -181,7 +186,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		}
 
 		// Iterate over ENClusterAppStatus and see if we already published and store it as oldstatus
-		for _, st := range stItmes {
+		for _, st := range stItems {
 			aiStatus := st.(types.ENClusterAppStatus)
 			if aiStatus.AppUUID == aiconfig.UUIDandVersion.UUID {
 				oldStatus = &aiStatus
@@ -201,6 +206,7 @@ func checkAppsStatus(ctx *zedkubeContext) {
 			continue
 		}
 
+		// Publish if there is a status change
 		if oldStatus == nil || oldStatus.ScheduledOnThisNode != encAppStatus.ScheduledOnThisNode ||
 			oldStatus.StatusRunning != encAppStatus.StatusRunning {
 			log.Noticef("checkAppsStatus: status differ, publish")
@@ -243,7 +249,6 @@ func checkAppsStatus(ctx *zedkubeContext) {
 					}
 
 				}
-				//ctx.pubENClusterAppStatus.Publish(aiconfig.Key(), encAppStatus)
 			}
 			ctx.pubENClusterAppStatus.Publish(aiconfig.Key(), encAppStatus)
 		}
@@ -263,4 +268,32 @@ func getnodeNameAndUUID(ctx *zedkubeContext) error {
 		ctx.nodeuuid = enInfo.DeviceID.String()
 	}
 	return nil
+}
+
+func handleKubePodsGetError(ctx *zedkubeContext, items, stItems map[string]interface{}) {
+	if ctx.getKubePodsError.getKubePodsErrorTime == nil {
+		now := time.Now()
+		ctx.getKubePodsError.getKubePodsErrorTime = &now
+		log.Noticef("handleKubePodsGetError: can't get pods for %s, ", aiconfig.DisplayName)
+	} else if time.Since(*ctx.getKubePodsError.getKubePodsErrorTime) > 2*time.Minute {
+		if ctx.getKubePodsError.processedErrorCondition == false {
+			ctx.getKubePodsError.processedErrorCondition = true
+			for _, item := range items {
+				aiconfig := item.(types.AppInstanceConfig)
+				for _, st := range stItems {
+					aiStatus := st.(types.ENClusterAppStatus)
+					if aiStatus.AppUUID == aiconfig.UUIDandVersion.UUID {
+						// if we used to publish the status, of this app is scheduled on this node
+						// need to reset this, since we have lost the connection to the kubernetes
+						// for longer time than the app is to be migrated to other node
+						if aiStatus.ScheduledOnThisNode {
+							aiStatus.ScheduledOnThisNode = false
+							ctx.pubENClusterAppStatus.Publish(aiconfig.Key(), aiStatus)
+							log.Noticef("handleKubePodsGetError: can't get pods set ScheduledOnThisNode off for %s, ", aiconfig.DisplayName)
+						}
+					}
+				}
+			}
+		}
+	}
 }

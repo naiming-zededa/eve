@@ -52,6 +52,11 @@ type ReceiveMap struct {
 	v  map[string]bool
 }
 
+type GetKubePodsError struct {
+	getKubePodsErrorTime    *time.Time
+	processedErrorCondition bool
+}
+
 type zedkubeContext struct {
 	agentbase.AgentBase
 	globalConfig             *types.ConfigItemValueMap
@@ -108,6 +113,8 @@ type zedkubeContext struct {
 	allowClusterPubSub       bool
 	// Primarily to block 'uncordon' after running it once at bootup
 	onBootUncordonCheckComplete bool
+	// Check and handle get kube pods error
+	getKubePodsError GetKubePodsError
 }
 
 func inlineUsage() int {
