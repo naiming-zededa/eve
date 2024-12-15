@@ -39,7 +39,9 @@ func handleENClusterAppStatusImpl(ctx *zedmanagerContext, key string, status *ty
 			}
 			handleCreateAppInstanceStatus(ctx, *aiConfig)
 		} else {
-			updateAIStatusUUID(ctx, aiStatus.UUIDandVersion.UUID.String())
+			// Nothing to do, we already have aiStatus
+			log.Functionf("handleENClusterAppStatusImpl(%s) for app-status %v aiStatus %v", key, status, aiStatus)
+			return
 		}
 	} else { // not scheduled here.
 
