@@ -274,6 +274,8 @@ func createOrUpdateDiskMetrics(ctx *volumemgrContext, wdName string) {
 	var excludeDirs []string
 	excludeDirs = append(excludeDirs, types.ReportDirPaths...)
 	excludeDirs = append(excludeDirs, types.AppPersistPaths...)
+	excludeDirs = append(excludeDirs, types.KubeIgnorePaths...)
+
 	list, err := diskmetrics.FindLargeFiles(types.PersistDir, 1024*1024,
 		excludeDirs)
 	if err != nil {

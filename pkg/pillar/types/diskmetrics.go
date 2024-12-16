@@ -42,6 +42,13 @@ var ReportDirPaths = []string{
 	PersistDir + "/eve-info",
 }
 
+// These should be ignored, the space occupied is already accounted in /persist
+// These will lead to too many json files for pubsub, which are not required.
+var KubeIgnorePaths = []string{
+	PersistDir + "/kube-save-var-lib",
+	PersistDir + "/kubelog",
+}
+
 // AppPersistPaths  Application-related files live here
 // XXX do we need to exclude the ContentTrees used for eve image update?
 // If so how do we tell them apart?
