@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/lf-edge/eve/pkg/pillar/pubsub"
+	"github.com/lf-edge/eve/pkg/pillar/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -50,15 +51,26 @@ func isBlockDeviceMountedOnThisNode(dev string) bool {
 func CleanupUnmountedDiskMetrics(pubDiskMetric pubsub.Publication, pvcToPvMap map[string]string) {
 	existingMetrics := pubDiskMetric.GetAll()
 
-	for id := range existingMetrics {
-		if strings.HasPrefix(id, "pvc-") {
+	for id, metric := range existingMetrics {
+		if id == "" {
+			continue
+		}
+
+		dm, ok := metric.(types.DiskMetric)
+		if ok && dm.IsDir {
+			continue
+		}
+
+		if strings.Contains(id, "pvc-") {
 			pvName, ok := pvcToPvMap[id]
-			if ok {
-				if !isPvMountedOnThisNode(pvName) {
-					pubDiskMetric.Unpublish(id)
-				}
+			// Could be PVC deleted or just not mounted locally
+			if !ok || !isPvMountedOnThisNode(pvName) {
+				pubDiskMetric.Unpublish(id)
 			}
 		} else {
+			// Look for sdX devices which used to exist
+			// These would have been the block device
+			// which shared major:minor with the longhorn device
 			if !isBlockDeviceMountedOnThisNode(id) {
 				pubDiskMetric.Unpublish(id)
 			}
