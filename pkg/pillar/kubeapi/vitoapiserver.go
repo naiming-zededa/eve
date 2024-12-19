@@ -340,7 +340,7 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
 			WithContext(ctx).WithUnlimitedTimeout(timeout * time.Second).CombinedOutput()
 
 		uploadDuration := time.Since(startTimeThisUpload)
-		if err != nil && !strings.Contains(err.Error(), "already successfully imported") {
+		if err != nil && !strings.Contains(string(output), "already successfully imported") {
 			err = fmt.Errorf("RolloutDiskToPVC: Failed after %f seconds to convert qcow to PVC %s: %v", uploadDuration.Seconds(), output, err)
 			log.Error(err)
 			time.Sleep(30 * time.Second) // 30 secs with 10 tries, 5 mins should be good enough even if k3s server restarts
