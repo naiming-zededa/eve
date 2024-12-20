@@ -22,7 +22,7 @@ import (
 func collectKubeStats(ctx *zedkubeContext) {
 	// we are the elected leader, start collecting kube stats
 	// regardless if we are in cluster or single node mode
-	if ctx.isKubeStatsLeader {
+	if ctx.isKubeStatsLeader.Load() {
 		log.Noticef("collectKubeStats: Started collecting kube stats")
 
 		clientset, err := getKubeClientSet()
@@ -101,7 +101,7 @@ func collectKubeStats(ctx *zedkubeContext) {
 		}
 		ctx.pubKubeClusterInfo.Publish("global", clusterInfo)
 	}
-	if !ctx.isKubeStatsLeader {
+	if !ctx.isKubeStatsLeader.Load() {
 		// Unpublish so that there isn't anything to send to the controller
 		items := ctx.pubKubeClusterInfo.GetAll()
 		if _, ok := items["global"].(types.KubeClusterInfo); ok {
