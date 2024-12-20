@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	// "github.com/lf-edge/eve/pkg/newlog/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.22.5.darwin-amd64/src/strings"
@@ -96,8 +97,8 @@ type zedkubeContext struct {
 	clusterIPIsReady         bool
 	nodeuuid                 string
 	nodeName                 string
-	isKubeStatsLeader        bool
-	inKubeLeaderElection     bool
+	isKubeStatsLeader        atomic.Bool
+	inKubeLeaderElection     atomic.Bool
 	electionStartCh          chan struct{}
 	electionStopCh           chan struct{}
 	pubResendTimer           *time.Timer

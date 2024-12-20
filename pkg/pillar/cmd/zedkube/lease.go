@@ -29,14 +29,14 @@ func handleLeaderElection(ctx *zedkubeContext) {
 
 			clientset, err := getKubeClientSet()
 			if err != nil {
-				ctx.inKubeLeaderElection = false
+				ctx.inKubeLeaderElection.Store(false)
 				log.Errorf("handleLeaderElection: can't get clientset %v", err)
 				return
 			}
 
 			err = getnodeNameAndUUID(ctx)
 			if err != nil {
-				ctx.inKubeLeaderElection = false
+				ctx.inKubeLeaderElection.Store(false)
 				log.Errorf("handleLeaderElection: can't get nodeName and UUID %v", err)
 				return
 			}
@@ -54,19 +54,28 @@ func handleLeaderElection(ctx *zedkubeContext) {
 			}
 
 			// Define the leader election configuration
+			// Typical EVE deployments:
+			// - should not see rapidly changing environments
+			// - can be on lower resource boxes
+			//
+			// Due to these constraints I believe in setting lease parameters to meet a few goals:
+			// - less k8s API calls -> less etcd transactions
+			// - longer lease to allow multiple consecutive stats runs on a given node
+			//              this will keep calls out of the k8s api cache (local node fs) instead of
+			//      bouncing node to node and re-priming the k8s cache (unnecessary IO)
 			lec := leaderelection.LeaderElectionConfig{
 				Lock:            lock,
-				LeaseDuration:   15 * time.Second,
-				RenewDeadline:   10 * time.Second,
-				RetryPeriod:     2 * time.Second,
+				LeaseDuration:   24 * time.Hour,
+				RenewDeadline:   60 * time.Second,
+				RetryPeriod:     5 * time.Second,
 				ReleaseOnCancel: true,
 				Callbacks: leaderelection.LeaderCallbacks{
 					OnStartedLeading: func(baseCtx context.Context) {
-						ctx.isKubeStatsLeader = true
+						ctx.isKubeStatsLeader.Store(true)
 						log.Noticef("handleLeaderElection: Started leading")
 					},
 					OnStoppedLeading: func() {
-						ctx.isKubeStatsLeader = false
+						ctx.isKubeStatsLeader.Store(false)
 						log.Noticef("handleLeaderElection: Stopped leading")
 					},
 					OnNewLeader: func(identity string) {
@@ -80,8 +89,8 @@ func handleLeaderElection(ctx *zedkubeContext) {
 			log.Noticef("handleLeaderElection: Started leader election for %s", ctx.nodeName)
 
 		case <-ctx.electionStopCh:
-			ctx.isKubeStatsLeader = false
-			ctx.inKubeLeaderElection = false
+			ctx.isKubeStatsLeader.Store(false)
+			ctx.inKubeLeaderElection.Store(false)
 			log.Noticef("handleLeaderElection: Stopped leading signal received")
 			if cancelFunc != nil {
 				cancelFunc()
@@ -93,7 +102,7 @@ func handleLeaderElection(ctx *zedkubeContext) {
 
 // Function to signal the start of leader election
 func SignalStartLeaderElection(ctx *zedkubeContext) {
-	ctx.inKubeLeaderElection = true
+	ctx.inKubeLeaderElection.Store(true)
 	select {
 	case ctx.electionStartCh <- struct{}{}:
 		log.Noticef("SignalStartLeaderElection: Signal sent successfully")
@@ -118,11 +127,11 @@ func handleControllerStatusChange(ctx *zedkubeContext, status *types.ZedAgentSta
 	log.Functionf("handleControllerStatusChange: Leader enter, status %v", configStatus)
 	switch configStatus {
 	case types.ConfigGetSuccess, types.ConfigGetReadSaved: // either read success or read from saved config
-		if !ctx.inKubeLeaderElection {
+		if !ctx.inKubeLeaderElection.Load() {
 			SignalStartLeaderElection(ctx)
 		}
 	default:
-		if ctx.inKubeLeaderElection {
+		if ctx.inKubeLeaderElection.Load() {
 			SignalStopLeaderElection(ctx)
 		}
 	}
