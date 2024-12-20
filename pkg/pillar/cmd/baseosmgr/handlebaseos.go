@@ -39,7 +39,7 @@ func baseOsHandleStatusUpdateUUID(ctx *baseOsMgrContext, id string) {
 
 	// eve baseos image is downloaded locally, verified, available, and most importantly has been activated
 	// before the node downtime/reboot is initiated, see if we need to defer the operation
-	if ((status.State == types.LOADING) || (status.State == types.LOADED) || (status.State == types.INSTALLED)) && config.Activate && !status.Activated {
+	if ((status.State == types.LOADED) || (status.State == types.INSTALLED)) && config.Activate && !status.Activated {
 		log.Noticef("baseOsHandleStatusUpdateUUID() image just activated id:%s config:%v status:%v state:%s", id, config, status, status.State)
 		deferUpdate := shouldDeferForNodeDrain(ctx, id, config, status)
 		if deferUpdate {
