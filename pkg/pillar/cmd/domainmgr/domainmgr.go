@@ -3631,7 +3631,7 @@ func (ctx *domainContext) retrieveDeviceNodeName() error {
 		return err
 	}
 	enInfo := NodeInfo.(types.EdgeNodeInfo)
-	ctx.nodeName = strings.ToLower(enInfo.DeviceName)
+	ctx.nodeName = strings.ReplaceAll(strings.ToLower(enInfo.DeviceName), "_", "-")
 	log.Noticef("retrieveDeviceNodeName: devicename, NodeInfo %v", NodeInfo) // XXX
 	return nil
 }
