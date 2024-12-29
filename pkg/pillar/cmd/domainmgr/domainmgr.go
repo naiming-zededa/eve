@@ -443,7 +443,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 
 		case change := <-subEdgeNodeInfo.MsgChan():
 			subEdgeNodeInfo.ProcessChange(change)
-			waitEdgeNodeInfo = false
+			waitEdgeNodeInfo = domainCtx.checkRecvEdgeNodeInfo()
 
 		case <-stillRunning.C:
 		}
@@ -451,7 +451,7 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	}
 	log.Noticef("processed GCComplete")
 	err = domainCtx.retrieveDeviceNodeName()
-	if err != nil {
+	if domainCtx.hvTypeKube && err != nil {
 		log.Fatal(err)
 	}
 
@@ -3634,4 +3634,20 @@ func (ctx *domainContext) retrieveDeviceNodeName() error {
 	ctx.nodeName = strings.ReplaceAll(strings.ToLower(enInfo.DeviceName), "_", "-")
 	log.Noticef("retrieveDeviceNodeName: devicename, NodeInfo %v", NodeInfo) // XXX
 	return nil
+}
+
+// checkRecvEdgeNodeInfo checks if the device name is set in the EdgeNodeInfo
+// it returns true if we need to continue waiting for the EdgeNodeInfo update
+func (ctx *domainContext) checkRecvEdgeNodeInfo() bool {
+	items := ctx.subEdgeNodeInfo.GetAll()
+	if len(items) > 0 {
+		for _, item := range items {
+			enInfo := item.(types.EdgeNodeInfo)
+			if enInfo.DeviceName != "" {
+				log.Noticef("checkRecvEdgeNodeInfo: found devicename %s", enInfo.DeviceName)
+				return false
+			}
+		}
+	}
+	return true
 }
