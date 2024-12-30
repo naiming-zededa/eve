@@ -29,6 +29,7 @@ MAX_WAIT_TIME=$((10 * 60)) # 10 minutes in seconds, exponential backoff for k3s 
 current_wait_time=$INITIAL_WAIT_TIME
 SAVE_KUBE_VAR_LIB_DIR="/persist/kube-save-var-lib"
 CLUSTER_WAIT_FILE="/run/kube/cluster-change-wait-ongoing"
+All_PODS_READY=true
 
 # Include update interface
 . /usr/bin/cluster-update.sh
@@ -361,13 +362,17 @@ apply_longhorn_disk_config() {
         kubectl annotate node "$node" node.longhorn.io/default-disks-config='[ { "path":"/persist/vault/volumes", "allowScheduling":true }]'
 }
 
-apply_node_uuid_lable () {
-        logmsg "set node label with uuid $DEVUUID"
+apply_node_uuid_label () {
+        if [ "$ALL_PODS_READY" = true ]; then
+                logmsg "set node label with uuid $DEVUUID"
+        else
+                logmsg "Not all pods are ready, Continue to wait while applying node labels"
+        fi
         kubectl label node "$HOSTNAME" node-uuid="$DEVUUID"
 }
 
-reapply_node_labes() {
-        apply_node_uuid_lable
+reapply_node_labels() {
+        apply_node_uuid_label
         apply_longhorn_disk_config "$HOSTNAME"
         # Check if the node with both labels exists, don't assume above apply worked
         node_count=$(kubectl get nodes -l node-uuid="$DEVUUID",node.longhorn.io/create-default-disk=config -o json | jq '.items | length')
@@ -641,16 +646,40 @@ get_enc_status() {
     fi
 }
 
+rotate_cluster_token() {
+        local token="$1"
+        /usr/bin/k3s token rotate --new-token "$token"
+        local status=$?
+        if [ $status -ne 0 ]; then
+                logmsg "Failed to rotate token. Exit status: $status"
+        else
+                logmsg "Token rotated successfully."
+        fi
+        return $status
+}
+
 change_to_new_token() {
   if [ -n "$cluster_token" ]; then
-    /usr/bin/k3s token rotate --new-token "$cluster_token"
+    logmsg "Rotate cluster token size: ${#cluster_token}"
+    rotate_cluster_token "$cluster_token"
+    # Set the starttime before entering the while loop
+    starttime=$(date +%s)
+
     while true; do
         if grep -q "server:$cluster_token" /var/lib/rancher/k3s/server/token; then
             logmsg "Token change has taken effect."
             break
         else
-            logmsg "Token has not taken effect yet. Sleeping for 2 seconds..."
-            sleep 2
+            currenttime=$(date +%s)
+            elapsed=$((currenttime - starttime))
+            if [ $elapsed -ge 60 ]; then
+                # Redo the rotate_cluster_token and reset the starttime
+                rotate_cluster_token "$cluster_token"
+                logmsg "Rotate cluster token again by k3s."
+                starttime=$(date +%s)
+            fi
+            logmsg "Token has not taken effect yet. Sleeping for 5 seconds..."
+            sleep 5
         fi
     done
   else
@@ -887,8 +916,8 @@ EOF
         counter=0
         touch "$CLUSTER_WAIT_FILE"
         while true; do
+          counter=$((counter+1))
           if curl --insecure --max-time 2 "https://$join_serverIP:6443" >/dev/null 2>&1; then
-            counter=$((counter+1))
             #logmsg "curl to Endpoint https://$join_serverIP:6443 ready, check cluster status"
             # if we are here, check the bootstrap server is single or cluster mode
             status=$(curl --max-time 2 -s "http://$join_serverIP:$clusterStatusPort/status")
@@ -896,15 +925,19 @@ EOF
                 if [ $((counter % 30)) -eq 1 ]; then
                         logmsg "Attempt $counter: Failed to connect to the server. Waiting for 10 seconds..."
                 fi
-            elif [ "$status" != "cluster" ]; then
-                if [ $((counter % 30)) -eq 1 ]; then
-                        logmsg "Attempt $counter: Server is not in 'cluster' status. Waiting for 10 seconds..."
-                fi
-            else
+            elif [ "$status" = "cluster" ]; then
                 logmsg "Server is in 'cluster' status. done"
                 rm "$CLUSTER_WAIT_FILE"
                 break
+            else
+                if [ $((counter % 30)) -eq 1 ]; then
+                        logmsg "Attempt $counter: Server is not in 'cluster' status. Waiting for 10 seconds..."
+                fi
             fi
+          else
+                if [ $((counter % 30)) -eq 1 ]; then
+                        logmsg "Attempt $counter: curl to Endpoint https://$join_serverIP:6443 failed. Waiting for 10 seconds..."
+                fi
           fi
           sleep 10
         done
@@ -1008,11 +1041,14 @@ if [ ! -f /var/lib/all_components_initialized ]; then
         fi
 
         # label the node with device uuid
-        apply_node_uuid_lable
+        apply_node_uuid_label
 
         if ! are_all_pods_ready; then
+                All_PODS_READY=false
+                sleep 10
                 continue
         fi
+        All_PODS_READY=true
 
         if [ ! -f /var/lib/multus_initialized ]; then
                 if [ ! -f /etc/multus-daemonset-new.yaml ]; then
@@ -1134,7 +1170,7 @@ else
                 fi
         else
                 if [ ! -f /var/lib/node-labels-initialized ]; then
-                        reapply_node_labes
+                        reapply_node_labels
                 fi
                 # Initialize CNI after k3s reboot
                 if [ ! -d /var/lib/cni/bin ] || [ ! -d /opt/cni/bin ]; then
