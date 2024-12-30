@@ -18,6 +18,12 @@ import (
 
 func handleLeaderElection(ctx *zedkubeContext) {
 	var cancelFunc context.CancelFunc
+	// If we can not perform the leader election, due to kubernetes connection issues
+	// at the moment, we will retry in 5 minutes
+	retryTimer := time.NewTimer(0)
+	retryTimer.Stop() // Ensure the timer is stopped initially
+	retryTimerStarted := false
+
 	for {
 		log.Noticef("handleLeaderElection: Waiting for signal") // XXX
 		select {
@@ -30,15 +36,21 @@ func handleLeaderElection(ctx *zedkubeContext) {
 			clientset, err := getKubeClientSet()
 			if err != nil {
 				ctx.inKubeLeaderElection.Store(false)
-				log.Errorf("handleLeaderElection: can't get clientset %v", err)
-				return
+				publishLeaseElectionChange(ctx)
+				log.Errorf("handleLeaderElection: can't get clientset %v, retry in 5 min", err)
+				retryTimer.Reset(5 * time.Minute)
+				retryTimerStarted = true
+				continue
 			}
 
 			err = getnodeNameAndUUID(ctx)
 			if err != nil {
 				ctx.inKubeLeaderElection.Store(false)
-				log.Errorf("handleLeaderElection: can't get nodeName and UUID %v", err)
-				return
+				publishLeaseElectionChange(ctx)
+				log.Errorf("handleLeaderElection: can't get nodeName and UUID %v, retry in 5 min", err)
+				retryTimer.Reset(5 * time.Minute)
+				retryTimerStarted = true
+				continue
 			}
 
 			// Create a new lease lock
@@ -65,37 +77,64 @@ func handleLeaderElection(ctx *zedkubeContext) {
 			//      bouncing node to node and re-priming the k8s cache (unnecessary IO)
 			lec := leaderelection.LeaderElectionConfig{
 				Lock:            lock,
-				LeaseDuration:   24 * time.Hour,
+				LeaseDuration:   300 * time.Second,
 				RenewDeadline:   60 * time.Second,
-				RetryPeriod:     5 * time.Second,
+				RetryPeriod:     15 * time.Second,
 				ReleaseOnCancel: true,
 				Callbacks: leaderelection.LeaderCallbacks{
 					OnStartedLeading: func(baseCtx context.Context) {
 						ctx.isKubeStatsLeader.Store(true)
-						log.Noticef("handleLeaderElection: Started leading")
+						publishLeaseElectionChange(ctx)
+						log.Noticef("handleLeaderElection: Callback Started leading")
 					},
 					OnStoppedLeading: func() {
 						ctx.isKubeStatsLeader.Store(false)
-						log.Noticef("handleLeaderElection: Stopped leading")
+						publishLeaseElectionChange(ctx)
+						log.Noticef("handleLeaderElection: Callback Stopped leading")
 					},
 					OnNewLeader: func(identity string) {
-						log.Noticef("handleLeaderElection: New leader elected: %s", identity)
+						ctx.leaderIdentity = identity
+						publishLeaseElectionChange(ctx)
+						log.Noticef("handleLeaderElection: Callback New leader elected: %s", identity)
 					},
 				},
 			}
 
+			publishLeaseElectionChange(ctx)
 			// Start the leader election in a separate goroutine
-			go leaderelection.RunOrDie(baseCtx, lec)
-			log.Noticef("handleLeaderElection: Started leader election for %s", ctx.nodeName)
+			go func() {
+				leaderelection.RunOrDie(baseCtx, lec)
+				log.Noticef("handleLeaderElection: Leader election routine exited")
+			}()
+			log.Noticef("handleLeaderElection: Started leader election routine for %s", ctx.nodeName)
 
 		case <-ctx.electionStopCh:
 			ctx.isKubeStatsLeader.Store(false)
 			ctx.inKubeLeaderElection.Store(false)
+			ctx.leaderIdentity = ""
+			publishLeaseElectionChange(ctx)
 			log.Noticef("handleLeaderElection: Stopped leading signal received")
+			if retryTimerStarted {
+				retryTimer.Stop()
+				retryTimerStarted = false
+			}
+
 			if cancelFunc != nil {
+				log.Noticef("handleLeaderElection: Stopped. cancelling leader election")
 				cancelFunc()
 				cancelFunc = nil
 			}
+
+		case <-retryTimer.C:
+			log.Noticef("Retrying failed leader election")
+			sub := ctx.subZedAgentStatus
+			items := sub.GetAll()
+			for _, item := range items {
+				status := item.(types.ZedAgentStatus)
+				handleControllerStatusChange(ctx, &status)
+				break
+			}
+			retryTimerStarted = false
 		}
 	}
 }
@@ -124,15 +163,30 @@ func SignalStopLeaderElection(ctx *zedkubeContext) {
 func handleControllerStatusChange(ctx *zedkubeContext, status *types.ZedAgentStatus) {
 	configStatus := status.ConfigGetStatus
 
-	log.Functionf("handleControllerStatusChange: Leader enter, status %v", configStatus)
+	log.Noticef("handleControllerStatusChange: Leader enter, status %v", configStatus)
 	switch configStatus {
 	case types.ConfigGetSuccess, types.ConfigGetReadSaved: // either read success or read from saved config
 		if !ctx.inKubeLeaderElection.Load() {
 			SignalStartLeaderElection(ctx)
+		} else {
+			log.Noticef("handleControllerStatusChange: start. Already in leader election, skip")
 		}
 	default:
 		if ctx.inKubeLeaderElection.Load() {
 			SignalStopLeaderElection(ctx)
+		} else {
+			log.Noticef("handleControllerStatusChange: default stop. Not in leader election, skip")
 		}
 	}
+}
+
+func publishLeaseElectionChange(ctx *zedkubeContext) {
+	// Publish the change in leader
+	leaseinfo := types.KubeLeaseInfo{
+		InLeaseElection: ctx.inKubeLeaderElection.Load(),
+		IsStatsLeader:   ctx.isKubeStatsLeader.Load(),
+		LeaderIdentity:  ctx.leaderIdentity,
+		LatestChange:    time.Now(),
+	}
+	ctx.pubLeaseLeaderInfo.Publish("global", leaseinfo)
 }

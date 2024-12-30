@@ -389,3 +389,10 @@ func (ksi KubeStorageInfo) ZKubeStorageInfo() *info.KubeStorageInfo {
 	}
 	return iKsi
 }
+
+type KubeLeaseInfo struct {
+	InLeaseElection bool
+	IsStatsLeader   bool
+	LeaderIdentity  string
+	LatestChange    time.Time
+}
