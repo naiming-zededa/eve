@@ -57,6 +57,16 @@ check_log_file_size() {
                 fi
                 # keep the original log file's attributes
                 cp -p "$K3S_LOG_DIR/$1" "$K3S_LOG_DIR/$1.1"
+                # Check if the argument passed is "k3s.log", sometimes the k3s is
+                # not releasing the file descriptor, so truncate the file may not
+                # take effect. Signal a HUP signal to that.
+                if [ "$1" = "$K3s_LOG_FILE" ]; then
+                        k3s_pid=$(pgrep -f "k3s server")
+                        if [ -n "$k3s_pid" ]; then
+                                kill -HUP "$k3s_pid"
+                                logmsg "Sent HUP signal to k3s server before truncate k3s.log size"
+                        fi
+                fi
                 truncate -s 0 "$K3S_LOG_DIR/$1"
                 logmsg "k3s logfile $1, size $currentSize rotate"
         fi
@@ -621,6 +631,7 @@ cluster_token=""
 cluster_node_ip=""
 # for bootstrap node, after reboot to get neighbor node to join
 FoundENCStatus=false
+convert_to_single_node=false
 
 # get the EdgeNodeClusterStatus from zedkube publication
 get_enc_status() {
@@ -961,6 +972,10 @@ if [ -f /var/lib/convert-to-single-node ]; then
         restore_var_lib
         # assign node-ip to multus nodeIP for yaml config file
         assign_multus_nodeip
+        # set the variable 'convert_to_single_node' to true, in the case
+        # if we immediately convert back to cluster mode, we need to wait for the
+        # bootstrap status before moving on to cluster mode
+        convert_to_single_node=true
 fi
 # since we can wait for long time, always start the containerd first
 check_start_containerd
@@ -1001,7 +1016,11 @@ else # a restart case, found all_components_initialized
     done
     # got the cluster config, make the config.ymal now
     logmsg "Cluster config status ok, provision config.yaml and bootstrap-config.yaml"
-    provision_cluster_config_file false
+
+    # if we just converted to single node, then we need to wait for the bootstrap
+    # 'cluster' status before moving on to cluster mode
+    provision_cluster_config_file $convert_to_single_node
+    convert_to_single_node=false
     logmsg "provision config.yaml done"
   else # single node mode
     logmsg "Single node mode, prepare config.yaml for $HOSTNAME"
@@ -1207,7 +1226,7 @@ else
                 fi
         fi
 fi
-        check_log_file_size "k3s.log"
+        check_log_file_size "$K3s_LOG_FILE"
         check_log_file_size "multus.log"
         check_log_file_size "k3s-install.log"
         check_log_file_size "eve-bridge.log"
