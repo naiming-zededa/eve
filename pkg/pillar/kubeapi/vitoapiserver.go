@@ -17,7 +17,6 @@ import (
 	zconfig "github.com/lf-edge/eve-api/go/config"
 	//"github.com/lf-edge/eve/pkg/newlog/go/pkg/mod/github.com/google/martian@v2.1.1-0.20190517191504-25dcb96d9e51+incompatible/log"
 	"github.com/lf-edge/eve/pkg/pillar/base"
-	"github.com/lf-edge/eve/pkg/pillar/diskmetrics"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	corev1 "k8s.io/api/core/v1"
 	v1errors "k8s.io/apimachinery/pkg/api/errors"
@@ -144,42 +143,39 @@ func GetPVCInfo(pvcName string, log *base.LogObject) (*types.ImgInfo, error) {
 		return nil, err
 	}
 
-	fmt := zconfig.Format_name[int32(zconfig.Format_PVC)]
+	imgfmt := zconfig.Format_name[int32(zconfig.Format_PVC)]
 	imgInfo := types.ImgInfo{
-		Format:    fmt,
+		Format:    imgfmt,
 		Filename:  pvcName,
 		DirtyFlag: false,
 	}
-	// Get the actual and used size of the PVC.
-	actualSizeBytes, usedSizeBytes := getPVCSizes(pvc)
 
-	imgInfo.ActualSize = actualSizeBytes
-	imgInfo.VirtualSize = usedSizeBytes
+	// PVC asks for a minimum size, spec may be less than actual (status) provisioned
+	provisionedBytes := getPVCSize(pvc)
+
+	// Ask longhorn for the PVCs backing-volume allocated space
+	_, allocatedBytes, err := LonghornVolumeSizeDetails(pvc.Spec.VolumeName)
+	if err != nil {
+		err = fmt.Errorf("GetPVCInfo failed to get info for pvc %s volume %s: %v", pvcName, pvc.Spec.VolumeName, err)
+		log.Error(err)
+		return &imgInfo, err
+	}
+
+	imgInfo.ActualSize = allocatedBytes
+	imgInfo.VirtualSize = provisionedBytes
 
 	return &imgInfo, nil
 }
 
-// Returns the actual and used size of the PVC in bytes
-func getPVCSizes(pvc *corev1.PersistentVolumeClaim) (actualSizeBytes, usedSizeBytes uint64) {
-	// Extract the actual size of the PVC from its spec.
-	actualSizeBytes = 0
-	usedSizeBytes = 0
-
-	if pvc.Spec.Resources.Requests != nil {
-		if quantity, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
-			actualSizeBytes = uint64(quantity.Value())
-		}
-	}
-
-	// Extract the used size of the PVC from its status.
+// Returns the provisioned size of the PVC in bytes
+func getPVCSize(pvc *corev1.PersistentVolumeClaim) (provisionedSizeBytes uint64) {
+	// Status field contains the size of the volume which actually bound to the claim
 	if pvc.Status.Phase == corev1.ClaimBound {
 		if quantity, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
-			usedSizeBytes = uint64(quantity.Value())
+			return uint64(quantity.Value())
 		}
 	}
-
-	return actualSizeBytes, usedSizeBytes
-
+	return 0
 }
 
 // longhorn PVC deals with Ki Mi not KB, MB
@@ -227,7 +223,7 @@ func NewPVCDefinition(pvcName string, size string, annotations,
 // diskfile can be in qcow or raw format
 // If pvc does not exist, the command will create PVC and copies the data.
 func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
-	diskfile string, pvcName string, filemode bool) error {
+	diskfile string, pvcName string, filemode bool, pvcSize uint64) error {
 
 	// Get the Kubernetes clientset
 	clientset, err := GetClientSet()
@@ -262,27 +258,10 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
 	clusterIP := service.Spec.ClusterIP
 	uploadproxyURL := "https://" + clusterIP + ":443"
 	log.Noticef("RolloutDiskToPVC diskfile %s pvc %s  URL %s", diskfile, pvcName, uploadproxyURL)
-	volSize, err := diskmetrics.GetDiskVirtualSize(log, diskfile)
-	if err != nil {
-		err = fmt.Errorf("failed to get virtual size of disk %s: %v", diskfile, err)
-		log.Error(err)
-		return err
-	}
-
-	// ActualSize can be larger than VirtualSize for fully-allocated/not-thin QCOW2 files
-	actualVolSize, err := diskmetrics.GetDiskActualSize(log, diskfile)
-	if err != nil {
-		err = fmt.Errorf("failed to get actual size of disk %s: %v", diskfile, err)
-		log.Error(err)
-		return err
-	}
-	if actualVolSize > volSize {
-		volSize = actualVolSize
-	}
 
 	// Create PVC and then copy data. We create PVC to set the designated node id label.
 	if !exists {
-		err = CreatePVC(pvcName, volSize, log)
+		err = CreatePVC(pvcName, pvcSize, log)
 		if err != nil {
 			err = fmt.Errorf("Error creating PVC %s", pvcName)
 			log.Error(err)
@@ -313,7 +292,7 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
 		args = append(args, "--no-create")
 	} else {
 		// Add size
-		args = append(args, "--size", fmt.Sprint(volSize))
+		args = append(args, "--size", fmt.Sprint(pvcSize))
 	}
 
 	log.Noticef("virtctl args %v", args)
@@ -321,7 +300,7 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
 	uploadTry := 0
 	maxRetries := 10
 	timeoutBaseSeconds := int64(300) // 5 min
-	volSizeGB := int64(volSize / 1024 / 1024 / 1024)
+	volSizeGB := int64(pvcSize / 1024 / 1024 / 1024)
 	timeoutPer1GBSeconds := int64(120)
 	timeout := time.Duration(timeoutBaseSeconds + (volSizeGB * timeoutPer1GBSeconds))
 	log.Noticef("RolloutDiskToPVC calculated timeout to %d seconds due to volume size %d GB", timeout, volSizeGB)

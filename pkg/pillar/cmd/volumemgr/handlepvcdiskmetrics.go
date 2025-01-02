@@ -48,9 +48,9 @@ func createOrUpdatePvcDiskMetrics(ctx *volumemgrContext) {
 			continue
 		}
 
-		pvcMetric := lookupDiskMetric(ctx, pvcName)
+		pvcMetric := lookupDiskMetric(ctx, sdName+"-"+pvcName)
 		if pvcMetric == nil {
-			pvcMetric = &types.DiskMetric{DiskPath: pvcName, IsDir: false}
+			pvcMetric = &types.DiskMetric{DiskPath: sdName + "-" + pvcName, IsDir: false}
 		}
 		pvcMetric.ReadBytes = metric.ReadBytes
 		pvcMetric.WriteBytes = metric.WriteBytes
