@@ -35,18 +35,6 @@ func collectAppLogs(ctx *zedkubeContext) {
 		return
 	}
 
-	err = getnodeNameAndUUID(ctx)
-	if err != nil {
-		log.Errorf("collectAppLogs: can't get edgeNodeInfo %v", err)
-		return
-	}
-
-	err = getnodeNameAndUUID(ctx)
-	if err != nil {
-		log.Errorf("collectAppLogs: can't get edgeNodeInfo %v", err)
-		return
-	}
-
 	// "Thu Aug 17 05:39:04 UTC 2023"
 	timestampRegex := regexp.MustCompile(`(\w{3} \w{3} \d{2} \d{2}:\d{2}:\d{2} \w+ \d{4})`)
 	nowStr := time.Now().String()
@@ -128,12 +116,6 @@ func checkAppsStatus(ctx *zedkubeContext) {
 	sub := ctx.subAppInstanceConfig
 	items := sub.GetAll()
 	if len(items) == 0 {
-		return
-	}
-
-	err := getnodeNameAndUUID(ctx)
-	if err != nil {
-		log.Errorf("checkAppsStatus: can't get edgeNodeInfo %v", err)
 		return
 	}
 
@@ -255,20 +237,6 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		}
 
 	}
-}
-
-func getnodeNameAndUUID(ctx *zedkubeContext) error {
-	if ctx.nodeuuid == "" || ctx.nodeName == "" {
-		NodeInfo, err := ctx.subEdgeNodeInfo.Get("global")
-		if err != nil {
-			log.Errorf("getnodeNameAndUUID: can't get edgeNodeInfo %v", err)
-			return err
-		}
-		enInfo := NodeInfo.(types.EdgeNodeInfo)
-		ctx.nodeName = strings.ReplaceAll(strings.ToLower(enInfo.DeviceName), "_", "-")
-		ctx.nodeuuid = enInfo.DeviceID.String()
-	}
-	return nil
 }
 
 func handleKubePodsGetError(ctx *zedkubeContext, items, stItems map[string]interface{}) {

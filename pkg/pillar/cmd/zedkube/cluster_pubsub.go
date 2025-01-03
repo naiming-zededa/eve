@@ -93,12 +93,6 @@ func startupNotifyPeers(ctx *zedkubeContext) {
 		return
 	}
 
-	err = getnodeNameAndUUID(ctx)
-	if err != nil {
-		log.Errorf("startupNotifyPeers, Error getting nodeName and nodeUUID")
-		return
-	}
-
 	ctx.notifyPeerCount = 0
 	// notify all the peers we are up
 	for _, host := range hosts {
@@ -285,11 +279,6 @@ func getGobAndUUID(ctx *zedkubeContext, config interface{}) (bytes.Buffer, uuid.
 		}
 	}
 
-	err := getnodeNameAndUUID(ctx)
-	if err != nil {
-		return buf, uuid.Nil, err
-	}
-
 	u, err := uuid.FromString(ctx.nodeuuid)
 	if err != nil {
 		return buf, uuid.Nil, err
@@ -302,11 +291,6 @@ func resendPubsToRemoteNodes(ctx *zedkubeContext) {
 		return
 	}
 	log.Noticef("resendPubsToRemoteNodes: retrying")
-	err := getnodeNameAndUUID(ctx)
-	if err != nil {
-		log.Errorf("resendPubNetInstConfigs: %v", err)
-		return
-	}
 
 	u, err := uuid.FromString(ctx.nodeuuid)
 	if err != nil {
