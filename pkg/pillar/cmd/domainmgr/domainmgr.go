@@ -450,6 +450,8 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		ps.StillRunning(agentName, warningTime, errorTime)
 	}
 	log.Noticef("processed GCComplete")
+	// Get the EdgeNode info, needed for kubevirt clustering
+	// XXX later can make Eden/Adam send the EdgeNodeInfo for general cases
 	err = domainCtx.retrieveDeviceNodeName()
 	if domainCtx.hvTypeKube && err != nil {
 		log.Fatal(err)
@@ -1007,15 +1009,12 @@ func verifyStatus(ctx *domainContext, status *types.DomainStatus) {
 				status.SetErrorDescription(errDescription)
 			}
 
-			// in cluster mode, we can not delete the pod due to failing to get app info
-			if !ctx.hvTypeKube {
-				//cleanup app instance tasks
-				if err := hyper.Task(status).Delete(status.DomainName); err != nil {
-					log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
-				}
-				if err := hyper.Task(status).Cleanup(status.DomainName); err != nil {
-					log.Errorf("failed to cleanup domain: %s (%v)", status.DomainName, err)
-				}
+			//cleanup app instance tasks
+			if err := hyper.Task(status).Delete(status.DomainName); err != nil {
+				log.Errorf("failed to delete domain: %s (%v)", status.DomainName, err)
+			}
+			if err := hyper.Task(status).Cleanup(status.DomainName); err != nil {
+				log.Errorf("failed to cleanup domain: %s (%v)", status.DomainName, err)
 			}
 		}
 		status.DomainId = 0
@@ -1367,6 +1366,7 @@ func handleCreate(ctx *domainContext, key string, config *types.DomainConfig) {
 		State:          types.INSTALLED,
 		VmConfig:       config.VmConfig,
 		Service:        config.Service,
+		NodeName:       ctx.nodeName,
 	}
 
 	status.VmConfig.CPUs = ""
