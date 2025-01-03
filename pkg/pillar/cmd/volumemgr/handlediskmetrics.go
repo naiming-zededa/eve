@@ -312,13 +312,13 @@ func createOrUpdateDiskMetrics(ctx *volumemgrContext, wdName string) {
 	publishDiskMetrics(ctx, diskMetricList...)
 	for _, volumeStatus := range getAllVolumeStatus(ctx) {
 		ctx.ps.StillRunning(wdName, warningTime, errorTime)
-		if err := createOrUpdateAppDiskMetrics(ctx, volumeStatus); err != nil {
+		if err := createOrUpdateAppDiskMetrics(ctx, wdName, volumeStatus); err != nil {
 			log.Errorf("CreateOrUpdateCommonDiskMetrics: exception while publishing diskmetric. %s", err.Error())
 		}
 	}
 }
 
-func createOrUpdateAppDiskMetrics(ctx *volumemgrContext, volumeStatus *types.VolumeStatus) error {
+func createOrUpdateAppDiskMetrics(ctx *volumemgrContext, wdName string, volumeStatus *types.VolumeStatus) error {
 	log.Functionf("createOrUpdateAppDiskMetrics(%s, %s)", volumeStatus.VolumeID, volumeStatus.FileLocation)
 
 	if volumeStatus.FileLocation == "" {
@@ -328,9 +328,12 @@ func createOrUpdateAppDiskMetrics(ctx *volumemgrContext, volumeStatus *types.Vol
 		} else {
 			// Kubevirt eve volumes have no location on /persist, they are PVCs
 			volumeStatus.FileLocation = volumeStatus.GetPVCName()
+			publishVolumeStatus(ctx, volumeStatus)
 		}
 	}
 
+	// Some handlers (csi) can have http timeouts, update the watchdog
+	ctx.ps.StillRunning(wdName, warningTime, errorTime)
 	actualSize, maxSize, diskType, dirtyFlag, err := volumehandlers.GetVolumeHandler(log, ctx, volumeStatus).GetVolumeDetails()
 	if err != nil {
 		err = fmt.Errorf("createOrUpdateAppDiskMetrics(%s, %s): exception while getting volume size. %s",

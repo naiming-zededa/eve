@@ -27,6 +27,30 @@ func min(a, b types.ServiceStatus) types.ServiceStatus {
 	return b
 }
 
+// LonghornVolumeSizeDetails returns the provisionedBytes and allocatedBytes size values for a longhorn volume
+func LonghornVolumeSizeDetails(longhornVolumeName string) (provisionedBytes uint64, allocatedBytes uint64, err error) {
+	config, err := GetKubeConfig()
+	if err != nil {
+		return 0, 0, fmt.Errorf("LonghornVolumeSizeDetails can't get kubeconfig %v", err)
+	}
+
+	lhClient, err := versioned.NewForConfig(config)
+	if err != nil {
+		return 0, 0, fmt.Errorf("LonghornVolumeSizeDetails can't get versioned config: %v", err)
+	}
+
+	// Don't allow a k8s api timeout keep us waiting forever, set this one explicitly as its used in metrics path
+	shortContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	lhVol, err := lhClient.LonghornV1beta2().Volumes("longhorn-system").Get(shortContext, longhornVolumeName, metav1.GetOptions{})
+	if err != nil || lhVol == nil {
+		return 0, 0, fmt.Errorf("LonghornVolumeSizeDetails can't get lh vol err:%v", err)
+	}
+
+	return uint64(lhVol.Spec.Size), uint64(lhVol.Status.ActualSize), nil
+}
+
 // PopulateKVIFromPVCName uses the longhorn api to retrieve volume and replica health
 // to be sent out to the controller as info messages
 func PopulateKVIFromPVCName(kvi *types.KubeVolumeInfo) (*types.KubeVolumeInfo, error) {

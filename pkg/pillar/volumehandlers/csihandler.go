@@ -173,7 +173,7 @@ func (handler *volumeHandlerCSI) CreateVolume() (string, error) {
 				return "", errors.New(errStr)
 			}
 
-			pvcerr := kubeapi.RolloutDiskToPVC(createContext, handler.log, false, rawImgFile, pvcName, false)
+			pvcerr := kubeapi.RolloutDiskToPVC(createContext, handler.log, false, rawImgFile, pvcName, false, pvcSize)
 
 			// Since we succeeded or failed to create PVC above, no point in keeping the rawImgFile.
 			// Delete it to save space.
@@ -198,7 +198,7 @@ func (handler *volumeHandlerCSI) CreateVolume() (string, error) {
 				return pvcName, errors.New(errStr)
 			}
 			// Convert qcow2 to PVC
-			err = kubeapi.RolloutDiskToPVC(createContext, handler.log, false, qcowFile, pvcName, false)
+			err = kubeapi.RolloutDiskToPVC(createContext, handler.log, false, qcowFile, pvcName, false, pvcSize)
 
 			if err != nil {
 				errStr := fmt.Sprintf("Error converting %s to PVC %s: %v",
@@ -244,6 +244,8 @@ func (handler *volumeHandlerCSI) DestroyVolume() (string, error) {
 func (handler *volumeHandlerCSI) Populate() (bool, error) {
 	pvcName := handler.status.GetPVCName()
 	isReplicated := handler.status.IsReplicated
+	// Kubevirt eve volumes have no location on /persist, they are PVCs
+	handler.status.FileLocation = pvcName
 	handler.log.Noticef("Populate called for PVC %s", pvcName)
 	// A replicated volume is created on designated node, this node is supposed to be a replica volume.
 	// so wait until the replica is created. It could happen that the designated node did not even receive
