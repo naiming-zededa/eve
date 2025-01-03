@@ -47,8 +47,9 @@ func handleENClusterAppStatusImpl(ctx *zedmanagerContext, key string, status *ty
 
 		// if aiStatus is not present, nothing to do
 		if aiStatus != nil {
-			// If I am not scheduled here, modify and publish the aiStatus with NoUploadStatsToController set.
-			publishAppInstanceStatus(ctx, aiStatus)
+			// If I am not scheduled here, just unpublish the AIStatus.
+			// We probably had app running on this node earlier before failover.
+			unpublishAppInstanceStatus(ctx, aiStatus)
 		}
 
 	}

@@ -43,6 +43,16 @@ func handleLeaderElection(ctx *zedkubeContext) {
 				continue
 			}
 
+			err = getnodeNameAndUUID(ctx)
+			if err != nil {
+				ctx.inKubeLeaderElection.Store(false)
+				publishLeaseElectionChange(ctx)
+				log.Errorf("handleLeaderElection: can't get nodeName and UUID %v, retry in 5 min", err)
+				retryTimer.Reset(5 * time.Minute)
+				retryTimerStarted = true
+				continue
+			}
+
 			// Create a new lease lock
 			lock := &resourcelock.LeaseLock{
 				LeaseMeta: metav1.ObjectMeta{

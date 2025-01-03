@@ -462,28 +462,14 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	zedkubeCtx.subContentTreeConfig = subContentTreeConfig
 	subContentTreeConfig.Activate()
 
-	// Look for edge node info
-	subEdgeNodeInfo, err := ps.NewSubscription(pubsub.SubscriptionOptions{
-		AgentName:   "zedagent",
-		MyAgentName: agentName,
-		TopicImpl:   types.EdgeNodeInfo{},
-		Persistent:  true,
-		Activate:    false,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	zedkubeCtx.subEdgeNodeInfo = subEdgeNodeInfo
-	subEdgeNodeInfo.Activate()
-
 	// start the leader election
 	zedkubeCtx.electionStartCh = make(chan struct{}, 1)
 	zedkubeCtx.electionStopCh = make(chan struct{}, 1)
 	go handleLeaderElection(&zedkubeCtx)
 
 	// Wait for the certs, which are needed to decrypt the token inside the cluster config.
-	var controllerCertInitialized, edgenodeCertInitialized, edgenodeInfoInitialized bool
-	for !controllerCertInitialized || !edgenodeCertInitialized || !edgenodeInfoInitialized {
+	var controllerCertInitialized, edgenodeCertInitialized bool
+	for !controllerCertInitialized || !edgenodeCertInitialized {
 		log.Noticef("zedkube run: waiting for controller cert (initialized=%t), "+
 			"edgenode cert (initialized=%t)", controllerCertInitialized,
 			edgenodeCertInitialized)
@@ -496,15 +482,11 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 			subEdgeNodeCert.ProcessChange(change)
 			edgenodeCertInitialized = true
 
-		case change := <-subEdgeNodeInfo.MsgChan():
-			subEdgeNodeInfo.ProcessChange(change)
-			edgenodeInfoInitialized = zedkubeCtx.checkAndSaveEdgeNodeInfo()
-
 		case <-stillRunning.C:
 		}
 		ps.StillRunning(agentName, warningTime, errorTime)
 	}
-	log.Noticef("zedkube run: controller and edge node certs, node-info are ready")
+	log.Noticef("zedkube run: controller and edge node certs are ready")
 
 	//
 	// NodeDrainRequest subscriber and NodeDrainStatus publisher
@@ -595,6 +577,26 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	} else {
 		log.Noticef("zedkube: running")
 	}
+
+	// Look for edge node info
+	subEdgeNodeInfo, err := ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:     "zedagent",
+		MyAgentName:   agentName,
+		TopicImpl:     types.EdgeNodeInfo{},
+		Persistent:    true,
+		Activate:      false,
+		Ctx:           &zedkubeCtx,
+		CreateHandler: handleEdgeNodeInfoCreate,
+		ModifyHandler: handleEdgeNodeInfoModify,
+		DeleteHandler: handleEdgeNodeInfoDelete,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	zedkubeCtx.subEdgeNodeInfo = subEdgeNodeInfo
+	subEdgeNodeInfo.Activate()
 
 	// subscribe to zedagent status events, for controller connection status
 	subZedAgentStatus, err := ps.NewSubscription(pubsub.SubscriptionOptions{
@@ -917,6 +919,40 @@ func (s *ReceiveMap) Find(key string) bool {
 	return ok
 }
 
+func handleEdgeNodeInfoCreate(ctxArg interface{}, key string,
+	statusArg interface{}) {
+	handleEdgeNodeInfoImpl(ctxArg, key, statusArg)
+}
+
+func handleEdgeNodeInfoModify(ctxArg interface{}, key string,
+	statusArg interface{}, oldStatusArg interface{}) {
+	handleEdgeNodeInfoImpl(ctxArg, key, statusArg)
+}
+
+func handleEdgeNodeInfoImpl(ctxArg interface{}, key string,
+	statusArg interface{}) {
+	ctxPtr := ctxArg.(*zedkubeContext)
+	nodeInfo := statusArg.(types.EdgeNodeInfo)
+	if err := getnodeNameAndUUID(ctxPtr); err != nil {
+		log.Errorf("handleEdgeNodeInfoImpl: getnodeNameAndUUID failed: %v", err)
+		return
+	}
+
+	ctxPtr.nodeName = strings.ToLower(nodeInfo.DeviceName)
+	ctxPtr.nodeuuid = nodeInfo.DeviceID.String()
+
+	//Re-enable local node
+	if !ctxPtr.onBootUncordonCheckComplete {
+		go nodeOnBootHealthStatusWatcher(ctxPtr)
+	}
+}
+
+func handleEdgeNodeInfoDelete(ctxArg interface{}, key string,
+	statusArg interface{}) {
+	// do nothing?
+	log.Functionf("handleEdgeNodeInfoDelete(%s) done", key)
+}
+
 // It may be a while until the node is ready to be uncordoned
 // so we'll keep trying until it is
 func nodeOnBootHealthStatusWatcher(ctx *zedkubeContext) {
@@ -960,21 +996,4 @@ func nodeOnBootHealthStatusWatcher(ctx *zedkubeContext) {
 			log.Errorf("zedkube Unable to uncordon local node: %v", err)
 		}
 	}
-}
-
-// checkAndSaveEdgeNodeInfo checks if the device name is set in the EdgeNodeInfo
-// it returns true if we got the valid EdgeNodeInfo update
-func (ctx *zedkubeContext) checkAndSaveEdgeNodeInfo() bool {
-	NodeInfo, err := ctx.subEdgeNodeInfo.Get("global")
-	if err != nil {
-		log.Errorf("checkAndSaveEdgeNodeInfo: can't get edgeNodeInfo %v", err)
-		return false
-	}
-	enInfo := NodeInfo.(types.EdgeNodeInfo)
-	ctx.nodeName = strings.ReplaceAll(strings.ToLower(enInfo.DeviceName), "_", "-")
-	ctx.nodeuuid = enInfo.DeviceID.String()
-	if ctx.nodeName == "" || ctx.nodeuuid == "" {
-		return false
-	}
-	return true
 }

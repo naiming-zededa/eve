@@ -237,6 +237,13 @@ func clusterStatusHTTPHandler(w http.ResponseWriter, r *http.Request, ctx *zedku
 		return
 	}
 
+	err = getnodeNameAndUUID(ctx)
+	if err != nil {
+		log.Errorf("clusterStatusHTTPHandler: Error getting nodeName and nodeUUID")
+		fmt.Fprint(w, "")
+		return
+	}
+
 	node, err := clientset.CoreV1().Nodes().Get(context.Background(), ctx.nodeName, metav1.GetOptions{})
 	if err != nil {
 		log.Errorf("clusterStatusHTTPHandler: can't get node %v, for %s", err, ctx.nodeName)

@@ -351,6 +351,12 @@ func drainAndDeleteNode(ctx *zedkubeContext) {
 		return
 	}
 
+	err = getnodeNameAndUUID(ctx)
+	if err != nil {
+		log.Errorf("drainAndDeleteNode: can't get nodes %v, on uuid %s", err, ctx.nodeuuid)
+		return
+	}
+
 	node, err := clientset.CoreV1().Nodes().Get(context.Background(), ctx.nodeName, metav1.GetOptions{})
 	if err != nil {
 		log.Errorf("drainAndDeleteNode: can't get nodes %v, for %s", err, ctx.nodeName)
