@@ -428,14 +428,27 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	_ = subEdgeNodeInfo.Activate()
 
 	// Pick up debug aka log level before we start real work
-	for !ctx.GCInitialized {
+	waitEdgeNodeInfo := true
+	for !ctx.GCInitialized || (ctx.hvTypeKube && waitEdgeNodeInfo) {
 		log.Functionf("waiting for GCInitialized")
 		select {
 		case change := <-subGlobalConfig.MsgChan():
 			subGlobalConfig.ProcessChange(change)
+			waitEdgeNodeInfo = ctx.checkRecvEdgeNodeInfo()
+
+		case change := <-subEdgeNodeInfo.MsgChan():
+			subEdgeNodeInfo.ProcessChange(change)
+			waitEdgeNodeInfo = ctx.checkRecvEdgeNodeInfo()
+
 		case <-stillRunning.C:
 		}
 		ps.StillRunning(agentName, warningTime, errorTime)
+	}
+	// Get the EdgeNode info, needed for kubevirt clustering
+	// XXX later can make Eden/Adam send the EdgeNodeInfo for general cases
+	err = ctx.retrieveDeviceNodeUUID()
+	if ctx.hvTypeKube && err != nil {
+		log.Fatal(err)
 	}
 
 	//use timer for free resource checker to run it after stabilising of other changes
@@ -735,22 +748,30 @@ func publishAppInstanceStatus(ctx *zedmanagerContext,
 	// If I am not designated node id and there is a ENCClusterAppStatus
 	// that means remote app got scheduled here, publishAppInstanceStatus, else
 	// do nothing.
-	if ctx.hvTypeKube && !status.IsDesignatedNodeID {
+	if ctx.hvTypeKube {
 		sub := ctx.subENClusterAppStatus
 		st, _ := sub.Get(key)
 
-		// No ENCClusterAppStatus on non-designated node, nothing to publish
+		// No ENCClusterAppStatus
 		if st == nil {
-			log.Functionf("publishAppInstanceStatus(%s) not scheduled on this node, skip", key)
-			return
-		}
 
-		if st != nil {
+			if status.IsDesignatedNodeID {
+				// This could happen if DNid has not yet started the app
+				status.NoUploadStatsToController = false
+				log.Functionf("publishAppInstanceStatus(%s) DNid has no ENClusterAppStatus, publish to controller", key)
+
+			} else {
+				log.Functionf("publishAppInstanceStatus(%s) not scheduled on this node, don't publish to controller", key)
+				status.NoUploadStatsToController = true
+			}
+		} else {
 			clusterStatus := st.(types.ENClusterAppStatus)
 			if !clusterStatus.ScheduledOnThisNode {
 				// If its not scheduled on this node, do not publish anything
-				log.Functionf("publishAppInstanceStatus(%s) not scheduled on this node, skip", key)
-				return
+				log.Functionf("publishAppInstanceStatus(%s) not scheduled on this node, don't publish to controller", key)
+				status.NoUploadStatsToController = true
+			} else {
+				status.NoUploadStatsToController = false
 			}
 		}
 	}
@@ -1629,7 +1650,10 @@ func updateBasedOnProfile(ctx *zedmanagerContext, oldProfile string) {
 	}
 }
 
-// returns effective Activate status based on Activate from app instance config and current profile
+// returns effective Activate status based on Activate from app instance config, current profile
+// and plus the status of the App in kubernetes cluster mode. In the cluster mode, the app needs
+// to be scheduled on the node by kubernetes before the effectiveActivate can be true.
+// The scheduled status is monitored by the zedkube and through ENClusterAppStatus.
 func effectiveActivateCombined(config types.AppInstanceConfig, ctx *zedmanagerContext) bool {
 	effectiveActivate := effectiveActivateCurrentProfile(config, ctx.currentProfile)
 	// Add cluster login in the activate state
@@ -1668,13 +1692,6 @@ func getKubeAppActivateStatus(ctx *zedmanagerContext, aiConfig types.AppInstance
 		return effectiveActivate
 	}
 
-	if ctx.nodeUUID == uuid.Nil {
-		err := getnodeNameAndUUID(ctx)
-		if err != nil {
-			log.Errorf("getKubeAppActivateStatus: can't get nodeUUID %v", err)
-			return false
-		}
-	}
 	sub := ctx.subENClusterAppStatus
 	items := sub.GetAll()
 
@@ -1719,15 +1736,31 @@ func getKubeAppActivateStatus(ctx *zedmanagerContext, aiConfig types.AppInstance
 	}
 }
 
-func getnodeNameAndUUID(ctx *zedmanagerContext) error {
+func (ctx *zedmanagerContext) retrieveDeviceNodeUUID() error {
 	if ctx.nodeUUID == uuid.Nil {
 		NodeInfo, err := ctx.subEdgeNodeInfo.Get("global")
 		if err != nil {
-			log.Errorf("getnodeNameAndUUID: can't get edgeNodeInfo %v", err)
+			log.Errorf("retrieveDeviceNodeUUID: can't get edgeNodeInfo %v", err)
 			return err
 		}
 		enInfo := NodeInfo.(types.EdgeNodeInfo)
 		ctx.nodeUUID = enInfo.DeviceID
 	}
 	return nil
+}
+
+// checkRecvEdgeNodeInfo checks if the device name is set in the EdgeNodeInfo
+// it returns true if we need to continue waiting for the EdgeNodeInfo update
+func (ctx *zedmanagerContext) checkRecvEdgeNodeInfo() bool {
+	items := ctx.subEdgeNodeInfo.GetAll()
+	if len(items) > 0 {
+		for _, item := range items {
+			enInfo := item.(types.EdgeNodeInfo)
+			if enInfo.DeviceName != "" {
+				log.Noticef("checkRecvEdgeNodeInfo: found devicename %s", enInfo.DeviceName)
+				return false
+			}
+		}
+	}
+	return true
 }
