@@ -100,6 +100,7 @@ type zedkubeContext struct {
 	nodeName                 string
 	isKubeStatsLeader        atomic.Bool
 	inKubeLeaderElection     atomic.Bool
+	electionFuncRunning      atomic.Bool
 	leaderIdentity           string
 	electionStartCh          chan struct{}
 	electionStopCh           chan struct{}

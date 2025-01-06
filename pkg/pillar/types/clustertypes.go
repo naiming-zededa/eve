@@ -2,6 +2,7 @@ package types
 
 import (
 	"net"
+	"time"
 
 	uuid "github.com/satori/go.uuid"
 )
@@ -97,3 +98,11 @@ const (
 	EncPubOpModify
 	EncPubOpDelete
 )
+
+type KubeLeaseInfo struct {
+	InLeaseElection bool
+	IsStatsLeader   bool
+	ElectionRunning bool
+	LeaderIdentity  string
+	LatestChange    time.Time
+}

@@ -78,7 +78,7 @@ func handleLeaderElection(ctx *zedkubeContext) {
 			lec := leaderelection.LeaderElectionConfig{
 				Lock:            lock,
 				LeaseDuration:   300 * time.Second,
-				RenewDeadline:   60 * time.Second,
+				RenewDeadline:   180 * time.Second,
 				RetryPeriod:     15 * time.Second,
 				ReleaseOnCancel: true,
 				Callbacks: leaderelection.LeaderCallbacks{
@@ -100,12 +100,20 @@ func handleLeaderElection(ctx *zedkubeContext) {
 				},
 			}
 
-			publishLeaseElectionChange(ctx)
 			// Start the leader election in a separate goroutine
 			go func() {
 				leaderelection.RunOrDie(baseCtx, lec)
+				ctx.electionFuncRunning.Store(false)
 				log.Noticef("handleLeaderElection: Leader election routine exited")
+				if ctx.inKubeLeaderElection.Load() {
+					retryTimer.Reset(5 * time.Minute)
+					retryTimerStarted = true
+					log.Noticef("handleLeaderElection: We should be inElection, retry in 5 min")
+				}
+				publishLeaseElectionChange(ctx)
 			}()
+			ctx.electionFuncRunning.Store(true)
+			publishLeaseElectionChange(ctx)
 			log.Noticef("handleLeaderElection: Started leader election routine for %s", ctx.nodeName)
 
 		case <-ctx.electionStopCh:
@@ -185,6 +193,7 @@ func publishLeaseElectionChange(ctx *zedkubeContext) {
 	leaseinfo := types.KubeLeaseInfo{
 		InLeaseElection: ctx.inKubeLeaderElection.Load(),
 		IsStatsLeader:   ctx.isKubeStatsLeader.Load(),
+		ElectionRunning: ctx.electionFuncRunning.Load(),
 		LeaderIdentity:  ctx.leaderIdentity,
 		LatestChange:    time.Now(),
 	}
