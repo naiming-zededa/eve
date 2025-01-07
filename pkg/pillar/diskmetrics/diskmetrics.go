@@ -45,6 +45,8 @@ func GetImgInfo(log *base.LogObject, diskfile string) (*types.ImgInfo, error) {
 }
 
 // GetDiskActualSize - returns ActualSize of the image
+// following github.com/qemu/qemu/docs/tools/qemu-img.rst:
+// "How much space the image file occupies on the host file system" (current size possibly thin)
 func GetDiskActualSize(log *base.LogObject, diskfile string) (uint64, error) {
 	imgInfo, err := GetImgInfo(log, diskfile)
 	if err != nil {
@@ -54,6 +56,8 @@ func GetDiskActualSize(log *base.LogObject, diskfile string) (uint64, error) {
 }
 
 // GetDiskVirtualSize - returns VirtualSize of the image
+// following github.com/qemu/qemu/docs/tools/qemu-img.rst:
+// "The size of the guest disk" (max size)
 func GetDiskVirtualSize(log *base.LogObject, diskfile string) (uint64, error) {
 	imgInfo, err := GetImgInfo(log, diskfile)
 	if err != nil {
