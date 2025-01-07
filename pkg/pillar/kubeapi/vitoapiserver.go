@@ -17,6 +17,7 @@ import (
 	zconfig "github.com/lf-edge/eve-api/go/config"
 	//"github.com/lf-edge/eve/pkg/newlog/go/pkg/mod/github.com/google/martian@v2.1.1-0.20190517191504-25dcb96d9e51+incompatible/log"
 	"github.com/lf-edge/eve/pkg/pillar/base"
+	"github.com/lf-edge/eve/pkg/pillar/diskmetrics"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	corev1 "k8s.io/api/core/v1"
 	v1errors "k8s.io/apimachinery/pkg/api/errors"
@@ -258,6 +259,27 @@ func RolloutDiskToPVC(ctx context.Context, log *base.LogObject, exists bool,
 	clusterIP := service.Spec.ClusterIP
 	uploadproxyURL := "https://" + clusterIP + ":443"
 	log.Noticef("RolloutDiskToPVC diskfile %s pvc %s  URL %s", diskfile, pvcName, uploadproxyURL)
+
+	imgVirtBytes, err := diskmetrics.GetDiskVirtualSize(log, diskfile)
+	if err != nil {
+		err = fmt.Errorf("failed to get virtual size of disk %s: %v", diskfile, err)
+		log.Error(err)
+		return err
+	}
+	if pvcSize < imgVirtBytes {
+		log.Noticef("Image file: %s has virtual size %d", diskfile, imgVirtBytes)
+		pvcSize = imgVirtBytes
+	}
+	// ActualSize can be larger (by a very small amount) than VirtualSize for fully-allocated/not-thin QCOW2 files
+	imgActualBytes, err := diskmetrics.GetDiskActualSize(log, diskfile)
+	if err != nil {
+		err = fmt.Errorf("failed to get actual size of disk %s: %v", diskfile, err)
+		log.Error(err)
+		return err
+	}
+	if pvcSize < imgActualBytes {
+		pvcSize = imgActualBytes
+	}
 
 	// Create PVC and then copy data. We create PVC to set the designated node id label.
 	if !exists {
