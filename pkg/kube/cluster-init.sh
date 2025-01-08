@@ -970,6 +970,8 @@ Update_CheckNodeComponents
 if [ -f /var/lib/convert-to-single-node ]; then
         logmsg "remove /var/lib and copy saved single node /var/lib"
         restore_var_lib
+        logmsg "wiping unreferenced replicas"
+        rm -rf /persist/vault/volumes/replicas/*
         # assign node-ip to multus nodeIP for yaml config file
         assign_multus_nodeip
         # set the variable 'convert_to_single_node' to true, in the case
