@@ -39,7 +39,10 @@ func handleENClusterAppStatusImpl(ctx *zedmanagerContext, key string, status *ty
 			}
 			handleCreateAppInstanceStatus(ctx, *aiConfig)
 		} else {
-			// Nothing to do, we already have aiStatus
+
+			activateAIStatusUUID(ctx, key)
+			// We need to modify and publish the aiStatus with NoUploadStatsToController field set.
+			//publishAppInstanceStatus(ctx, aiStatus)
 			log.Functionf("handleENClusterAppStatusImpl(%s) for app-status %v aiStatus %v", key, status, aiStatus)
 			return
 		}
@@ -47,9 +50,8 @@ func handleENClusterAppStatusImpl(ctx *zedmanagerContext, key string, status *ty
 
 		// if aiStatus is not present, nothing to do
 		if aiStatus != nil {
-			// If I am not scheduled here, just unpublish the AIStatus.
-			// We probably had app running on this node earlier before failover.
-			unpublishAppInstanceStatus(ctx, aiStatus)
+			// If I am not scheduled here, modify and publish the aiStatus with NoUploadStatsToController set.
+			publishAppInstanceStatus(ctx, aiStatus)
 		}
 
 	}

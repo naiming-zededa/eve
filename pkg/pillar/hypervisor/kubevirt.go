@@ -72,6 +72,7 @@ type vmiMetaData struct {
 	cputotal         uint64                               // total CPU in NS so far
 	maxmem           uint32                               // total Max memory usage in bytes so far
 	startUnknownTime time.Time                            // time when the domain returned as unknown status
+	scheduledLocal   bool                                 // if the domain is scheduled to local node
 }
 
 type kubevirtContext struct {
@@ -585,16 +586,21 @@ func (ctx kubevirtContext) Stop(domainName string, force bool) error {
 	if !ok {
 		return logError("domain %s failed to get vmlist", domainName)
 	}
-	if vmis.mtype == IsMetaReplicaPod {
-		err = StopReplicaPodContainer(kubeconfig, vmis.name)
-	} else if vmis.mtype == IsMetaReplicaVMI {
-		err = StopReplicaVMI(kubeconfig, vmis.name)
-	} else {
-		return logError("Stop domain %s wrong type", domainName)
-	}
+	// call .Info() to decide if the domain is running on local node
+	_, _, err = ctx.Info(domainName)
+	logrus.Infof("Stop domain %s, scheduledLocal %v", domainName, vmis.scheduledLocal)
+	if vmis.scheduledLocal {
+		if vmis.mtype == IsMetaReplicaPod {
+			err = StopReplicaPodContainer(kubeconfig, vmis.name)
+		} else if vmis.mtype == IsMetaReplicaVMI {
+			err = StopReplicaVMI(kubeconfig, vmis.name)
+		} else {
+			return logError("Stop domain %s wrong type", domainName)
+		}
 
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 
 	delete(ctx.vmiList, domainName)
@@ -616,16 +622,22 @@ func (ctx kubevirtContext) Delete(domainName string) (result error) {
 	if !ok {
 		return logError("delete domain %s failed to get vmlist", domainName)
 	}
-	if vmis.mtype == IsMetaReplicaPod {
-		err = StopReplicaPodContainer(kubeconfig, vmis.name)
-	} else if vmis.mtype == IsMetaReplicaVMI {
-		err = StopReplicaVMI(kubeconfig, vmis.name)
-	} else {
-		return logError("delete domain %s wrong type", domainName)
-	}
 
-	if err != nil {
-		return err
+	// call .Info() to decide if the domain is running on local node
+	_, _, err = ctx.Info(domainName)
+	logrus.Infof("Delete domain %s, scheduledLocal %v", domainName, vmis.scheduledLocal)
+	if vmis.scheduledLocal {
+		if vmis.mtype == IsMetaReplicaPod {
+			err = StopReplicaPodContainer(kubeconfig, vmis.name)
+		} else if vmis.mtype == IsMetaReplicaVMI {
+			err = StopReplicaVMI(kubeconfig, vmis.name)
+		} else {
+			return logError("delete domain %s wrong type", domainName)
+		}
+
+		if err != nil {
+			return err
+		}
 	}
 
 	// Delete the state dir
@@ -682,7 +694,7 @@ func (ctx kubevirtContext) Info(domainName string) (int, types.SwState, error) {
 		return 0, types.HALTED, logError("info domain %s failed to get vmlist", domainName)
 	}
 	if vmis.mtype == IsMetaReplicaPod {
-		res, err = InfoReplicaSetContainer(ctx, vmis)
+		res, err = InfoReplicaSetContainer(ctx, vmis, nodeName)
 	} else {
 		res, err = getVMIStatus(vmis, nodeName)
 	}
@@ -719,18 +731,24 @@ func (ctx kubevirtContext) Cleanup(domainName string) error {
 	if !ok {
 		return logError("cleanup domain %s failed to get vmlist", domainName)
 	}
-	if vmis.mtype == IsMetaReplicaPod {
-		_, err = InfoReplicaSetContainer(ctx, vmis)
-		if err == nil {
-			err = ctx.Delete(domainName)
+
+	// call .Info() to decide if the domain is running on local node
+	_, _, err = ctx.Info(domainName)
+	logrus.Infof("Cleanup domain %s, scheduledLocal %v", domainName, vmis.scheduledLocal)
+	if vmis.scheduledLocal {
+		if vmis.mtype == IsMetaReplicaPod {
+			_, err = InfoReplicaSetContainer(ctx, vmis, nodeName)
+			if err == nil {
+				err = ctx.Delete(domainName)
+			}
+		} else if vmis.mtype == IsMetaReplicaVMI {
+			err = waitForVMI(vmis, nodeName, false)
+		} else {
+			err = logError("cleanup domain %s wrong type", domainName)
 		}
-	} else if vmis.mtype == IsMetaReplicaVMI {
-		err = waitForVMI(vmis, nodeName, false)
-	} else {
-		err = logError("cleanup domain %s wrong type", domainName)
-	}
-	if err != nil {
-		return fmt.Errorf("waitforvmi failed  %s: %v", domainName, err)
+		if err != nil {
+			return fmt.Errorf("waitforvmi failed  %s: %v", domainName, err)
+		}
 	}
 
 	return nil
@@ -787,11 +805,13 @@ func getVMIStatus(vmis *vmiMetaData, nodeName string) (string, error) {
 		if vmi.Status.NodeName == nodeName {
 			if vmi.GenerateName == repVmiName {
 				targetVMI = &vmi
+				vmis.scheduledLocal = true
 				break
 			}
 		} else {
 			if vmi.GenerateName == repVmiName {
 				foundNonlocal = true
+				vmis.scheduledLocal = false
 				nonLocalStatus = fmt.Sprintf("%v", vmi.Status.Phase)
 			}
 		}
@@ -1304,12 +1324,18 @@ func checkForReplicaPod(ctx kubevirtContext, vmis *vmiMetaData) error {
 	var i int
 	var status string
 	var err error
+
+	nodeName, ok := ctx.nodeNameMap["nodename"]
+	if !ok {
+		return logError("Cleanup: Failed to get nodeName")
+	}
+
 	for {
 		i++
 		logrus.Infof("checkForReplicaPod: check(%d) wait 15 sec, %v", i, repName)
 		time.Sleep(15 * time.Second)
 
-		status, err = InfoReplicaSetContainer(ctx, vmis)
+		status, err = InfoReplicaSetContainer(ctx, vmis, nodeName)
 		if err != nil {
 			logrus.Infof("checkForReplicaPod: repName %s, %v", repName, err)
 		} else {
@@ -1328,7 +1354,7 @@ func checkForReplicaPod(ctx kubevirtContext, vmis *vmiMetaData) error {
 	return fmt.Errorf("checkForReplicaPod: timed out, statuus %s, err %v", status, err)
 }
 
-func InfoReplicaSetContainer(ctx kubevirtContext, vmis *vmiMetaData) (string, error) {
+func InfoReplicaSetContainer(ctx kubevirtContext, vmis *vmiMetaData, nodeName string) (string, error) {
 
 	repName := vmis.repPod.ObjectMeta.Name
 	err := getConfig(&ctx)
@@ -1351,6 +1377,11 @@ func InfoReplicaSetContainer(ctx kubevirtContext, vmis *vmiMetaData) (string, er
 	}
 
 	for _, pod := range pods.Items {
+		if pod.Spec.NodeName != nodeName {
+			vmis.scheduledLocal = false
+		} else {
+			vmis.scheduledLocal = true
+		}
 
 		var res string
 		// https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/
