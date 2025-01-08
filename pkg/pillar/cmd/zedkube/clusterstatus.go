@@ -7,15 +7,23 @@ package zedkube
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"reflect"
+	"strings"
 	"time"
 
+	"github.com/lf-edge/eve/pkg/pillar/agentbase"
 	"github.com/lf-edge/eve/pkg/pillar/cipher"
+	"github.com/lf-edge/eve/pkg/pillar/kubeapi"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/lf-edge/eve/pkg/pillar/utils/netutils"
+	uuid "github.com/satori/go.uuid"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 func handleDNSCreate(ctxArg interface{}, _ string, statusArg interface{}) {
@@ -193,6 +201,14 @@ func startClusterStatusServer(ctx *zedkubeContext) {
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		clusterStatusHTTPHandler(w, r, ctx)
 	})
+	mux.HandleFunc("/app/", func(w http.ResponseWriter, r *http.Request) {
+		appIDHandler(w, r, ctx)
+	})
+
+	mux.HandleFunc("/cluster-app/", func(w http.ResponseWriter, r *http.Request) {
+		clusterAppIDHandler(w, r, ctx)
+	})
+
 	ctx.statusServer = &http.Server{
 		Addr:    ctx.clusterConfig.ClusterIPPrefix.IP.String() + ":" + types.ClusterStatusPort,
 		Handler: mux,
@@ -269,4 +285,163 @@ func clusterStatusHTTPHandler(w http.ResponseWriter, r *http.Request, ctx *zedku
 	}
 	log.Noticef("clusterStatusHTTPHandler: not master or etcd")
 	fmt.Fprint(w, "")
+}
+
+func appIDHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeContext) {
+	// Extract the UUID from the URL
+	uuidStr := strings.TrimPrefix(r.URL.Path, "/app/")
+	if uuidStr == "" {
+		http.Error(w, "UUID is required", http.StatusBadRequest)
+		return
+	}
+
+	uuidStr, err := checkAppNameForUUID(ctx, uuidStr)
+	if err != nil {
+		http.Error(w, "App Name or UUID not found", http.StatusBadRequest)
+		return
+	}
+
+	af := agentbase.GetApplicationInfo("/run/", "/persist/status/", uuidStr)
+	if af.AppInfo == nil {
+		http.Error(w, "App not found", http.StatusNotFound)
+		return
+	}
+	appInfoJSON, err := json.MarshalIndent(af, "", "  ")
+	if err != nil {
+		http.Error(w, "Error marshalling appInfo to JSON", http.StatusInternalServerError)
+		return
+	}
+	// Handle the request for the given UUID
+	fmt.Fprintf(w, "%s", appInfoJSON)
+	// Add your logic here to handle the request
+}
+
+func clusterAppIDHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeContext) {
+	// Extract the UUID from the URL
+	uuidStr := strings.TrimPrefix(r.URL.Path, "/cluster-app/")
+	if uuidStr == "" {
+		http.Error(w, "UUID is required", http.StatusBadRequest)
+		return
+	}
+
+	uuidStr, err := checkAppNameForUUID(ctx, uuidStr)
+	if err != nil {
+		http.Error(w, "App Name or UUID not found", http.StatusBadRequest)
+		return
+	}
+
+	af := agentbase.GetApplicationInfo("/run/", "/persist/status/", uuidStr)
+	if af.AppInfo == nil {
+		http.Error(w, "App not found", http.StatusNotFound)
+		return
+	}
+	appInfoJSON, err := json.MarshalIndent(af, "", "  ")
+	if err != nil {
+		http.Error(w, "Error marshalling appInfo to JSON", http.StatusInternalServerError)
+		return
+	}
+
+	// Initialize combined JSON with local app info
+	combinedJSON := "{" + strings.TrimSuffix(string(appInfoJSON), "\n")
+
+	hosts, notClusterMode, err := getClusterNodeIPs(ctx)
+	if err == nil && !notClusterMode {
+		for _, host := range hosts {
+			req, err := http.NewRequest("POST", "http://"+host+":"+types.ClusterStatusPort+"/app/"+uuidStr, nil)
+			if err != nil {
+				log.Errorf("clusterAppIDHandler: %v", err)
+				continue
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				log.Errorf("clusterAppIDHandler: %v", err)
+				continue
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				log.Errorf("clusterAppIDHandler: received non-OK status %d from %s", resp.StatusCode, host)
+				continue
+			}
+
+			remoteAppInfoJSON, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				log.Errorf("clusterAppIDHandler: error reading response from %s: %v", host, err)
+				continue
+			}
+
+			// Append remote app info JSON to combined JSON
+			combinedJSON = combinedJSON + "," + strings.TrimSuffix(string(remoteAppInfoJSON), "\n")
+		}
+	}
+
+	// Ensure the combined JSON is properly closed
+	combinedJSON += "}\n"
+
+	// Return the combined JSON to the caller
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(combinedJSON))
+}
+
+func checkAppNameForUUID(ctx *zedkubeContext, appStr string) (string, error) {
+	// Verify the extracted UUID string
+	if _, err := uuid.FromString(appStr); err != nil {
+		// then check if this is the app Name
+		sub := ctx.subAppInstanceConfig
+		items := sub.GetAll()
+		if len(items) == 0 {
+			return "", fmt.Errorf("App not found")
+		}
+		var foundApp bool
+		for _, item := range items {
+			aiconfig := item.(types.AppInstanceConfig)
+			if aiconfig.DisplayName == appStr {
+				appStr = aiconfig.UUIDandVersion.UUID.String()
+				foundApp = true
+				break
+			}
+		}
+		if !foundApp {
+			return "", fmt.Errorf("App not found")
+		}
+	}
+	return appStr, nil
+}
+
+func getClusterNodeIPs(ctx *zedkubeContext) ([]string, bool, error) {
+	if !ctx.clusterIPIsReady || !ctx.allowClusterPubSub {
+		return nil, true, nil
+	}
+
+	config, err := kubeapi.GetKubeConfig()
+	if err != nil {
+		log.Errorf("getClusterNodes: config is nil")
+		return nil, false, err
+	}
+	ctx.config = config
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Errorf("collectAppLogs: can't get clientset %v", err)
+		return nil, false, err
+	}
+
+	nodes, err := clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		log.Errorf("Error getting cluster nodes")
+		return nil, false, err
+	}
+
+	// get all the nodes internal ip addresses except for my own
+	clusterIPStr := ctx.clusterConfig.ClusterIPPrefix.IP.String()
+	var hosts []string
+	for _, node := range nodes.Items {
+		for _, addr := range node.Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP && addr.Address != clusterIPStr {
+				hosts = append(hosts, addr.Address)
+			}
+		}
+	}
+	return hosts, false, nil
 }

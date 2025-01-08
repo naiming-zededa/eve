@@ -730,8 +730,8 @@ func handleAppInstanceConfigCreate(ctxArg interface{}, key string,
 	ctx := ctxArg.(*zedkubeContext)
 	config := configArg.(types.AppInstanceConfig)
 
-	log.Noticef("handleAppInstanceConfigCreate(%v) spec for %s",
-		config.UUIDandVersion, config.DisplayName) // XXX
+	log.Noticef("handleAppInstanceConfigCreate(%v) spec for %s, activate %v, dnid %v",
+		config.UUIDandVersion, config.DisplayName, config.Activate, config.IsDesignatedNodeID)
 
 	err := checkIoAdapterEthernet(ctx, &config)
 	log.Functionf("handleAppInstancConfigModify: genAISpec %v", err)
@@ -745,8 +745,8 @@ func handleAppInstanceConfigModify(ctxArg interface{}, key string,
 	config := configArg.(types.AppInstanceConfig)
 	oldconfig := oldConfigArg.(types.AppInstanceConfig)
 
-	log.Noticef("handleAppInstancConfigModify(%v) spec for %s",
-		config.UUIDandVersion, config.DisplayName) // XXX
+	log.Noticef("handleAppInstancConfigModify(%v) spec for %s, activate %v, dnid %v",
+		config.UUIDandVersion, config.DisplayName, config.Activate, config.IsDesignatedNodeID)
 
 	err := checkIoAdapterEthernet(ctx, &config)
 
