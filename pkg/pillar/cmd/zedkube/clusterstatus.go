@@ -342,7 +342,9 @@ func clusterAppIDHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeCon
 	}
 
 	// Initialize combined JSON with local app info
-	combinedJSON := "{" + strings.TrimSuffix(string(appInfoJSON), "\n")
+	combinedJSON := `{
+  "key": "cluster-app",
+  "value": [` + strings.TrimSuffix(string(appInfoJSON), "\n")
 
 	hosts, notClusterMode, err := getClusterNodeIPs(ctx)
 	if err == nil && !notClusterMode {
@@ -371,17 +373,25 @@ func clusterAppIDHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeCon
 				continue
 			}
 
-			// Append remote app info JSON to combined JSON
+			// Replace outermost { and } with [ and ] in remoteAppInfoJSON
 			combinedJSON = combinedJSON + "," + strings.TrimSuffix(string(remoteAppInfoJSON), "\n")
 		}
 	}
 
 	// Ensure the combined JSON is properly closed
-	combinedJSON += "}\n"
+	combinedJSON += "]\n}\n"
 
 	// Return the combined JSON to the caller
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(combinedJSON))
+}
+
+func replaceOutermostBraces(jsonStr string) string {
+	jsonStr = strings.TrimSpace(jsonStr)
+	if len(jsonStr) > 0 && jsonStr[0] == '{' && jsonStr[len(jsonStr)-1] == '}' {
+		jsonStr = "[" + jsonStr[1:len(jsonStr)-1] + "]"
+	}
+	return jsonStr
 }
 
 func checkAppNameForUUID(ctx *zedkubeContext, appStr string) (string, error) {

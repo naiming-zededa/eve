@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -238,8 +239,8 @@ func GetApplicationInfo(rootRun, persistStatus, AppUUID string) AppInternalInfo 
 
 	// 9) Get all the VolumeStatus from volumemgr, it may not exist
 	structName = "volumemgr-VolumeStatus"
-	volStatus := &types.VolumeStatus{}
 	for _, volumeID := range appInternal.AppVolumes {
+		volStatus := &types.VolumeStatus{}
 		if structName2, err = readJSONFile(rootRun, structName, volumeID.VolumeID, volStatus); err != nil {
 			appInfo = appendFailedItem(appInfo, structName, volumeID.VolumeID, err)
 			continue
@@ -256,8 +257,8 @@ func GetApplicationInfo(rootRun, persistStatus, AppUUID string) AppInternalInfo 
 
 	// 10) Get all the ContentTreeStatus from volumemgr, it may not exist
 	structName = "volumemgr-ContentTreeStatus"
-	contentTreeStatus := &types.ContentTreeStatus{}
 	for _, volumeID := range appInternal.AppVolumes {
+		contentTreeStatus := &types.ContentTreeStatus{}
 		if structName2, err = readJSONFile(rootRun, structName, volumeID.ContentID, contentTreeStatus); err != nil {
 			ai = AppInfoItems{
 				UUID:   volumeID.ContentID,
@@ -358,23 +359,33 @@ func GetApplicationInfo(rootRun, persistStatus, AppUUID string) AppInternalInfo 
 		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
 	}
 
+	// 16) Get the AppDiskMetric from volumemgr, it may not exist
+	structName = "volumemgr-AppDiskMetric"
+	for _, volumeID := range appInternal.AppVolumes {
+		appDiskMetric := &types.AppDiskMetric{}
+		if structName2, err = readJSONFile(rootRun, structName, volumeID.VolumeID, appDiskMetric); err != nil {
+			appInfo = appendFailedItem(appInfo, structName, volumeID.VolumeID, err)
+			continue
+		}
+		ai = AppInfoItems{ // AppDiskMetric
+			UUID:    volumeID.VolumeID,
+			Name:    "Disk Path: " + appDiskMetric.DiskPath,
+			Exist:   true,
+			State:   "Disk Type: " + appDiskMetric.DiskType,
+			Content: fmt.Sprintf("Provisioned bytes: %v, used bytes: %v, Dirty: %v", appDiskMetric.ProvisionedBytes, appDiskMetric.UsedBytes, appDiskMetric.Dirty),
+		}
+		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
+	}
+
 	return addHostnameAppInfo(hostname, appInfo)
 }
 
 // readJSONFile reads a JSON file and unmarshals its content into the provided struct.
 func readJSONFile(rootRun, structName, itemUUID string, v interface{}) (string, error) {
 
-	filePath, err := getPath(rootRun, structName, itemUUID)
+	filePath, err := getPath(rootRun, structName, itemUUID, ".json")
 	if err != nil {
-		return "", err
-	}
-	// Check if the file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		// some json file with UUID + "#0", try that
-		filePath, err = getPath(rootRun, structName, itemUUID+"#0")
-		if err != nil {
-			return "", fmt.Errorf("file does not exist: %s", filePath)
-		}
+		return "", fmt.Errorf("file does not exist for  %s, uuid %s", structName, itemUUID)
 	}
 
 	// Read the file content
@@ -404,12 +415,28 @@ func readJSONFile(rootRun, structName, itemUUID string, v interface{}) (string, 
 }
 
 // getPath constructs the path based on the given input strings.
-func getPath(rootRun, input, uuidString string) (string, error) {
+func getPath(rootRun, input, uuidString, suffixStr string) (string, error) {
 	parts := strings.Split(input, "-")
 	if len(parts) != 2 {
 		return "", fmt.Errorf("input string must be in the format 'string1-string2'")
 	}
-	return fmt.Sprintf(rootRun+"%s/%s/%s.json", parts[0], parts[1], uuidString), nil
+	dirPath := filepath.Join(rootRun, parts[0], parts[1])
+	files, err := os.ReadDir(dirPath)
+	if err != nil {
+		return "", fmt.Errorf("error reading directory: %v", err)
+	}
+
+	// the file name format could be '<uuid>.json' or '<uuid#0>.json' or '<uuid-pvc-0>.json', etc.
+	// we just need to match one of them.
+	for _, file := range files {
+		if !file.IsDir() {
+			fileName := file.Name()
+			if strings.HasPrefix(fileName, uuidString) && strings.HasSuffix(fileName, suffixStr) {
+				return filepath.Join(dirPath, fileName), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no file found with prefix '%s' and suffix '%s' in directory '%s'", uuidString, suffixStr, dirPath)
 }
 
 func appendFailedItem(appInfo []OrderedAppInfoItem, structName, UUID string, err error) []OrderedAppInfoItem {
