@@ -201,10 +201,16 @@ func startClusterStatusServer(ctx *zedkubeContext) {
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		clusterStatusHTTPHandler(w, r, ctx)
 	})
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		appIDHandler(w, r, ctx)
+	})
 	mux.HandleFunc("/app/", func(w http.ResponseWriter, r *http.Request) {
 		appIDHandler(w, r, ctx)
 	})
 
+	mux.HandleFunc("/cluster-app", func(w http.ResponseWriter, r *http.Request) {
+		clusterAppIDHandler(w, r, ctx)
+	})
 	mux.HandleFunc("/cluster-app/", func(w http.ResponseWriter, r *http.Request) {
 		clusterAppIDHandler(w, r, ctx)
 	})
@@ -289,19 +295,18 @@ func clusterStatusHTTPHandler(w http.ResponseWriter, r *http.Request, ctx *zedku
 
 func appIDHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeContext) {
 	// Extract the UUID from the URL
-	uuidStr := strings.TrimPrefix(r.URL.Path, "/app/")
-	if uuidStr == "" {
-		http.Error(w, "UUID is required", http.StatusBadRequest)
-		return
+	uuidStr := strings.TrimPrefix(r.URL.Path, "/app")
+	uuidStr = strings.TrimPrefix(uuidStr, "/")
+	if uuidStr != "" {
+		var err error
+		uuidStr, err = checkAppNameForUUID(ctx, uuidStr)
+		if err != nil {
+			http.Error(w, "App Name or UUID not found", http.StatusBadRequest)
+			return
+		}
 	}
 
-	uuidStr, err := checkAppNameForUUID(ctx, uuidStr)
-	if err != nil {
-		http.Error(w, "App Name or UUID not found", http.StatusBadRequest)
-		return
-	}
-
-	af := agentbase.GetApplicationInfo("/run/", "/persist/status/", uuidStr)
+	af := agentbase.GetApplicationInfo("/run/", "/persist/status/", "/persist/kubelog/", uuidStr)
 	if af.AppInfo == nil {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
@@ -313,24 +318,22 @@ func appIDHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeContext) {
 	}
 	// Handle the request for the given UUID
 	fmt.Fprintf(w, "%s", appInfoJSON)
-	// Add your logic here to handle the request
 }
 
 func clusterAppIDHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeContext) {
 	// Extract the UUID from the URL
-	uuidStr := strings.TrimPrefix(r.URL.Path, "/cluster-app/")
-	if uuidStr == "" {
-		http.Error(w, "UUID is required", http.StatusBadRequest)
-		return
+	uuidStr := strings.TrimPrefix(r.URL.Path, "/cluster-app")
+	uuidStr = strings.TrimPrefix(uuidStr, "/")
+	if uuidStr != "" {
+		var err error
+		uuidStr, err = checkAppNameForUUID(ctx, uuidStr)
+		if err != nil {
+			http.Error(w, "App Name or UUID not found", http.StatusBadRequest)
+			return
+		}
 	}
 
-	uuidStr, err := checkAppNameForUUID(ctx, uuidStr)
-	if err != nil {
-		http.Error(w, "App Name or UUID not found", http.StatusBadRequest)
-		return
-	}
-
-	af := agentbase.GetApplicationInfo("/run/", "/persist/status/", uuidStr)
+	af := agentbase.GetApplicationInfo("/run/", "/persist/status/", "/persist/kubelog/", uuidStr)
 	if af.AppInfo == nil {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
