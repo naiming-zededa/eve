@@ -190,14 +190,9 @@ func doUpdate(ctx *zedmanagerContext,
 	// The existence of Config is interpreted to mean the
 	// AppInstance should be INSTALLED. Activate is checked separately.
 
-	// Skip volume install if this is  not designated node id.
-	// Volumes are replicated for non-designated node id
-	// For single node eve installs designated node id is always set
-	if config.IsDesignatedNodeID {
-		changed, done = doInstall(ctx, config, status)
-		if !done {
-			return changed
-		}
+	changed, done = doInstall(ctx, config, status)
+	if !done {
+		return changed
 	}
 
 	// Are we doing a purge?
