@@ -42,7 +42,8 @@ func handleENClusterAppStatusImpl(ctx *zedmanagerContext, key string, status *ty
 
 			activateAIStatusUUID(ctx, key)
 			// We need to modify and publish the aiStatus with NoUploadStatsToController field set.
-			//publishAppInstanceStatus(ctx, aiStatus)
+			publishAppInstanceStatus(ctx, aiStatus)
+			publishAppInstanceSummary(ctx)
 			log.Functionf("handleENClusterAppStatusImpl(%s) for app-status %v aiStatus %v", key, status, aiStatus)
 			return
 		}
@@ -52,6 +53,7 @@ func handleENClusterAppStatusImpl(ctx *zedmanagerContext, key string, status *ty
 		if aiStatus != nil {
 			// If I am not scheduled here, modify and publish the aiStatus with NoUploadStatsToController set.
 			publishAppInstanceStatus(ctx, aiStatus)
+			publishAppInstanceSummary(ctx)
 		}
 
 	}
