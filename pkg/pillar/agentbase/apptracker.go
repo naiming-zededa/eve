@@ -68,12 +68,19 @@ type OrderedAppInfoItem struct {
 	Value AppInfoItems `json:"value"`
 }
 
-type AppInternalInfo struct {
-	Hostname string               `json:"hostname"`
-	AppInfo  []OrderedAppInfoItem `json:"appInfo"`
+type AppTrackerInfo struct {
+	Hostname    string               `json:"hostname"`
+	CollectTime string               `json:"collectTime"`
+	AppInfo     []OrderedAppInfoItem `json:"appInfo"`
 }
 
-func GetApplicationInfo(rootRun, persistStatus, persistKubelog, AppUUID string) AppInternalInfo {
+// GetApplicationInfo - get Cluster and App related microservices key info from their publications.
+// this library function by given the App-UUID, it can be empty, and returns the node hostname
+// and an array of each of the publication items for debugging purpose.
+// This function can be called from 'zedkube' HTTP handler function on the live node, or
+// it can be called from offline for processing the same microservice publications in eve-info data
+// of the 'collect-info'. The publication directory locations are passed in to handle the various usages.
+func GetApplicationInfo(rootRun, persistStatus, persistKubelog, AppUUID string) AppTrackerInfo {
 	var appInfo []OrderedAppInfoItem
 	var err error
 
@@ -234,7 +241,31 @@ func GetApplicationInfo(rootRun, persistStatus, persistKubelog, AppUUID string) 
 		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
 	}
 
-	// 9) Get the AppNetworkStatus for the App, it may not exist
+	// 9) Get the AppNetworkConfig for the App from zedmanager, it may not exist
+	structName = "zedmanager-AppNetworkConfig"
+	appNetCfg := &types.AppNetworkConfig{}
+	if structName2, err = readJSONFile(rootRun, structName, AppUUID, appNetCfg); err != nil {
+		appInfo = appendFailedItem(appInfo, structName, AppUUID, err)
+	} else {
+		var assignedIPs []string
+		var appMacs []string
+		var intfName []string
+		for _, appnetst := range appNetCfg.AppNetAdapterList {
+			intfName = append(intfName, appnetst.Name)
+			appMacs = append(appMacs, appnetst.AppMacAddr.String())
+			assignedIPs = append(assignedIPs, appnetst.AppIPAddr.String())
+		}
+		ai = AppInfoItems{ // AppNetworkStatus
+			UUID:      AppUUID,
+			Name:      appNetCfg.DisplayName,
+			Exist:     true,
+			Activated: boolToTriState(appNetCfg.Activate),
+			Content:   fmt.Sprintf("App-Intf %v, App-Mac %v, App-IPs %v", intfName, appMacs, assignedIPs),
+		}
+		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
+	}
+
+	// 10) Get the AppNetworkStatus for the App, it may not exist
 	structName = "zedrouter-AppNetworkStatus"
 	appNetStatus := &types.AppNetworkStatus{}
 	if structName2, err = readJSONFile(rootRun, structName, AppUUID, appNetStatus); err != nil {
@@ -255,7 +286,7 @@ func GetApplicationInfo(rootRun, persistStatus, persistKubelog, AppUUID string) 
 		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
 	}
 
-	// 10) Get all the VolumeStatus from volumemgr, it may not exist
+	// 11) Get all the VolumeStatus from volumemgr, it may not exist
 	structName = "volumemgr-VolumeStatus"
 	for _, volumeID := range appInternal.AppVolumes {
 		volStatus := &types.VolumeStatus{}
@@ -273,7 +304,7 @@ func GetApplicationInfo(rootRun, persistStatus, persistKubelog, AppUUID string) 
 		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
 	}
 
-	// 11) Get all the ContentTreeStatus from volumemgr, it may not exist
+	// 12) Get all the ContentTreeStatus from volumemgr, it may not exist
 	structName = "volumemgr-ContentTreeStatus"
 	for _, volumeID := range appInternal.AppVolumes {
 		contentTreeStatus := &types.ContentTreeStatus{}
@@ -295,22 +326,6 @@ func GetApplicationInfo(rootRun, persistStatus, persistKubelog, AppUUID string) 
 		}
 		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
 	}
-
-	// 12) Get the DomainConfig for the App from zedmanager, it may not exist, then return here
-	structName = "zedmanager-DomainConfig"
-	domainConfig := &types.DomainConfig{}
-	if structName2, err = readJSONFile(rootRun, structName, AppUUID, domainConfig); err != nil {
-		return addHostnameAppInfo(hostname, appendFailedItem(appInfo, structName, AppUUID, err))
-	}
-	ai = AppInfoItems{ // DomainConfig
-		UUID:      AppUUID,
-		Name:      domainConfig.DisplayName,
-		Exist:     true,
-		Activated: boolToTriState(domainConfig.Activate),
-		//DNidNode: domainConfig.IsDNidNode, XXX
-		Content: fmt.Sprintf("AppNum %d, KubeImage %s", domainConfig.AppNum, domainConfig.KubeImageName),
-	}
-	appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
 
 	// 13) Get the AppNetworkConfig from zedmanager, it may not exist
 	structName = "zedmanager-AppNetworkConfig"
@@ -344,7 +359,23 @@ func GetApplicationInfo(rootRun, persistStatus, persistKubelog, AppUUID string) 
 		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
 	}
 
-	// 15) Get the DomainStatus from domainmgr, it may not exist
+	// 15) Get the DomainConfig for the App from zedmanager, it may not exist, then return here
+	structName = "zedmanager-DomainConfig"
+	domainConfig := &types.DomainConfig{}
+	if structName2, err = readJSONFile(rootRun, structName, AppUUID, domainConfig); err != nil {
+		return addHostnameAppInfo(hostname, appendFailedItem(appInfo, structName, AppUUID, err))
+	}
+	ai = AppInfoItems{ // DomainConfig
+		UUID:      AppUUID,
+		Name:      domainConfig.DisplayName,
+		Exist:     true,
+		Activated: boolToTriState(domainConfig.Activate),
+		//DNidNode: domainConfig.IsDNidNode, XXX
+		Content: fmt.Sprintf("AppNum %d, KubeImage %s", domainConfig.AppNum, domainConfig.KubeImageName),
+	}
+	appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
+
+	// 16) Get the DomainStatus from domainmgr, it may not exist
 	structName = "domainmgr-DomainStatus"
 	domainStatus := &types.DomainStatus{}
 	if structName2, err = readJSONFile(rootRun, structName, AppUUID, domainStatus); err != nil {
@@ -362,7 +393,7 @@ func GetApplicationInfo(rootRun, persistStatus, persistKubelog, AppUUID string) 
 		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
 	}
 
-	// 16) Get the DomainMetric from domainmgr, it may not exist
+	// 17) Get the DomainMetric from domainmgr, it may not exist
 	structName = "domainmgr-DomainMetric"
 	domainMetric := &types.DomainMetric{}
 	if structName2, err = readJSONFile(rootRun, structName, AppUUID, domainMetric); err != nil {
@@ -377,7 +408,7 @@ func GetApplicationInfo(rootRun, persistStatus, persistKubelog, AppUUID string) 
 		appInfo = append(appInfo, OrderedAppInfoItem{Key: structName2, Value: ai})
 	}
 
-	// 17) Get the AppDiskMetric from volumemgr, it may not exist
+	// 18) Get the AppDiskMetric from volumemgr, it may not exist
 	structName = "volumemgr-AppDiskMetric"
 	for _, volumeID := range appInternal.AppVolumes {
 		appDiskMetric := &types.AppDiskMetric{}
@@ -466,14 +497,16 @@ func appendFailedItem(appInfo []OrderedAppInfoItem, structName, UUID string, err
 	return append(appInfo, OrderedAppInfoItem{Key: structName, Value: ai})
 }
 
-func addHostnameAppInfo(hostname string, appInfo []OrderedAppInfoItem) AppInternalInfo {
-	af := AppInternalInfo{
-		Hostname: hostname,
-		AppInfo:  appInfo,
+func addHostnameAppInfo(hostname string, appInfo []OrderedAppInfoItem) AppTrackerInfo {
+	af := AppTrackerInfo{
+		Hostname:    hostname,
+		CollectTime: time.Now().UTC().Format(time.RFC3339),
+		AppInfo:     appInfo,
 	}
 	return af
 }
 
+// tail the last 10 lines of k3s-install.log file in kubelog directory
 func getTailOfK3sInstallLog(persistKubelog string) (string, error) {
 	filePath := filepath.Join(persistKubelog, "k3s-install.log")
 	file, err := os.Open(filePath)

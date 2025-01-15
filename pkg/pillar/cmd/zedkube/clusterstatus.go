@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -352,15 +353,35 @@ func clusterAppIDHandler(w http.ResponseWriter, r *http.Request, ctx *zedkubeCon
 	hosts, notClusterMode, err := getClusterNodeIPs(ctx)
 	if err == nil && !notClusterMode {
 		for _, host := range hosts {
+			client := &http.Client{
+				Timeout: 5 * time.Second, // Set a timeout of 5 seconds (adjust as needed)
+			}
 			req, err := http.NewRequest("POST", "http://"+host+":"+types.ClusterStatusPort+"/app/"+uuidStr, nil)
 			if err != nil {
 				log.Errorf("clusterAppIDHandler: %v", err)
 				continue
 			}
 
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := client.Do(req)
 			if err != nil {
-				log.Errorf("clusterAppIDHandler: %v", err)
+				if os.IsTimeout(err) {
+					errorInfo := struct {
+						Hostname string `json:"hostname"`
+						Errors   string `json:"errors"`
+					}{
+						Hostname: host,
+						Errors:   err.Error(),
+					}
+					errorJSON, jsonErr := json.MarshalIndent(errorInfo, "", "  ")
+					if jsonErr != nil {
+						log.Errorf("clusterAppIDHandler: error marshalling error info to JSON: %v", jsonErr)
+					} else {
+						// Append the error JSON to combinedJSON
+						combinedJSON = combinedJSON + "," + string(errorJSON)
+					}
+				} else {
+					log.Errorf("clusterAppIDHandler: %v", err)
+				}
 				continue
 			}
 			defer resp.Body.Close()
