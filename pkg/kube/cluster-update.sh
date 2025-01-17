@@ -148,7 +148,7 @@ Update_RunDescheduler() {
         return
     fi
     # Only run once per boot
-    if [ -f /tmp/descheduler-ran ]; then
+    if [ -f /tmp/descheduler-ran-onboot ]; then
         return
     fi
 
@@ -165,12 +165,21 @@ Update_RunDescheduler() {
     if [ "$node_count_ready" -ne 1 ]; then
         return
     fi
+    # Ensure all infrastructure pods are online on node
+    lhStatus=$(kubectl -n longhorn-system get daemonsets -o json | jq '.items[].status | .numberReady==.desiredNumberScheduled' | tr -d '\n')
+    if [ "$lhStatus" != "truetruetrue" ]; then
+        return
+    fi
+    kvStatus=$(kubectl -n kubevirt get daemonsets -o json | jq '.items[].status | .numberReady==.desiredNumberScheduled' | tr -d '\n')
+    if [ "$kvStatus" != "true" ]; then
+        return
+    fi
     # Job lives persistently in cluster, cleanup after old runs
     if kubectl -n kube-system get job/descheduler-job; then
         kubectl -n kube-system delete job/descheduler-job
     fi
     kubectl apply -f /etc/descheduler-job.yaml
-    touch /tmp/descheduler-ran
+    touch /tmp/descheduler-ran-onboot
 }
 
 update_isClusterReady() {
