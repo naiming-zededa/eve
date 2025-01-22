@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	zconfig "github.com/lf-edge/eve-api/go/config"
 	"github.com/lf-edge/eve/pkg/pillar/types"
 	"github.com/lf-edge/eve/pkg/pillar/vault"
 	"github.com/lf-edge/eve/pkg/pillar/volumehandlers"
@@ -166,6 +167,11 @@ func handleDeferredVolumeCreate(ctx *volumemgrContext, key string, config *types
 
 		if ctStatus != nil {
 			status.ReferenceName = ctStatus.ReferenceID()
+
+			// Though we created PVC from container image, we still set the format as container.
+			if ctStatus.Format == zconfig.Format_CONTAINER {
+				status.ContentFormat = ctStatus.Format
+			}
 		}
 		publishVolumeStatus(ctx, status)
 		updateVolumeRefStatus(ctx, status)
