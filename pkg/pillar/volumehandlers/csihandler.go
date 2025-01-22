@@ -246,6 +246,13 @@ func (handler *volumeHandlerCSI) Populate() (bool, error) {
 	isReplicated := handler.status.IsReplicated
 	// Kubevirt eve volumes have no location on /persist, they are PVCs
 	handler.status.FileLocation = pvcName
+	// Though we convert container image to PVC, we need to keep the image format to tell domainmgr
+	// that we are launching a container as VM.
+	if !handler.status.IsContainer() {
+		handler.status.ContentFormat = zconfig.Format_PVC
+	} else {
+		handler.status.ContentFormat = zconfig.Format_CONTAINER
+	}
 	handler.log.Noticef("Populate called for PVC %s", pvcName)
 	// A replicated volume is created on designated node, this node is supposed to be a replica volume.
 	// so wait until the replica is created. It could happen that the designated node did not even receive
