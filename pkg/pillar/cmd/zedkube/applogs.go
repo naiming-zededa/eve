@@ -173,13 +173,18 @@ func checkAppsStatus(ctx *zedkubeContext) {
 		for _, pod := range pods.Items {
 			contVMIName := "virt-launcher-" + contName
 			log.Noticef("PRAMOD checkAppsStatus: pod %s, cont %s Phase %s", pod.Name, contName, pod.Status.Phase)
-			if strings.HasPrefix(pod.Name, contName) || strings.HasPrefix(pod.Name, contVMIName) {
+			foundVMIPod := strings.HasPrefix(pod.Name, contVMIName)
+			if strings.HasPrefix(pod.Name, contName) || foundVMIPod {
 				if pod.Spec.NodeName == ctx.nodeName {
 					encAppStatus.ScheduledOnThisNode = true
 				}
 
 				if pod.Status.Phase == corev1.PodRunning {
 					encAppStatus.StatusRunning = true
+				}
+				if foundVMIPod {
+					encAppStatus.AppIsVMI = true
+					encAppStatus.AppKubeName, _ = base.GetVMINameFromVirtLauncher(pod.Name)
 				}
 				foundPod = true
 				break
