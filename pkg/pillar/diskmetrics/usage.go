@@ -29,7 +29,8 @@ func StatAllocatedBytes(path string) (uint64, error) {
 	if err != nil {
 		return uint64(0), err
 	}
-	return uint64(stat.Blocks * int64(stat.Blksize)), nil
+	// stat.Blocks is always 512-byte blocks
+	return uint64(stat.Blocks * 512), nil
 }
 
 // SizeFromDir performs a du -s equivalent operation.
@@ -82,7 +83,8 @@ func SizeFromDir(log *base.LogObject, dirname string) (uint64, error) {
 				// will be in the clear and vault volumes base directories so a lot of compute time
 				// can be saved by not checking detailed allocated bytes information in deeper
 				// directories.
-				if dirname == types.VolumeEncryptedDirName || dirname == types.VolumeClearDirName {
+				if strings.HasPrefix(dirname, types.VolumeEncryptedDirName) ||
+					strings.HasPrefix(dirname, types.VolumeClearDirName) {
 					// FileInfo.Size() returns the provisioned size
 					// Sparse files will have a smaller allocated size than provisioned
 					// Use full syscall.Stat_t to get the allocated size
