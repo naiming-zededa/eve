@@ -44,6 +44,11 @@ const (
 	// app-status or log collection, so a longer interval is acceptable.
 	kubeStatsInterval = 30
 	kubeCfgInterval   = 60
+	// kubeAppNetInterval : how often this node re-derives the synthesized AppNetworkConfig
+	// for directly-deployed Kubernetes workloads scheduled here (seconds). Kept short so a
+	// newly scheduled pod's networking is published promptly; the CNI plugin's own retries
+	// cover the interval until the config lands.
+	kubeAppNetInterval = 10
 	// pruneStaleMasterInterval: how often the elected leader re-evaluates the
 	// k8s control-plane Node list against EdgeNodeClusterConfig.MasterNodeIDs
 	// (seconds). Acts as a safety net for the event-driven sweep so transient
@@ -76,6 +81,8 @@ type zedkube struct {
 	agentbase.AgentBase
 	globalConfig             *types.ConfigItemValueMap
 	subAppInstanceConfig     pubsub.Subscription
+	subAppNetworkStatus      pubsub.Subscription
+	subNetworkInstanceStatus pubsub.Subscription
 	subAssignableAdapters    pubsub.Subscription
 	subGlobalConfig          pubsub.Subscription
 	subDeviceNetworkStatus   pubsub.Subscription
@@ -99,6 +106,9 @@ type zedkube struct {
 	pubNodeDrainStatus     pubsub.Publication
 
 	pubKubeConfig pubsub.Publication
+
+	// AppNetworkConfig synthesized for directly-deployed Kubernetes workloads on this node.
+	pubKubeAppNetworkConfig pubsub.Publication
 
 	networkInstanceStatusMap   sync.Map
 	ioAdapterMap               sync.Map
@@ -330,6 +340,47 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	zedkubeCtx.subAppInstanceConfig = subAppInstanceConfig
 	subAppInstanceConfig.Activate()
 
+	// Get NetworkInstanceStatus from zedrouter so we can provision one
+	// NetworkAttachmentDefinition per NI ("ni-<uuid>" in the eve-kube-app
+	// namespace). Directly-deployed Kubernetes workloads reference it
+	// cross-namespace to attach to an existing EVE Network Instance.
+	subNetworkInstanceStatus, err := ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:     "zedrouter",
+		MyAgentName:   agentName,
+		TopicImpl:     types.NetworkInstanceStatus{},
+		Activate:      false,
+		Ctx:           &zedkubeCtx,
+		CreateHandler: handleNetworkInstanceStatusCreate,
+		ModifyHandler: handleNetworkInstanceStatusModify,
+		DeleteHandler: handleNetworkInstanceStatusDelete,
+		WarningTime:   warningTime,
+		ErrorTime:     errorTime,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	zedkubeCtx.subNetworkInstanceStatus = subNetworkInstanceStatus
+	subNetworkInstanceStatus.Activate()
+
+	// Get zedrouter-authoritative MAC/IP allocations for directly-deployed
+	// Kubernetes workloads. No event handlers are needed: ProcessChange keeps
+	// the subscription snapshot current and the bounded native-app timer
+	// reconciles that snapshot into per-NI ConfigMaps and CoreDNS.
+	subAppNetworkStatus, err := ps.NewSubscription(pubsub.SubscriptionOptions{
+		AgentName:   "zedrouter",
+		MyAgentName: agentName,
+		TopicImpl:   types.AppNetworkStatus{},
+		Activate:    false,
+		Ctx:         &zedkubeCtx,
+		WarningTime: warningTime,
+		ErrorTime:   errorTime,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	zedkubeCtx.subAppNetworkStatus = subAppNetworkStatus
+	subAppNetworkStatus.Activate()
+
 	// Look for controller certs which will be used for decryption.
 	subControllerCert, err := ps.NewSubscription(pubsub.SubscriptionOptions{
 		AgentName:   "zedagent",
@@ -430,6 +481,17 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		log.Fatal(err)
 	}
 	zedkubeCtx.pubKubeConfig = pubKubeConfig
+
+	// AppNetworkConfig synthesized for directly-deployed Kubernetes workloads, consumed by
+	// zedrouter (subKubeAppNetworkConfig) through its normal app-network pipeline.
+	pubKubeAppNetworkConfig, err := ps.NewPublication(pubsub.PublicationOptions{
+		AgentName: agentName,
+		TopicType: types.AppNetworkConfig{},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	zedkubeCtx.pubKubeAppNetworkConfig = pubKubeAppNetworkConfig
 
 	// Look for global config such as log levels
 	subGlobalConfig, err := ps.NewSubscription(pubsub.SubscriptionOptions{
@@ -717,12 +779,17 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 	kubeStatsTimer := time.NewTimer(kubeStatsInterval * time.Second)
 	kubeCfgTimer := time.NewTimer(kubeCfgInterval * time.Second)
 	pruneStaleMasterTimer := time.NewTimer(pruneStaleMasterInterval * time.Second)
+	kubeAppNetTimer := time.NewTimer(kubeAppNetInterval * time.Second)
 
 	zedkubeWdUpdate := func() {
 		ps.StillRunning(agentName, warningTime, errorTime)
 	}
 
 	log.Notice("zedkube online")
+
+	// Tracks the stats-leadership edge so the per-NI NAD sweep runs once on
+	// leader->true, covering NIs whose status was processed before the lease was won.
+	nadWasLeader := false
 
 	for {
 		select {
@@ -731,6 +798,12 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 
 		case change := <-subAppInstanceConfig.MsgChan():
 			subAppInstanceConfig.ProcessChange(change)
+
+		case change := <-subNetworkInstanceStatus.MsgChan():
+			subNetworkInstanceStatus.ProcessChange(change)
+
+		case change := <-subAppNetworkStatus.MsgChan():
+			subAppNetworkStatus.ProcessChange(change)
 
 		case change := <-subAssignableAdapters.MsgChan():
 			subAssignableAdapters.ProcessChange(change)
@@ -760,6 +833,13 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 			zedkubeCtx.collectKubeStats()
 			zedkubeWdUpdate()
 			zedkubeCtx.collectKubeSvcs()
+			// On the leader->true edge, ensure a NAD exists for every known NI
+			// (handlers only fire for NIs that change after the lease is won).
+			isLeader := zedkubeCtx.isKubeStatsLeader.Load()
+			if isLeader && !nadWasLeader {
+				zedkubeCtx.reconcileAllNINADs()
+			}
+			nadWasLeader = isLeader
 			kubeStatsTimer = time.NewTimer(kubeStatsInterval * time.Second)
 
 		// Timer 4: cluster-wide component config application
@@ -799,6 +879,14 @@ func Run(ps *pubsub.PubSub, loggerArg *logrus.Logger, logArg *base.LogObject, ar
 		case <-pruneStaleMasterTimer.C:
 			zedkubeCtx.pruneStaleMasterNodes(&zedkubeCtx.clusterConfig)
 			pruneStaleMasterTimer = time.NewTimer(pruneStaleMasterInterval * time.Second)
+
+		// Timer 6: synthesize AppNetworkConfig for directly-deployed Kubernetes workloads
+		// scheduled on this node (per-node, not leader-gated).
+		case <-kubeAppNetTimer.C:
+			zedkubeCtx.reconcileKubeAppNetworks()
+			zedkubeCtx.reconcileKubeAppDNS()
+			zedkubeWdUpdate()
+			kubeAppNetTimer = time.NewTimer(kubeAppNetInterval * time.Second)
 
 		case change := <-subGlobalConfig.MsgChan():
 			subGlobalConfig.ProcessChange(change)

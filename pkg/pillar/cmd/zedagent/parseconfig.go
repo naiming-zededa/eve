@@ -533,6 +533,7 @@ func publishNetworkInstanceConfig(ctx *getconfigContext,
 				PortsWithBpduGuard: apiConfigEntry.GetStp().GetPortsWithBpduGuard(),
 			},
 			ForwardLLDP: apiConfigEntry.ForwardLldp,
+			ClusterWide: apiConfigEntry.ClusterWide,
 		}
 		uuidStr := networkInstanceConfig.UUID.String()
 		log.Functionf("publishNetworkInstanceConfig: processing %s %s type %d activate %v",
@@ -3801,6 +3802,18 @@ func parseEdgeNodeClusterConfig(getconfigCtx *getconfigContext,
 
 		ClusterType:                  types.ClusterType(zcfgCluster.ClusterType),
 		EnableNativeK8SOrchestration: zcfgCluster.GetEnableNativeK8SOrchestration(),
+	}
+
+	// HACK(testing): exercise native Kubernetes orchestration on ENC clusters
+	// before the controller supplies enable_native_k8s_orchestration. Legacy
+	// K3S_BASE configs are first remapped to the replicated-storage stack; both
+	// forms are then explicitly enabled. Remove this override once the controller
+	// sends CLUSTER_TYPE_REPLICATED_STORAGE with the flag set for these devices.
+	if enClusterConfig.ClusterType == types.ClusterTypeK3sBase {
+		enClusterConfig.ClusterType = types.ClusterTypeReplicatedStorage
+	}
+	if enClusterConfig.ClusterType == types.ClusterTypeReplicatedStorage {
+		enClusterConfig.EnableNativeK8SOrchestration = true
 	}
 
 	enClusterConfig.CipherToken, err = parseCipherBlock(getconfigCtx,

@@ -2768,10 +2768,9 @@ func TestForgetConfigHashOnLeavingMaintenanceMode(t *testing.T) {
 	}
 }
 
-// TestParseEdgeNodeClusterLB verifies that the LoadBalancerService is parsed
-// into EdgeNodeClusterConfig.LBInterfaces exactly when native k8s orchestration
-// is enabled: always for K3S_BASE, and for REPLICATED_STORAGE only when the
-// enable_native_k8s_orchestration flag is set.
+// TestParseEdgeNodeClusterLB verifies that the temporary native-Kubernetes test
+// override remaps K3S_BASE to REPLICATED_STORAGE and enables native orchestration
+// for replicated-storage clusters even before the controller supplies the flag.
 func TestParseEdgeNodeClusterLB(t *testing.T) {
 	g := NewGomegaWithT(t)
 	getconfigCtx, allPubs := newFuzzGetConfigCtx(t)
@@ -2787,11 +2786,18 @@ func TestParseEdgeNodeClusterLB(t *testing.T) {
 		name        string
 		clusterType zconfig.ClusterType
 		flag        bool
+		wantType    types.ClusterType
+		wantFlag    bool
 		wantLB      bool
 	}{
-		{"k3s-base populates LB", zconfig.ClusterType_CLUSTER_TYPE_K3S_BASE, false, true},
-		{"replicated-storage without flag drops LB", zconfig.ClusterType_CLUSTER_TYPE_REPLICATED_STORAGE, false, false},
-		{"replicated-storage with flag populates LB", zconfig.ClusterType_CLUSTER_TYPE_REPLICATED_STORAGE, true, true},
+		{"k3s-base is remapped and populates LB", zconfig.ClusterType_CLUSTER_TYPE_K3S_BASE,
+			false, types.ClusterTypeReplicatedStorage, true, true},
+		{"replicated-storage without controller flag is forced on",
+			zconfig.ClusterType_CLUSTER_TYPE_REPLICATED_STORAGE,
+			false, types.ClusterTypeReplicatedStorage, true, true},
+		{"replicated-storage with flag populates LB",
+			zconfig.ClusterType_CLUSTER_TYPE_REPLICATED_STORAGE,
+			true, types.ClusterTypeReplicatedStorage, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2812,7 +2818,8 @@ func TestParseEdgeNodeClusterLB(t *testing.T) {
 			g.Expect(err).ToNot(HaveOccurred())
 			cfg := item.(types.EdgeNodeClusterConfig)
 			g.Expect(cfg.Valid).To(BeTrue())
-			g.Expect(cfg.EnableNativeK8SOrchestration).To(Equal(tc.flag))
+			g.Expect(cfg.ClusterType).To(Equal(tc.wantType))
+			g.Expect(cfg.EnableNativeK8SOrchestration).To(Equal(tc.wantFlag))
 			if tc.wantLB {
 				g.Expect(cfg.LBInterfaces).To(HaveLen(1))
 				g.Expect(cfg.LBInterfaces[0].Interface).To(Equal("eth1"))
@@ -2820,6 +2827,40 @@ func TestParseEdgeNodeClusterLB(t *testing.T) {
 			} else {
 				g.Expect(cfg.LBInterfaces).To(BeEmpty())
 			}
+		})
+	}
+}
+
+// TestParseNetworkInstanceClusterWide verifies that NetworkInstanceConfig.ClusterWide
+// is parsed straight through from the controller's cluster_wide field.
+func TestParseNetworkInstanceClusterWide(t *testing.T) {
+	g := NewGomegaWithT(t)
+	getconfigCtx, allPubs := newFuzzGetConfigCtx(t)
+
+	cases := []struct {
+		name        string
+		clusterWide bool
+	}{
+		{"cluster-wide NI", true},
+		{"device-local NI", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFuzzState(getconfigCtx, allPubs)
+			const niUUID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+			publishNetworkInstanceConfig(getconfigCtx, []*zconfig.NetworkInstanceConfig{
+				{
+					Uuidandversion: &zconfig.UUIDandVersion{Uuid: niUUID, Version: "1"},
+					Displayname:    tc.name,
+					InstType:       zconfig.ZNetworkInstType_ZnetInstSwitch,
+					ClusterWide:    tc.clusterWide,
+				},
+			})
+
+			item, err := getconfigCtx.pubNetworkInstanceConfig.Get(niUUID)
+			g.Expect(err).ToNot(HaveOccurred())
+			cfg := item.(types.NetworkInstanceConfig)
+			g.Expect(cfg.ClusterWide).To(Equal(tc.clusterWide))
 		})
 	}
 }
